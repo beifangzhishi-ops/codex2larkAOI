@@ -1,0 +1,14 @@
+{
+  "name": "codex-feishu-cli-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge Feishu CLI message events to Codex CLI sessions.",
+  "scripts": {
+    "start": "node src/bridge.js",
+    "check": "node --check src/bridge.js && node --test --test-isolation=none"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
