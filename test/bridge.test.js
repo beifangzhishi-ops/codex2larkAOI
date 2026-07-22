@@ -11,7 +11,10 @@ import {
   isMarkdownValidationError,
   normalizeEvent,
   parseControlCommand,
+  parsePendingWorkdirReply,
   parseDotEnv,
+  reactionArgs,
+  reactionIdFromOutput,
   resolveWorkdirQuery,
   splitReply,
   watchForStopRequest,
@@ -65,17 +68,30 @@ test("parseControlCommand recognizes control and natural-language commands", () 
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
 });
 
-test("resolveWorkdirQuery fuzzy matches first-level directories and rejects outside paths", () => {
-  const root = mkdtempSync(join(tmpdir(), "codex2lark-root-"));
+test("resolveWorkdirQuery prioritizes first-level names and accepts arbitrary paths", () => {
+  const parent = mkdtempSync(join(tmpdir(), "codex2lark-root-"));
+  const root = join(parent, "AAAVitalFile");
+  const outside = join(parent, "ExternalProject");
   try {
+    mkdirSync(root);
     mkdirSync(join(root, "BubbleDynamics"));
     mkdirSync(join(root, "Other"));
+    mkdirSync(outside);
     assert.equal(resolveWorkdirQuery("bubble", root).path, resolve(root, "BubbleDynamics"));
-    assert.match(resolveWorkdirQuery("missing", root).error, /找不到/);
-    assert.match(resolveWorkdirQuery(resolve(root, ".."), root).error, /找不到/);
+    assert.equal(resolveWorkdirQuery(outside, root).path, resolve(outside));
+    assert.equal(resolveWorkdirQuery(join("..", "ExternalProject"), root).path, resolve(outside));
+    assert.equal(resolveWorkdirQuery("missing", root).needsPath, true);
+    assert.match(resolveWorkdirQuery(join(parent, "does-not-exist"), root).error, /不存在/);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("parsePendingWorkdirReply accepts a direct absolute-path answer only while waiting", () => {
+  const directory = resolve(tmpdir());
+  assert.deepEqual(parsePendingWorkdirReply(`"${directory}"`, "missing"), { type: "cd", query: directory });
+  assert.equal(parsePendingWorkdirReply(directory, ""), null);
+  assert.equal(parsePendingWorkdirReply("继续处理任务", "missing"), null);
 });
 
 test("extractFileDirectives removes native-delivery markers", () => {
@@ -133,6 +149,16 @@ test("idempotency keys leave room for fallback suffixes", () => {
   assert.equal(`${key}-text`.length, 49);
 });
 
+test("reaction helpers build lark-cli calls and parse both output envelopes", () => {
+  const create = reactionArgs("create", "om_1", "Typing");
+  assert.deepEqual(create.slice(0, 7), ["im", "reactions", "create", "--as", "bot", "--message-id", "om_1"]);
+  assert.deepEqual(JSON.parse(create.at(-1)), { reaction_type: { emoji_type: "Typing" } });
+  assert.deepEqual(reactionArgs("delete", "om_1", "reaction_1").slice(-4),
+    ["--message-id", "om_1", "--reaction-id", "reaction_1"]);
+  assert.equal(reactionIdFromOutput('{"reaction_id":"direct"}'), "direct");
+  assert.equal(reactionIdFromOutput('{"data":{"reaction_id":"wrapped"}}'), "wrapped");
+});
+
 test("buildConfig validates and exposes approval defaults", () => {
   const config = buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
@@ -141,6 +167,12 @@ test("buildConfig validates and exposes approval defaults", () => {
   });
   assert.equal(config.defaultApprovalMode, "manual");
   assert.equal(config.rootDir, process.cwd());
+  assert.equal(config.reactions, true);
+  assert.equal(buildConfig({
+    FEISHU_ALLOWED_OPEN_IDS: "ou_test",
+    CODEX_WORKDIR: process.cwd(),
+    FEISHU_REACTIONS: "false",
+  }).reactions, false);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "*" }), /不允许通配符/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_APPROVAL_MODE: "sometimes" }), /auto 或 manual/);
 });

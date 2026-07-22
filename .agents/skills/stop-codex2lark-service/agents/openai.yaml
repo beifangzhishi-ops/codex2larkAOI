@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stop codex2lark Service"
+  short_description: "Stop one bridge without affecting other event consumers"
+  default_prompt: "Use $stop-codex2lark-service to stop one codex2lark instance and verify event-bus isolation."

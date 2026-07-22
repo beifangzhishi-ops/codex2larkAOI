@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexAppServer } from "./codex-app-server.js";
 
@@ -108,18 +108,23 @@ export function parseControlCommand(text) {
   return null;
 }
 
-function isInside(root, path) {
-  const rel = relative(root, path);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+export function parsePendingWorkdirReply(text, waitingForPath) {
+  if (!waitingForPath) return null;
+  const query = String(text || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!query || !isAbsolute(query)) return null;
+  return { type: "cd", query };
 }
 
 export function resolveWorkdirQuery(query, rootDir) {
   const root = resolve(rootDir);
   const trimmed = query.trim().replace(/^['"]|['"]$/g, "");
   if (!trimmed) return { error: "请提供项目名或目录路径。" };
-  const candidate = resolve(isAbsolute(trimmed) ? trimmed : resolve(root, trimmed));
-  if (isInside(root, candidate) && existsSync(candidate) && statSync(candidate).isDirectory()) {
+  const candidate = resolve(root, trimmed);
+  if (existsSync(candidate) && statSync(candidate).isDirectory()) {
     return { path: candidate };
+  }
+  if (isAbsolute(trimmed)) {
+    return { error: `目录不存在或不是文件夹：${candidate}`, needsPath: true };
   }
 
   const needle = trimmed.toLocaleLowerCase();
@@ -134,7 +139,10 @@ export function resolveWorkdirQuery(query, rootDir) {
   });
   if (matches.length === 1) return { path: resolve(root, matches[0]) };
   if (matches.length > 1) return { error: `匹配到多个项目：${matches.join("、")}` };
-  return { error: `在 ${root} 的第一层目录中找不到“${trimmed}”。` };
+  return {
+    error: `在 ${root} 的第一层目录中找不到“${trimmed}”。请发送该文件夹的绝对路径。`,
+    needsPath: true,
+  };
 }
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
@@ -269,10 +277,11 @@ function loadState() {
       sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
       workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
       approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
+      pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
       events: Array.isArray(value.events) ? value.events : [],
     };
   } catch {
-    return { sessions: {}, workdirs: {}, approvalModes: {}, events: [] };
+    return { sessions: {}, workdirs: {}, approvalModes: {}, pendingWorkdirQueries: {}, events: [] };
   }
 }
 
@@ -316,6 +325,7 @@ export function buildConfig(env) {
     allowedIds,
     rootDir,
     allowGroups: String(env.FEISHU_ALLOW_GROUPS).toLowerCase() === "true",
+    reactions: !["false", "0", "no"].includes(String(env.FEISHU_REACTIONS ?? "true").trim().toLowerCase()),
     model: env.CODEX_MODEL?.trim() || "",
     defaultApprovalMode,
     timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 1_800_000,
@@ -354,6 +364,55 @@ export async function sendReply(messageId, eventKey, text, config) {
       console.warn(`[bridge] markdown rejected for ${messageId}; retrying as plain text`);
       await run("lark-cli", [...common, "--text", chunks[index], "--idempotency-key", `${key}-text`]);
     }
+  }
+}
+
+export function reactionArgs(action, messageId, value) {
+  if (action === "create") {
+    return [
+      "im", "reactions", "create", "--as", "bot", "--message-id", messageId,
+      "--data", JSON.stringify({ reaction_type: { emoji_type: value } }),
+    ];
+  }
+  if (action === "delete") {
+    return ["im", "reactions", "delete", "--as", "bot", "--message-id", messageId, "--reaction-id", value];
+  }
+  throw new Error(`不支持的消息表情操作：${action}`);
+}
+
+export function reactionIdFromOutput(text) {
+  const result = JSON.parse(text);
+  return String(result.reaction_id || result.data?.reaction_id || "");
+}
+
+async function addReaction(messageId, emojiType) {
+  const { stdout } = await run("lark-cli", reactionArgs("create", messageId, emojiType));
+  return reactionIdFromOutput(stdout);
+}
+
+async function beginProcessingReaction(messageId, config) {
+  if (!config.reactions) return "";
+  try {
+    return await addReaction(messageId, "Typing");
+  } catch (error) {
+    console.warn(`[bridge] cannot add Typing reaction to ${messageId}: ${error.message}`);
+    return "";
+  }
+}
+
+async function finishProcessingReaction(messageId, reactionId, succeeded, config) {
+  if (!config.reactions || !reactionId) return;
+  try {
+    await run("lark-cli", reactionArgs("delete", messageId, reactionId));
+  } catch (error) {
+    console.warn(`[bridge] cannot remove Typing reaction from ${messageId}: ${error.message}`);
+    return;
+  }
+  if (succeeded) return;
+  try {
+    await addReaction(messageId, "CrossMark");
+  } catch (error) {
+    console.warn(`[bridge] cannot add CrossMark reaction to ${messageId}: ${error.message}`);
   }
 }
 
@@ -411,8 +470,13 @@ class BridgeRuntime {
 
   cwdFor(chatId) {
     const stored = this.state.workdirs[chatId];
-    return stored && isInside(this.config.rootDir, resolve(stored)) && existsSync(stored)
-      ? resolve(stored) : this.config.rootDir;
+    if (!stored) return this.config.rootDir;
+    const candidate = resolve(stored);
+    try {
+      return existsSync(candidate) && statSync(candidate).isDirectory() ? candidate : this.config.rootDir;
+    } catch {
+      return this.config.rootDir;
+    }
   }
 
   enqueue(event, command) {
@@ -456,8 +520,13 @@ class BridgeRuntime {
   }
 
   async #processQueued(event, command) {
+    command ||= parsePendingWorkdirReply(
+      event.content,
+      this.state.pendingWorkdirQueries[event.chatId],
+    );
     if (command?.type === "new") {
       delete this.state.sessions[event.chatId];
+      delete this.state.pendingWorkdirQueries[event.chatId];
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-new`, "已新建 Codex 会话；当前项目目录保持不变。", this.config);
       return;
@@ -469,16 +538,20 @@ class BridgeRuntime {
     }
     if (command?.type === "help") {
       await sendReply(event.messageId, `${event.eventId}-help`,
-        "直接发送任务即可。\n\n`/cd 项目名` 切换工作目录\n`/new` 新建会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
+        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
       return;
     }
     if (command?.type === "cd") {
+      delete this.state.pendingWorkdirQueries[event.chatId];
       const result = resolveWorkdirQuery(command.query, this.config.rootDir);
       if (result.error) {
+        if (result.needsPath) this.state.pendingWorkdirQueries[event.chatId] = command.query;
+        saveState(this.state);
         await sendReply(event.messageId, `${event.eventId}-cd`, result.error, this.config);
         return;
       }
       this.state.workdirs[event.chatId] = result.path;
+      delete this.state.pendingWorkdirQueries[event.chatId];
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-cd`, `已切换工作目录：${result.path}\n后续轮次会在该目录执行，会话上下文保留。`, this.config);
       return;
@@ -490,15 +563,20 @@ class BridgeRuntime {
       return;
     }
 
+    const processingReactionId = await beginProcessingReaction(event.messageId, this.config);
+    let succeeded = false;
     try {
       const answer = await this.#runTurn(event);
       const delivery = extractFileDirectives(answer || "", { cwd: this.cwdFor(event.chatId) });
       if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
       else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
       await this.#deliverFiles(event, delivery.files);
+      succeeded = true;
     } catch (error) {
       console.error(error);
       await sendReply(event.messageId, `${event.eventId}-error`, `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
+    } finally {
+      await finishProcessingReaction(event.messageId, processingReactionId, succeeded, this.config);
     }
   }
 

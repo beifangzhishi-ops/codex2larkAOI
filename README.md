@@ -26,7 +26,7 @@ lark-cli auth login --recommend
 lark-cli auth status
 ```
 
-在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息和上传文件所需权限。
+在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件和添加/删除消息表情所需权限。
 
 复制模板并填写配置：
 
@@ -37,11 +37,12 @@ notepad .env
 
 关键配置：
 
-- `CODEX_WORKDIR`：项目总目录。`/cd` 只在该目录及其第一层项目中定位；
+- `CODEX_WORKDIR`：默认目录和项目名搜索根目录；项目名优先模糊匹配其第一层目录，也可切换到任意现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
-- `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊。
+- `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
+- `FEISHU_REACTIONS=true`：执行普通 Codex 任务时显示消息表情状态。
 
 开发版与稳定版必须使用不同的飞书 App 和不同的 `LARKSUITE_CLI_CONFIG_DIR`，不能共同消费同一个 App 的事件流。
 
@@ -62,8 +63,9 @@ npm run check
 
 ## 飞书控制
 
-- `/cd 项目名`：不区分大小写地模糊匹配 `CODEX_WORKDIR` 第一层目录；也接受根目录内绝对路径；
+- `/cd 项目名或路径`：项目名不区分大小写地优先模糊匹配 `CODEX_WORKDIR` 第一层目录，也接受任意现有文件夹的绝对或相对路径；
 - `切换到 X 项目`：`/cd X` 的自然语言形式；
+- 第一层未找到项目时，机器人会询问位置；下一条可直接回复该文件夹的绝对路径；
 - `/new`：清除当前聊天的 Codex thread，保留工作目录和审批模式；
 - `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
 - `/approval auto`：自动审批后续操作，仍受工作区沙箱限制；
@@ -77,6 +79,8 @@ npm run check
 也可发送“改为自动审批”“改为手动审批”“同意执行”“拒绝执行”“停止当前操作”。自然语言控制只匹配短而明确的命令，普通讨论不会被截获。
 
 ## 过程消息
+
+普通 Codex 任务开始执行时，桥接会在用户原消息上添加 `Typing` 表情；成功回复后移除，失败时替换为 `CrossMark`。表情接口异常只记录日志，不中断 Codex 任务。
 
 桥接会实时发送：
 
@@ -105,6 +109,7 @@ MEDIA:C:\absolute\path\plot.png
 
 - `sessions`：聊天到 Codex thread；
 - `workdirs`：聊天到当前项目目录；
+- `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `events`：事件去重窗口。
 
