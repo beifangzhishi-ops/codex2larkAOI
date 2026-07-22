@@ -67,8 +67,9 @@ npm run check
 - `切换到 X 项目`：`/cd X` 的自然语言形式；
 - 第一层未找到项目时，机器人会询问位置；下一条可直接回复该文件夹的绝对路径；
 - `/new`：清除当前聊天的 Codex thread，保留工作目录和审批模式；
-- `/resume`：列出当前工作目录最近的 10 个 Codex 历史会话（包括 App Server、CLI 和 IDE 会话）；
-- `/resume 编号|thread-id|标题`：继续列表中的历史会话并将当前飞书聊天绑定到该 thread；标题必须唯一匹配；
+- `/resume`：分页列出所有工作目录中未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话），并显示各自目录；
+- `/resume 编号|thread-id|标题`：继续列表中的历史会话，将当前飞书聊天绑定到该 thread，并切换到其工作目录；标题必须唯一匹配；
+- 新建 Codex 会话的首轮开始后，桥接会根据首条用户消息自动设置简短标题；
 - `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
 - `/approval auto`：自动审批后续操作，仍受工作区沙箱限制；
 - `/approval manual`：把审批请求发到飞书；

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   buildConfig,
+  createThreadTitle,
   extractFileDirectives,
   formatResumeThreads,
   formatThreadItem,
@@ -74,19 +75,27 @@ test("parseControlCommand recognizes control and natural-language commands", () 
 
 test("resume helpers format and select history without ambiguous title guesses", () => {
   const threads = [
-    { id: "thr_1", name: "Fix tests", updatedAt: 1_750_000_000 },
-    { id: "thr_2", preview: "Review API tests", createdAt: 1_740_000_000 },
-    { id: "thr_3", name: "Fix tests follow-up", updatedAt: 1_730_000_000 },
+    { id: "thr_1", name: "Fix tests", cwd: "C:\\work\\one", updatedAt: 1_750_000_000 },
+    { id: "thr_2", preview: "Review API tests", cwd: "C:\\work\\two", createdAt: 1_740_000_000 },
+    { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", updatedAt: 1_730_000_000 },
   ];
   const output = formatResumeThreads(threads, "thr_1");
   assert.match(output, /1\. Fix tests \[当前\]/);
   assert.match(output, /thr_2/);
+  assert.match(output, /C:\\work\\two/);
   assert.deepEqual(selectResumeThread(threads, "2").thread, threads[1]);
   assert.deepEqual(selectResumeThread(threads, "thr_3").thread, threads[2]);
   assert.deepEqual(selectResumeThread(threads, "Review API").thread, threads[1]);
   assert.match(selectResumeThread(threads, "Fix").error, /多个会话/);
   assert.match(selectResumeThread(threads, "9").error, /超出范围/);
   assert.match(formatResumeThreads([], ""), /没有可恢复/);
+});
+
+test("createThreadTitle summarizes the first prompt without another model call", () => {
+  assert.equal(createThreadTitle("  修复登录超时问题。 然后补充测试  "), "修复登录超时问题。");
+  assert.equal(createThreadTitle("Review   the API tests"), "Review the API tests");
+  assert.equal(createThreadTitle("x".repeat(60)), `${"x".repeat(45)}...`);
+  assert.equal(createThreadTitle(""), "新会话");
 });
 
 test("resolveWorkdirQuery prioritizes first-level names and accepts arbitrary paths", () => {

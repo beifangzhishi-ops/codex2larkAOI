@@ -127,13 +127,37 @@ function threadTimestamp(thread) {
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
+function threadCwd(thread) {
+  return String(thread?.cwd || "目录未知").trim() || "目录未知";
+}
+
+function availableThreadCwd(thread) {
+  const cwd = threadCwd(thread);
+  if (cwd === "目录未知") return "";
+  try {
+    return existsSync(cwd) && statSync(cwd).isDirectory() ? resolve(cwd) : "";
+  } catch {
+    return "";
+  }
+}
+
+export function createThreadTitle(text, maxChars = 48) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "新会话";
+  const chars = Array.from(normalized);
+  const punctuation = chars.findIndex((char) => "。！？!?".includes(char));
+  const summary = punctuation >= 5 && punctuation < maxChars ? chars.slice(0, punctuation + 1) : chars;
+  if (summary.length <= maxChars) return summary.join("");
+  return `${summary.slice(0, Math.max(1, maxChars - 3)).join("")}...`;
+}
+
 export function formatResumeThreads(threads, currentThreadId = "") {
-  if (!threads.length) return "当前工作目录没有可恢复的历史会话。";
+  if (!threads.length) return "没有可恢复的历史会话。";
   const rows = threads.map((thread, index) => {
     const current = thread.id === currentThreadId ? " [当前]" : "";
-    return `${index + 1}. ${threadLabel(thread)}${current}\n   ${threadTimestamp(thread)} | ${thread.id}`;
+    return `${index + 1}. ${threadLabel(thread)}${current}\n   ${threadTimestamp(thread)} | ${threadCwd(thread)}\n   ${thread.id}`;
   });
-  return `当前工作目录的历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\`、\`/resume thread-id\` 或 \`/resume 标题\` 继续。`;
+  return `所有工作目录的历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\`、\`/resume thread-id\` 或 \`/resume 标题\` 继续。`;
 }
 
 export function selectResumeThread(threads, query) {
@@ -586,7 +610,7 @@ class BridgeRuntime {
     }
     if (command?.type === "help") {
       await sendReply(event.messageId, `${event.eventId}-help`,
-        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/resume [编号|thread-id|标题]` 浏览或继续当前目录的历史会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
+        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/resume [编号|thread-id|标题]` 浏览或继续所有工作目录的历史会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
       return;
     }
     if (command?.type === "resume") {
@@ -638,8 +662,7 @@ class BridgeRuntime {
     }
   }
 
-  #threadOptions(chatId) {
-    const cwd = this.cwdFor(chatId);
+  #threadOptions(chatId, cwd = this.cwdFor(chatId)) {
     return {
       cwd,
       approvalPolicy: approvalPolicy(this.modeFor(chatId)),
@@ -650,15 +673,24 @@ class BridgeRuntime {
   }
 
   async #listResumeThreads(chatId) {
-    const result = await this.client.request("thread/list", {
-      cwd: this.cwdFor(chatId),
-      limit: 10,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      archived: false,
-      sourceKinds: ["appServer", "cli", "vscode"],
-    });
-    const threads = Array.isArray(result?.data) ? result.data : [];
+    const threads = [];
+    const seenCursors = new Set();
+    let cursor;
+    do {
+      const result = await this.client.request("thread/list", {
+        ...(cursor ? { cursor } : {}),
+        limit: 100,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        archived: false,
+        sourceKinds: ["appServer", "cli", "vscode"],
+      });
+      if (Array.isArray(result?.data)) threads.push(...result.data);
+      const nextCursor = typeof result?.nextCursor === "string" ? result.nextCursor : "";
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    } while (cursor);
     this.resumeCandidates.set(chatId, threads);
     return threads;
   }
@@ -689,15 +721,20 @@ class BridgeRuntime {
         "该会话正在执行其他任务，暂时不能切换。", this.config);
       return;
     }
+    const selectedCwd = availableThreadCwd(selected.thread);
     if (!this.loadedThreads.has(threadId)) {
-      await this.client.request("thread/resume", { threadId, ...this.#threadOptions(event.chatId) });
+      await this.client.request("thread/resume", {
+        threadId,
+        ...this.#threadOptions(event.chatId, selectedCwd || this.cwdFor(event.chatId)),
+      });
       this.loadedThreads.add(threadId);
     }
     this.state.sessions[event.chatId] = threadId;
+    if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
     this.resumeCandidates.delete(event.chatId);
     saveState(this.state);
     await sendReply(event.messageId, `${event.eventId}-resume-done`,
-      `已继续历史会话：${threadLabel(selected.thread)}\n${threadId}`, this.config);
+      `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}\n${threadId}`, this.config);
   }
 
   async #deliverFiles(event, files) {
@@ -713,6 +750,7 @@ class BridgeRuntime {
 
   async #ensureThread(chatId) {
     let threadId = this.state.sessions[chatId];
+    let isNew = false;
     const common = this.#threadOptions(chatId);
     if (threadId && !this.loadedThreads.has(threadId)) {
       try {
@@ -729,14 +767,15 @@ class BridgeRuntime {
       this.state.sessions[chatId] = threadId;
       this.loadedThreads.add(threadId);
       saveState(this.state);
+      isNew = true;
     }
-    return threadId;
+    return { threadId, isNew };
   }
 
   async #runTurn(event) {
     const cwd = this.cwdFor(event.chatId);
     const mode = this.modeFor(event.chatId);
-    const threadId = await this.#ensureThread(event.chatId);
+    const { threadId, isNew } = await this.#ensureThread(event.chatId);
     let resolveDone;
     let rejectDone;
     const done = new Promise((resolvePromise, rejectPromise) => {
@@ -760,6 +799,16 @@ class BridgeRuntime {
         ...(this.config.model ? { model: this.config.model } : {}),
       });
       active.turnId = result.turn.id;
+      if (isNew) {
+        try {
+          await this.client.request("thread/name/set", {
+            threadId,
+            name: createThreadTitle(event.content),
+          });
+        } catch (error) {
+          console.warn(`[codex] cannot name new thread ${threadId}: ${error.message}`);
+        }
+      }
       const timeout = setTimeout(() => rejectDone(new Error(`Codex turn timed out after ${this.config.timeoutMs} ms`)), this.config.timeoutMs);
       try {
         const completion = await done;
