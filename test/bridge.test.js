@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   buildConfig,
   extractFileDirectives,
+  formatResumeThreads,
   formatThreadItem,
   idempotencyKey,
   isMarkdownValidationError,
@@ -16,6 +17,7 @@ import {
   reactionArgs,
   reactionIdFromOutput,
   resolveWorkdirQuery,
+  selectResumeThread,
   splitReply,
   watchForStopRequest,
 } from "../src/bridge.js";
@@ -64,8 +66,27 @@ test("parseControlCommand recognizes control and natural-language commands", () 
   assert.deepEqual(parseControlCommand("改为自动审批"), { type: "approvalMode", mode: "auto" });
   assert.deepEqual(parseControlCommand("/approve session"), { type: "approve", session: true });
   assert.deepEqual(parseControlCommand("停止当前操作"), { type: "stop" });
+  assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
+  assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
   assert.deepEqual(parseControlCommand("切换到 Demo 项目"), { type: "cd", query: "Demo" });
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
+});
+
+test("resume helpers format and select history without ambiguous title guesses", () => {
+  const threads = [
+    { id: "thr_1", name: "Fix tests", updatedAt: 1_750_000_000 },
+    { id: "thr_2", preview: "Review API tests", createdAt: 1_740_000_000 },
+    { id: "thr_3", name: "Fix tests follow-up", updatedAt: 1_730_000_000 },
+  ];
+  const output = formatResumeThreads(threads, "thr_1");
+  assert.match(output, /1\. Fix tests \[当前\]/);
+  assert.match(output, /thr_2/);
+  assert.deepEqual(selectResumeThread(threads, "2").thread, threads[1]);
+  assert.deepEqual(selectResumeThread(threads, "thr_3").thread, threads[2]);
+  assert.deepEqual(selectResumeThread(threads, "Review API").thread, threads[1]);
+  assert.match(selectResumeThread(threads, "Fix").error, /多个会话/);
+  assert.match(selectResumeThread(threads, "9").error, /超出范围/);
+  assert.match(formatResumeThreads([], ""), /没有可恢复/);
 });
 
 test("resolveWorkdirQuery prioritizes first-level names and accepts arbitrary paths", () => {

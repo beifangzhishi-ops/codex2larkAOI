@@ -100,12 +100,58 @@ export function parseControlCommand(text) {
     return { type: "deny" };
   }
   if (lower === "/new") return { type: "new" };
+  const resume = value.match(/^\/resume(?:\s+(.+))?$/i);
+  if (resume) return { type: "resume", query: (resume[1] || "").trim() };
   if (lower === "/status") return { type: "status" };
   if (lower === "/help") return { type: "help" };
   const cd = value.match(/^\/cd(?:\s+(.+))?$/i) ||
     (value.length <= 120 ? value.match(/^(?:切换|进入|转到)(?:到|至)?\s*(.+?)(?:项目|目录)?$/) : null);
   if (cd) return { type: "cd", query: (cd[1] || "").trim() };
   return null;
+}
+
+function threadName(thread) {
+  return String(thread?.name || thread?.preview || thread?.id || "未命名会话")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function threadLabel(thread) {
+  const value = threadName(thread);
+  return value.length > 80 ? `${value.slice(0, 77)}...` : value;
+}
+
+function threadTimestamp(thread) {
+  const seconds = Number(thread?.updatedAt || thread?.createdAt || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "时间未知";
+  return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+export function formatResumeThreads(threads, currentThreadId = "") {
+  if (!threads.length) return "当前工作目录没有可恢复的历史会话。";
+  const rows = threads.map((thread, index) => {
+    const current = thread.id === currentThreadId ? " [当前]" : "";
+    return `${index + 1}. ${threadLabel(thread)}${current}\n   ${threadTimestamp(thread)} | ${thread.id}`;
+  });
+  return `当前工作目录的历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\`、\`/resume thread-id\` 或 \`/resume 标题\` 继续。`;
+}
+
+export function selectResumeThread(threads, query) {
+  const value = String(query || "").trim();
+  if (!value) return { error: "请选择要恢复的会话。" };
+  if (/^\d+$/.test(value)) {
+    const thread = threads[Number(value) - 1];
+    return thread ? { thread } : { error: `会话编号超出范围：${value}` };
+  }
+  const idMatch = threads.find((thread) => thread.id === value);
+  if (idMatch) return { thread: idMatch };
+  const normalized = value.toLocaleLowerCase();
+  const exact = threads.filter((thread) => threadName(thread).toLocaleLowerCase() === normalized);
+  if (exact.length === 1) return { thread: exact[0] };
+  const partial = threads.filter((thread) => threadName(thread).toLocaleLowerCase().includes(normalized));
+  if (partial.length === 1) return { thread: partial[0] };
+  if (exact.length > 1 || partial.length > 1) return { error: `“${value}”匹配到多个会话，请改用编号或 thread ID。` };
+  return { error: `找不到会话：${value}。发送 \`/resume\` 刷新列表。` };
 }
 
 export function parsePendingWorkdirReply(text, waitingForPath) {
@@ -449,6 +495,7 @@ class BridgeRuntime {
     this.activeChats = new Map();
     this.activeThreads = new Map();
     this.pendingApprovals = new Map();
+    this.resumeCandidates = new Map();
     this.chatQueues = new Map();
     this.client.on("stderr", (text) => console.error(`[codex] ${text}`));
     this.client.on("notification", (message) => this.#onNotification(message));
@@ -527,6 +574,7 @@ class BridgeRuntime {
     if (command?.type === "new") {
       delete this.state.sessions[event.chatId];
       delete this.state.pendingWorkdirQueries[event.chatId];
+      this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-new`, "已新建 Codex 会话；当前项目目录保持不变。", this.config);
       return;
@@ -538,7 +586,16 @@ class BridgeRuntime {
     }
     if (command?.type === "help") {
       await sendReply(event.messageId, `${event.eventId}-help`,
-        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
+        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/resume [编号|thread-id|标题]` 浏览或继续当前目录的历史会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
+      return;
+    }
+    if (command?.type === "resume") {
+      try {
+        await this.#handleResume(event, command.query);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-resume-failed`,
+          `历史会话操作失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
       return;
     }
     if (command?.type === "cd") {
@@ -552,6 +609,7 @@ class BridgeRuntime {
       }
       this.state.workdirs[event.chatId] = result.path;
       delete this.state.pendingWorkdirQueries[event.chatId];
+      this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-cd`, `已切换工作目录：${result.path}\n后续轮次会在该目录执行，会话上下文保留。`, this.config);
       return;
@@ -580,6 +638,68 @@ class BridgeRuntime {
     }
   }
 
+  #threadOptions(chatId) {
+    const cwd = this.cwdFor(chatId);
+    return {
+      cwd,
+      approvalPolicy: approvalPolicy(this.modeFor(chatId)),
+      sandbox: "workspace-write",
+      developerInstructions: this.config.projectInstructions || null,
+      ...(this.config.model ? { model: this.config.model } : {}),
+    };
+  }
+
+  async #listResumeThreads(chatId) {
+    const result = await this.client.request("thread/list", {
+      cwd: this.cwdFor(chatId),
+      limit: 10,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+      archived: false,
+      sourceKinds: ["appServer", "cli", "vscode"],
+    });
+    const threads = Array.isArray(result?.data) ? result.data : [];
+    this.resumeCandidates.set(chatId, threads);
+    return threads;
+  }
+
+  async #handleResume(event, query) {
+    const threads = query
+      ? (this.resumeCandidates.get(event.chatId) || await this.#listResumeThreads(event.chatId))
+      : await this.#listResumeThreads(event.chatId);
+    if (!query) {
+      await sendReply(event.messageId, `${event.eventId}-resume-list`,
+        formatResumeThreads(threads, this.state.sessions[event.chatId]), this.config);
+      return;
+    }
+    const selected = selectResumeThread(threads, query);
+    if (selected.error) {
+      await sendReply(event.messageId, `${event.eventId}-resume-error`, selected.error, this.config);
+      return;
+    }
+    const threadId = selected.thread.id;
+    if (threadId === this.state.sessions[event.chatId]) {
+      await sendReply(event.messageId, `${event.eventId}-resume-current`,
+        `已经在该会话中：${threadLabel(selected.thread)}\n${threadId}`, this.config);
+      return;
+    }
+    const active = this.activeThreads.get(threadId);
+    if (active) {
+      await sendReply(event.messageId, `${event.eventId}-resume-active`,
+        "该会话正在执行其他任务，暂时不能切换。", this.config);
+      return;
+    }
+    if (!this.loadedThreads.has(threadId)) {
+      await this.client.request("thread/resume", { threadId, ...this.#threadOptions(event.chatId) });
+      this.loadedThreads.add(threadId);
+    }
+    this.state.sessions[event.chatId] = threadId;
+    this.resumeCandidates.delete(event.chatId);
+    saveState(this.state);
+    await sendReply(event.messageId, `${event.eventId}-resume-done`,
+      `已继续历史会话：${threadLabel(selected.thread)}\n${threadId}`, this.config);
+  }
+
   async #deliverFiles(event, files) {
     for (let index = 0; index < files.length; index += 1) {
       try {
@@ -591,15 +711,9 @@ class BridgeRuntime {
     }
   }
 
-  async #ensureThread(chatId, cwd, mode) {
+  async #ensureThread(chatId) {
     let threadId = this.state.sessions[chatId];
-    const common = {
-      cwd,
-      approvalPolicy: approvalPolicy(mode),
-      sandbox: "workspace-write",
-      developerInstructions: this.config.projectInstructions || null,
-      ...(this.config.model ? { model: this.config.model } : {}),
-    };
+    const common = this.#threadOptions(chatId);
     if (threadId && !this.loadedThreads.has(threadId)) {
       try {
         await this.client.request("thread/resume", { threadId, ...common });
@@ -622,7 +736,7 @@ class BridgeRuntime {
   async #runTurn(event) {
     const cwd = this.cwdFor(event.chatId);
     const mode = this.modeFor(event.chatId);
-    const threadId = await this.#ensureThread(event.chatId, cwd, mode);
+    const threadId = await this.#ensureThread(event.chatId);
     let resolveDone;
     let rejectDone;
     const done = new Promise((resolvePromise, rejectPromise) => {
