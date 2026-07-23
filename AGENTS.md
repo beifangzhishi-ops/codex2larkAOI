@@ -4,12 +4,9 @@
 
 ## AKA/AOI 双槽协作
 
-- `codex2larkAKA` 与 `codex2larkAOI` 是对等且相互隔离的两个服务槽，不预设固定的激活版或测试版。
-- 本项目规则适用于从 `codex2larkAOI` 服务槽进入的会话。此类会话只修改 `codex2larkAOI` 的代码、配置、脚本、测试和运行状态，不修改 `codex2larkAKA` 的对应内容。
-- 启动、停止、重启或诊断桥接服务时，只操作 `codex2larkAOI` 实例；不得启动、停止、重启或干扰 `codex2larkAKA` 实例及其进程。
-- Markdown 文档是唯一的跨槽修改例外：任务确有需要时，可以修改 `codex2larkAKA` 中的 `.md` 文件；该例外不扩展到代码、配置、脚本、测试、Git 状态或服务操作。
-- 不要擅自替用户切换 AKA/AOI 的角色，也不要为了测试 AOI 的改动而操作 AKA。
-- 两槽分别使用独立 Git 仓库维护版本，并保持不同的 `LARKSUITE_CLI_CONFIG_DIR` 和飞书 App 配置。
+- 当前工作目录位于 AOI 时，只允许修改 AOI，禁止修改 AKA。
+- AOI 飞书 App 禁止停止 AOI。
+- 版本同步时，注意文本中的 AKA/AOI 互换。
 
 ## 参考 Hermes
 
@@ -23,10 +20,6 @@
 - 工作期间正常发送简短的 `commentary` 进度；桥接会转发已完成的进度消息和可读推理摘要。
 - 桥接不转发终端、文件修改、MCP、网页搜索等工具调用事件，因此不要为了展示工具而重复命令。
 - 绝不暴露私有思维链，只分享简洁的结论、假设、进度和操作意图。
-
-## 双槽串槽错误
-
-- 启动 AOI 时继承了 AKA 的 `LARKSUITE_CLI_CONFIG_DIR`，导致 AOI 代码连接到 AKA 的飞书 App，造成双槽串槽。
 
 ## 文件交付
 
