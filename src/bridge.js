@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
@@ -27,6 +27,10 @@ export function parseDotEnv(text) {
     values[key] = value;
   }
   return values;
+}
+
+export function mergeProjectEnv(processValues, fileValues) {
+  return { ...processValues, ...fileValues };
 }
 
 export function splitReply(text, maxChars) {
@@ -127,8 +131,69 @@ function threadTimestamp(thread) {
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
+const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
+const CONTROL_CARD_ACTIONS = new Set(["new", "resume", "resumePage", "approvalMode", "status", "stop", "help"]);
+
+function parseCardActionValue(value) {
+  try {
+    return typeof value?.action_value === "string"
+      ? JSON.parse(value.action_value)
+      : value?.action_value;
+  } catch {
+    return null;
+  }
+}
+
+export function parseApprovalCardAction(value) {
+  const actionValue = parseCardActionValue(value);
+  if (value?.action_tag !== "button" || actionValue?.kind !== "codex2lark_approval" ||
+      typeof actionValue.approvalId !== "string" || !APPROVAL_DECISIONS.has(actionValue.decision)) return null;
+  return {
+    eventId: String(value.event_id || ""),
+    chatId: String(value.chat_id || ""),
+    messageId: String(value.message_id || ""),
+    operatorId: String(value.operator_id || ""),
+    token: String(value.token || ""),
+    approvalId: actionValue.approvalId,
+    decision: actionValue.decision,
+  };
+}
+
+export function parseControlCardAction(value) {
+  const actionValue = parseCardActionValue(value);
+  if (value?.action_tag !== "button" || actionValue?.kind !== "codex2lark_control" ||
+      !CONTROL_CARD_ACTIONS.has(actionValue.action)) return null;
+  if (actionValue.action === "approvalMode" && !["auto", "manual"].includes(actionValue.mode)) return null;
+  if (actionValue.action === "resume" && actionValue.threadId !== undefined &&
+      typeof actionValue.threadId !== "string") return null;
+  if (actionValue.action === "resumePage" &&
+      (!Number.isInteger(actionValue.pageStart) || actionValue.pageStart < 0)) return null;
+  return {
+    type: "control",
+    eventId: String(value.event_id || ""),
+    chatId: String(value.chat_id || ""),
+    messageId: String(value.message_id || ""),
+    operatorId: String(value.operator_id || ""),
+    token: String(value.token || ""),
+    action: actionValue.action,
+    ...(actionValue.mode ? { mode: actionValue.mode } : {}),
+    ...(actionValue.threadId !== undefined ? { threadId: actionValue.threadId } : {}),
+    ...(actionValue.pageStart !== undefined ? { pageStart: actionValue.pageStart } : {}),
+  };
+}
+
+export function parseCardAction(value) {
+  const approval = parseApprovalCardAction(value);
+  return approval ? { type: "approval", ...approval } : parseControlCardAction(value);
+}
+
 function threadCwd(thread) {
   return String(thread?.cwd || "目录未知").trim() || "目录未知";
+}
+
+function threadCwdLabel(thread) {
+  const cwd = threadCwd(thread);
+  return cwd === "目录未知" ? cwd : basename(cwd);
 }
 
 function availableThreadCwd(thread) {
@@ -151,13 +216,14 @@ export function createThreadTitle(text, maxChars = 48) {
   return `${summary.slice(0, Math.max(1, maxChars - 3)).join("")}...`;
 }
 
-export function formatResumeThreads(threads, currentThreadId = "") {
+export function formatResumeThreads(threads, currentThreadId = "", hasMore = false) {
   if (!threads.length) return "没有可恢复的历史会话。";
   const rows = threads.map((thread, index) => {
     const current = thread.id === currentThreadId ? " [当前]" : "";
-    return `${index + 1}. ${threadLabel(thread)}${current}\n   ${threadTimestamp(thread)} | ${threadCwd(thread)}\n   ${thread.id}`;
+    return `${index + 1}. ${threadLabel(thread)}${current}\n   ${threadTimestamp(thread)} | ${threadCwdLabel(thread)}`;
   });
-  return `所有工作目录的历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\`、\`/resume thread-id\` 或 \`/resume 标题\` 继续。`;
+  const next = hasMore ? "\n发送 `/resume next` 再看 5 个。" : "";
+  return `历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\` 或 \`/resume 标题\` 继续。${next}`;
 }
 
 export function selectResumeThread(threads, query) {
@@ -174,7 +240,7 @@ export function selectResumeThread(threads, query) {
   if (exact.length === 1) return { thread: exact[0] };
   const partial = threads.filter((thread) => threadName(thread).toLocaleLowerCase().includes(normalized));
   if (partial.length === 1) return { thread: partial[0] };
-  if (exact.length > 1 || partial.length > 1) return { error: `“${value}”匹配到多个会话，请改用编号或 thread ID。` };
+  if (exact.length > 1 || partial.length > 1) return { error: `“${value}”匹配到多个会话，请改用当前列表中的编号。` };
   return { error: `找不到会话：${value}。发送 \`/resume\` 刷新列表。` };
 }
 
@@ -284,7 +350,7 @@ export function formatThreadItem(item, stage = "completed") {
 function loadEnv() {
   const envPath = resolve(ROOT, ".env");
   const fileValues = existsSync(envPath) ? parseDotEnv(readFileSync(envPath, "utf8")) : {};
-  return { ...fileValues, ...process.env };
+  return mergeProjectEnv(process.env, fileValues);
 }
 
 function commandName(name) {
@@ -407,6 +473,7 @@ export function buildConfig(env) {
 
 async function preflight() {
   await run("codex", ["app-server", "--help"]);
+  await run("lark-cli", ["event", "schema", "card.action.trigger"]);
   const { stdout } = await run("lark-cli", ["auth", "status"]);
   const status = JSON.parse(stdout);
   if (!status.identities?.bot?.available) throw new Error("lark-cli bot 身份尚未就绪。");
@@ -418,6 +485,173 @@ export function idempotencyKey(...values) {
 
 export function isMarkdownValidationError(error) {
   return /99992402|field validation failed|content format of the post type is incorrect/i.test(String(error?.message || error));
+}
+
+function cardButton(text, type, value) {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content: text },
+    type,
+    value,
+  };
+}
+
+function approvalButton(text, type, approvalId, decision) {
+  return cardButton(text, type, { kind: "codex2lark_approval", approvalId, decision });
+}
+
+function controlButton(text, type, action, details = {}) {
+  return cardButton(text, type, { kind: "codex2lark_control", action, ...details });
+}
+
+export function buildApprovalCard(subject, approvalId) {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "orange",
+      title: { tag: "plain_text", content: "需要审批" },
+    },
+    elements: [
+      { tag: "markdown", content: String(subject || "Codex 请求执行操作").slice(0, 5000) },
+      {
+        tag: "action",
+        actions: [
+          approvalButton("允许一次", "primary", approvalId, "accept"),
+          approvalButton("本会话允许", "default", approvalId, "acceptForSession"),
+          approvalButton("拒绝", "danger", approvalId, "decline"),
+        ],
+      },
+      { tag: "note", elements: [{ tag: "plain_text", content: "按钮不可用时，可发送 /approve、/approve session 或 /deny。" }] },
+    ],
+  };
+}
+
+export function buildResolvedApprovalCard(decision, operatorId) {
+  const denied = decision === "decline";
+  const label = denied ? "已拒绝" : decision === "acceptForSession" ? "已允许，本会话有效" : "已允许一次";
+  return {
+    open_ids: [operatorId],
+    config: { wide_screen_mode: true },
+    header: {
+      template: denied ? "red" : "green",
+      title: { tag: "plain_text", content: label },
+    },
+    elements: [{ tag: "markdown", content: `审批操作已处理：**${label}**` }],
+  };
+}
+
+export function buildHelpCard(approvalMode = "auto") {
+  const nextMode = approvalMode === "auto" ? "manual" : "auto";
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: "Codex 助手" },
+    },
+    elements: [
+      { tag: "markdown", content: [
+        "直接发送任务即可。常用命令：",
+        "`/cd 项目名或路径` 切换目录 · `/new` 新建对话",
+        "`/resume` 继续历史对话 · `/stop` 停止当前操作",
+        "`/approval auto|manual` 切换审批 · `/status` 查看状态",
+      ].join("\n") },
+      {
+        tag: "action",
+        actions: [
+          controlButton("新建对话", "primary", "new"),
+          controlButton("继续对话", "default", "resume"),
+          controlButton(`改为${nextMode === "auto" ? "自动" : "手动"}审批`, "default", "approvalMode", { mode: nextMode }),
+        ],
+      },
+      {
+        tag: "action",
+        actions: [
+          controlButton("查看状态", "default", "status"),
+          controlButton("停止当前操作", "danger", "stop"),
+        ],
+      },
+    ],
+  };
+}
+
+export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, totalCount = threads.length) {
+  const elements = [];
+  if (!threads.length) {
+    elements.push({ tag: "markdown", content: "没有可恢复的历史会话。" });
+  } else {
+    for (const [index, thread] of threads.entries()) {
+      const current = thread.id === currentThreadId ? " · 当前" : "";
+      elements.push({
+        tag: "markdown",
+        content: `**${pageStart + index + 1}. ${threadLabel(thread)}**${current}\n${threadTimestamp(thread)} · ${threadCwdLabel(thread)}`,
+      });
+      elements.push({
+        tag: "action",
+        actions: [controlButton("继续此对话", thread.id === currentThreadId ? "default" : "primary", "resume", {
+          threadId: thread.id,
+        })],
+      });
+    }
+  }
+  const navigation = [];
+  if (pageStart > 0) navigation.push(controlButton("上一页", "default", "resumePage", {
+    pageStart: Math.max(0, pageStart - 5),
+  }));
+  if (pageStart + threads.length < totalCount) navigation.push(controlButton("下一页", "default", "resumePage", {
+    pageStart: pageStart + 5,
+  }));
+  if (navigation.length) elements.push({ tag: "action", actions: navigation });
+  elements.push({ tag: "note", elements: [{
+    tag: "plain_text",
+    content: threads.length ? `第 ${Math.floor(pageStart / 5) + 1} 页 · 共 ${totalCount} 个会话` : "也可稍后再次发送 /resume",
+  }] });
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: "继续历史对话" },
+    },
+    elements,
+  };
+}
+
+export function approvalCardUpdateArgs(token, card) {
+  return [
+    "api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
+    "--data", JSON.stringify({ token, card }),
+  ];
+}
+
+async function sendApprovalCard(messageId, eventKey, subject, approvalId) {
+  await run("lark-cli", [
+    "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
+    "--msg-type", "interactive", "--content", JSON.stringify(buildApprovalCard(subject, approvalId)),
+    "--idempotency-key", idempotencyKey(eventKey, approvalId),
+  ]);
+}
+
+async function sendInteractiveCard(messageId, eventKey, card) {
+  await run("lark-cli", [
+    "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
+    "--msg-type", "interactive", "--content", JSON.stringify(card),
+    "--idempotency-key", idempotencyKey(eventKey),
+  ]);
+}
+
+async function updateInteractiveCard(event, card) {
+  if (!event.token || !event.operatorId) throw new Error("卡片回调缺少更新凭据");
+  await run("lark-cli", approvalCardUpdateArgs(event.token, {
+    ...card,
+    open_ids: [event.operatorId],
+  }));
+}
+
+async function updateApprovalCard(event) {
+  if (!event.token || !event.operatorId) return;
+  await run("lark-cli", approvalCardUpdateArgs(
+    event.token,
+    buildResolvedApprovalCard(event.decision, event.operatorId),
+  ));
 }
 
 export async function sendReply(messageId, eventKey, text, config) {
@@ -609,8 +843,17 @@ class BridgeRuntime {
       return;
     }
     if (command?.type === "help") {
-      await sendReply(event.messageId, `${event.eventId}-help`,
-        "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录；项目名优先匹配 AAAVitalFile 第一层，也可使用任意文件夹的绝对路径\n`/new` 新建会话\n`/resume [编号|thread-id|标题]` 浏览或继续所有工作目录的历史会话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/approve [session]` 批准待处理操作\n`/deny` 拒绝待处理操作\n`/status` 查看状态", this.config);
+      try {
+        await sendInteractiveCard(event.messageId, `${event.eventId}-help`, buildHelpCard(this.modeFor(event.chatId)));
+      } catch (error) {
+        console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
+        await sendReply(event.messageId, `${event.eventId}-help-text`,
+          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
+      }
+      return;
+    }
+    if (command?.type === "resumePage") {
+      await this.#handleResumePage(event, command.pageStart);
       return;
     }
     if (command?.type === "resume") {
@@ -691,20 +934,81 @@ class BridgeRuntime {
       seenCursors.add(nextCursor);
       cursor = nextCursor;
     } while (cursor);
-    this.resumeCandidates.set(chatId, threads);
     return threads;
   }
 
-  async #handleResume(event, query) {
-    const threads = query
-      ? (this.resumeCandidates.get(event.chatId) || await this.#listResumeThreads(event.chatId))
-      : await this.#listResumeThreads(event.chatId);
-    if (!query) {
-      await sendReply(event.messageId, `${event.eventId}-resume-list`,
-        formatResumeThreads(threads, this.state.sessions[event.chatId]), this.config);
+  async handleCardAction(event) {
+    if (event.type === "control") {
+      const command = event.action === "approvalMode"
+        ? { type: "approvalMode", mode: event.mode }
+        : event.action === "resume"
+          ? { type: "resume", query: event.threadId || "" }
+          : event.action === "resumePage"
+            ? { type: "resumePage", pageStart: event.pageStart }
+            : { type: event.action };
+      if (["stop", "approvalMode"].includes(command.type)) await this.handleImmediate(event, command);
+      else this.enqueue(event, command);
       return;
     }
-    const selected = selectResumeThread(threads, query);
+    let resolved;
+    try {
+      resolved = this.#resolveApprovalById(event.chatId, event.approvalId, event.decision);
+    } catch (error) {
+      console.error(`[bridge] card approval ${event.approvalId} failed: ${error.message}`);
+      await sendReply(event.messageId, `${event.eventId}-approval-failed`,
+        "按钮审批失败，请发送 `/approve`、`/approve session` 或 `/deny`。", this.config);
+      return;
+    }
+    if (!resolved) {
+      console.warn(`[bridge] ignored resolved or unknown approval ${event.approvalId}`);
+      await sendReply(event.messageId, `${event.eventId}-approval-expired`,
+        "该审批已处理或已过期。", this.config);
+      return;
+    }
+    try {
+      await updateApprovalCard(event);
+    } catch (error) {
+      console.warn(`[bridge] cannot update approval card ${event.messageId}: ${error.message}`);
+      const label = event.decision === "decline" ? "已拒绝" : "已批准";
+      await sendReply(event.messageId, `${event.eventId}-approval-result`, `${label}待处理操作。`, this.config);
+    }
+  }
+
+  async #handleResume(event, query) {
+    const pageSize = 5;
+    const isNext = /^(?:next|more|下一页|更多)$/i.test(query);
+    const isPrevious = /^(?:prev|previous|上一页)$/i.test(query);
+    if (!query) {
+      const threads = await this.#listResumeThreads(event.chatId);
+      const candidates = { threads, pageStart: 0 };
+      this.resumeCandidates.set(event.chatId, candidates);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-resume-list`,
+        buildResumeCard(threads.slice(0, pageSize), this.state.sessions[event.chatId], 0, threads.length));
+      return;
+    }
+    let candidates = this.resumeCandidates.get(event.chatId);
+    if (!candidates) {
+      const threads = await this.#listResumeThreads(event.chatId);
+      candidates = { threads, pageStart: 0 };
+      this.resumeCandidates.set(event.chatId, candidates);
+    }
+    if (isNext || isPrevious) {
+      const nextStart = candidates.pageStart + (isNext ? pageSize : -pageSize);
+      if (nextStart < 0 || nextStart >= candidates.threads.length) {
+        await sendReply(event.messageId, `${event.eventId}-resume-end`,
+          isNext ? "没有更多历史会话了。" : "已经是第一页了。", this.config);
+        return;
+      }
+      candidates.pageStart = nextStart;
+      const page = candidates.threads.slice(nextStart, nextStart + pageSize);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-resume-page-${nextStart}`,
+        buildResumeCard(page, this.state.sessions[event.chatId], nextStart, candidates.threads.length));
+      return;
+    }
+    const page = candidates.threads.slice(candidates.pageStart, candidates.pageStart + pageSize);
+    const selected = /^\d+$/.test(query)
+      ? selectResumeThread(page, query)
+      : selectResumeThread(candidates.threads, query);
     if (selected.error) {
       await sendReply(event.messageId, `${event.eventId}-resume-error`, selected.error, this.config);
       return;
@@ -712,7 +1016,7 @@ class BridgeRuntime {
     const threadId = selected.thread.id;
     if (threadId === this.state.sessions[event.chatId]) {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
-        `已经在该会话中：${threadLabel(selected.thread)}\n${threadId}`, this.config);
+        `已经在该会话中：${threadLabel(selected.thread)}`, this.config);
       return;
     }
     const active = this.activeThreads.get(threadId);
@@ -734,7 +1038,32 @@ class BridgeRuntime {
     this.resumeCandidates.delete(event.chatId);
     saveState(this.state);
     await sendReply(event.messageId, `${event.eventId}-resume-done`,
-      `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}\n${threadId}`, this.config);
+      `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${basename(this.cwdFor(event.chatId))}`, this.config);
+  }
+
+  async #handleResumePage(event, requestedStart) {
+    const pageSize = 5;
+    let candidates = this.resumeCandidates.get(event.chatId);
+    if (!candidates) {
+      const threads = await this.#listResumeThreads(event.chatId);
+      candidates = { threads, pageStart: 0 };
+      this.resumeCandidates.set(event.chatId, candidates);
+    }
+    const lastStart = Math.max(0, Math.floor((Math.max(1, candidates.threads.length) - 1) / pageSize) * pageSize);
+    const pageStart = Math.min(Math.max(0, requestedStart), lastStart);
+    candidates.pageStart = pageStart;
+    const card = buildResumeCard(
+      candidates.threads.slice(pageStart, pageStart + pageSize),
+      this.state.sessions[event.chatId],
+      pageStart,
+      candidates.threads.length,
+    );
+    try {
+      await updateInteractiveCard(event, card);
+    } catch (error) {
+      console.warn(`[bridge] resume card update failed; sending a new card: ${error.message}`);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-resume-page-${pageStart}`, card);
+    }
   }
 
   async #deliverFiles(event, files) {
@@ -839,6 +1168,20 @@ class BridgeRuntime {
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
   }
 
+  #queueApprovalCard(active, key, subject, approvalId) {
+    if (active.progressKeys.has(key)) return;
+    active.progressKeys.add(key);
+    active.sendQueue = active.sendQueue.then(async () => {
+      try {
+        await sendApprovalCard(active.event.messageId, `${active.event.eventId}-${key}`, subject, approvalId);
+      } catch (error) {
+        console.warn(`[bridge] approval card failed; using text fallback: ${error.message}`);
+        await sendReply(active.event.messageId, `${active.event.eventId}-${key}-text`,
+          `需要审批\n\n${subject}\n\n发送 \`/approve\` 允许一次，\`/approve session\` 本会话允许，或 \`/deny\` 拒绝。`, this.config);
+      }
+    }).catch((error) => console.error(`[bridge] approval prompt failed: ${error.message}`));
+  }
+
   #onNotification(message) {
     const params = message.params || {};
     const active = this.activeThreads.get(params.threadId || params.thread?.id);
@@ -877,13 +1220,29 @@ class BridgeRuntime {
       return;
     }
     const pending = this.pendingApprovals.get(active.chatId) || [];
-    pending.push({ requestId: message.id, method: message.method, params });
+    const approvalId = randomUUID();
+    pending.push({ approvalId, requestId: message.id, method: message.method, params });
     this.pendingApprovals.set(active.chatId, pending);
     const subject = message.method.includes("commandExecution")
       ? `💻 terminal\n\n\`\`\`powershell\n${fenced(params.command || "命令未提供")}\n\`\`\``
       : `📝 file change\n${params.reason || params.grantRoot || "Codex 请求修改文件"}`;
-    this.#queueProgress(active, `approval-${message.id}`,
-      `⚠️ 需要审批\n\n${subject}\n\n发送 \`/approve\` 允许一次，\`/approve session\` 本会话允许，或 \`/deny\` 拒绝。`);
+    this.#queueApprovalCard(active, `approval-${message.id}`, subject, approvalId);
+  }
+
+  #resolveApprovalById(chatId, approvalId, decision) {
+    const pending = this.pendingApprovals.get(chatId) || [];
+    const index = pending.findIndex((approval) => approval.approvalId === approvalId);
+    if (index < 0) return false;
+    const [approval] = pending.splice(index, 1);
+    try {
+      this.client.respond(approval.requestId, { decision });
+    } catch (error) {
+      pending.splice(index, 0, approval);
+      throw error;
+    }
+    if (pending.length) this.pendingApprovals.set(chatId, pending);
+    else this.pendingApprovals.delete(chatId);
+    return true;
   }
 
   async #resolvePending(chatId, decision, oneOnly = false) {
@@ -937,17 +1296,36 @@ async function acceptEvent(raw, runtime, state, config) {
   } else runtime.enqueue(event, command);
 }
 
+async function acceptCardEvent(raw, runtime, state, config) {
+  const event = parseCardAction(raw);
+  if (!event?.eventId || !event.chatId || !event.messageId || !event.operatorId) {
+    console.warn("[bridge] ignored malformed or unrelated card action");
+    return;
+  }
+  if (state.events.includes(event.eventId)) return;
+  state.events.push(event.eventId);
+  state.events = state.events.slice(-config.eventCacheSize);
+  saveState(state);
+  if (!config.allowedIds.has(event.operatorId)) {
+    console.warn(`[bridge] ignored unauthorized card operator ${event.operatorId}`);
+    return;
+  }
+  console.log(`[bridge] received card action event=${event.eventId} chat=${event.chatId}`);
+  await runtime.handleCardAction(event);
+}
+
 function startConsumer(state, config, runtime) {
-  let retryMs = 1000;
+  const retryMs = new Map();
   let stopping = false;
-  let child;
+  const children = new Set();
   let stopWatching;
-  const start = () => {
+  const start = (eventKey, handler) => {
     let stdoutBuffer = "";
-    const spec = commandSpec("lark-cli", ["event", "consume", "im.message.receive_v1", "--as", "bot"]);
-    child = spawn(spec.command, spec.args, {
+    const spec = commandSpec("lark-cli", ["event", "consume", eventKey, "--as", "bot"]);
+    const child = spawn(spec.command, spec.args, {
       cwd: ROOT, env: process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
+    children.add(child);
     child.stdout.on("data", (chunk) => {
       stdoutBuffer += chunk.toString("utf8");
       const lines = stdoutBuffer.split(/\r?\n/);
@@ -955,29 +1333,29 @@ function startConsumer(state, config, runtime) {
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          void acceptEvent(JSON.parse(line), runtime, state, config).catch((error) => console.error(error));
+          void handler(JSON.parse(line), runtime, state, config).catch((error) => console.error(error));
         } catch (error) {
-          console.error(`[bridge] invalid event JSON: ${error.message}`);
+          console.error(`[bridge] invalid ${eventKey} JSON: ${error.message}`);
         }
       }
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString("utf8").trim();
-      if (text) console.error(`[lark] ${text}`);
-      if (text.includes("[event] ready")) retryMs = 1000;
+      if (text) console.error(`[lark:${eventKey}] ${text}`);
+      if (text.includes("[event] ready")) retryMs.set(eventKey, 1000);
     });
-    child.once("error", (error) => console.error(`[lark] ${error.message}`));
+    child.once("error", (error) => console.error(`[lark:${eventKey}] ${error.message}`));
     child.once("close", (code) => {
+      children.delete(child);
       if (stopping) return;
       if (existsSync(STOP_FILE)) {
-        stopping = true;
-        runtime.stop();
-        process.exitCode = 0;
+        stop();
         return;
       }
-      console.error(`[lark] consumer exited ${code}; retrying in ${retryMs} ms`);
-      setTimeout(start, retryMs);
-      retryMs = Math.min(retryMs * 2, 30_000);
+      const delay = retryMs.get(eventKey) || 1000;
+      console.error(`[lark:${eventKey}] consumer exited ${code}; retrying in ${delay} ms`);
+      setTimeout(() => start(eventKey, handler), delay);
+      retryMs.set(eventKey, Math.min(delay * 2, 30_000));
     });
   };
   const stop = () => {
@@ -985,13 +1363,16 @@ function startConsumer(state, config, runtime) {
     stopping = true;
     stopWatching?.();
     runtime.stop();
-    child?.stdin.end();
-    setTimeout(() => child?.kill(), 3000).unref();
+    for (const child of children) child.stdin.end();
+    setTimeout(() => {
+      for (const child of children) child.kill();
+    }, 3000).unref();
   };
   stopWatching = watchForStopRequest(STOP_FILE, stop);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  start();
+  start("im.message.receive_v1", acceptEvent);
+  start("card.action.trigger", acceptCardEvent);
 }
 
 export async function main() {

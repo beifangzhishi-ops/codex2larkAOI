@@ -18,7 +18,7 @@
 
 ## 配置
 
-当前机器需安装 `codex` 与 `lark-cli`，并完成独立测试机器人的配置：
+当前机器需安装 `codex` 与 `lark-cli >= 1.0.58`，并完成独立测试机器人的配置。`1.0.58` 是 `card.action.trigger` 的最低支持版本：
 
 ```powershell
 lark-cli config init --new
@@ -26,7 +26,7 @@ lark-cli auth login --recommend
 lark-cli auth status
 ```
 
-在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件和添加/删除消息表情所需权限。
+在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件和添加/删除消息表情所需权限。要使用审批卡片，还必须在“应用 -> 事件与回调 -> 回调配置”中启用回调并订阅 `card.action.trigger`，同时授予 `im:message:readonly`；长连接模式不需要配置回调 URL。
 
 复制模板并填写配置：
 
@@ -53,7 +53,7 @@ npm run check
 .\start.ps1
 ```
 
-看到 `[event] ready event_key=im.message.receive_v1` 后即可给机器人发送任务。后台实例可用以下命令停止：
+看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。后台实例可用以下命令停止：
 
 ```powershell
 .\stop.ps1
@@ -67,17 +67,18 @@ npm run check
 - `切换到 X 项目`：`/cd X` 的自然语言形式；
 - 第一层未找到项目时，机器人会询问位置；下一条可直接回复该文件夹的绝对路径；
 - `/new`：清除当前聊天的 Codex thread，保留工作目录和审批模式；
-- `/resume`：分页列出所有工作目录中未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话），并显示各自目录；
-- `/resume 编号|thread-id|标题`：继续列表中的历史会话，将当前飞书聊天绑定到该 thread，并切换到其工作目录；标题必须唯一匹配；
+- `/resume`：用交互卡片按更新时间列出最近 5 个未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话），可直接点击会话继续；
+- 恢复卡片按需显示“上一页”和“下一页”，中间页共 5 个会话按钮和 2 个翻页按钮；也可使用 `/resume prev|next`；
+- `/resume 编号|标题`：继续当前列表中的历史会话，将当前飞书聊天绑定到该 thread，并切换到其工作目录；标题必须唯一匹配；
 - 新建 Codex 会话的首轮开始后，桥接会根据首条用户消息自动设置简短标题；
 - `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
 - `/approval auto`：自动审批后续操作，仍受工作区沙箱限制；
-- `/approval manual`：把审批请求发到飞书；
+- `/approval manual`：把审批请求作为飞书交互卡片发出，可点击“允许一次”“本会话允许”“拒绝”；按钮不可用时仍可使用下列文字命令；
 - `/approve`：允许一个待审批操作；
 - `/approve session`：允许当前 session 范围内的同类操作；
 - `/deny`：拒绝一个待审批操作；
 - `/status`：查看当前目录、thread、审批和权限；
-- `/help`：显示命令。
+- `/help`：显示带有新建对话、继续对话、切换审批模式、查看状态和停止操作按钮的交互卡片。
 
 也可发送“改为自动审批”“改为手动审批”“同意执行”“拒绝执行”“停止当前操作”。自然语言控制只匹配短而明确的命令，普通讨论不会被截获。
 

@@ -4,15 +4,24 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  approvalCardUpdateArgs,
   buildConfig,
+  buildApprovalCard,
+  buildHelpCard,
+  buildResumeCard,
+  buildResolvedApprovalCard,
   createThreadTitle,
   extractFileDirectives,
   formatResumeThreads,
   formatThreadItem,
   idempotencyKey,
   isMarkdownValidationError,
+  mergeProjectEnv,
   normalizeEvent,
   parseControlCommand,
+  parseApprovalCardAction,
+  parseCardAction,
+  parseControlCardAction,
   parsePendingWorkdirReply,
   parseDotEnv,
   reactionArgs,
@@ -25,6 +34,16 @@ import {
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
+});
+
+test("project env pins slot-specific values over inherited process values", () => {
+  assert.deepEqual(
+    mergeProjectEnv(
+      { LARKSUITE_CLI_CONFIG_DIR: "aka", PATH: "inherited" },
+      { LARKSUITE_CLI_CONFIG_DIR: "aoi" },
+    ),
+    { LARKSUITE_CLI_CONFIG_DIR: "aoi", PATH: "inherited" },
+  );
 });
 
 test("normalizeEvent accepts flattened and JSON-wrapped text", () => {
@@ -73,22 +92,111 @@ test("parseControlCommand recognizes control and natural-language commands", () 
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
 });
 
-test("resume helpers format and select history without ambiguous title guesses", () => {
+test("resume helpers format compact pages and select history without ambiguous title guesses", () => {
   const threads = [
     { id: "thr_1", name: "Fix tests", cwd: "C:\\work\\one", updatedAt: 1_750_000_000 },
     { id: "thr_2", preview: "Review API tests", cwd: "C:\\work\\two", createdAt: 1_740_000_000 },
     { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", updatedAt: 1_730_000_000 },
   ];
-  const output = formatResumeThreads(threads, "thr_1");
+  const output = formatResumeThreads(threads, "thr_1", true);
   assert.match(output, /1\. Fix tests \[当前\]/);
-  assert.match(output, /thr_2/);
-  assert.match(output, /C:\\work\\two/);
+  assert.doesNotMatch(output, /thr_2/);
+  assert.match(output, /\| two/);
+  assert.doesNotMatch(output, /C:\\work\\two/);
+  assert.match(output, /\/resume next/);
+  assert.doesNotMatch(formatResumeThreads(threads, ""), /\/resume next/);
   assert.deepEqual(selectResumeThread(threads, "2").thread, threads[1]);
   assert.deepEqual(selectResumeThread(threads, "thr_3").thread, threads[2]);
   assert.deepEqual(selectResumeThread(threads, "Review API").thread, threads[1]);
   assert.match(selectResumeThread(threads, "Fix").error, /多个会话/);
   assert.match(selectResumeThread(threads, "9").error, /超出范围/);
   assert.match(formatResumeThreads([], ""), /没有可恢复/);
+});
+
+test("approval cards expose exactly three scoped decisions and parse callbacks", () => {
+  const card = buildApprovalCard("Run command", "approval-1");
+  const buttons = card.elements.find((element) => element.tag === "action").actions;
+  assert.deepEqual(buttons.map((button) => button.text.content), ["允许一次", "本会话允许", "拒绝"]);
+  assert.deepEqual(buttons.map((button) => button.value.decision), ["accept", "acceptForSession", "decline"]);
+  assert.deepEqual(parseApprovalCardAction({
+    event_id: "evt_card", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
+    token: "token_1", action_tag: "button",
+    action_value: JSON.stringify(buttons[1].value),
+  }), {
+    eventId: "evt_card", chatId: "oc_1", messageId: "om_1", operatorId: "ou_1",
+    token: "token_1", approvalId: "approval-1", decision: "acceptForSession",
+  });
+  assert.equal(parseApprovalCardAction({ action_tag: "button", action_value: "not-json" }), null);
+  assert.equal(parseApprovalCardAction({
+    action_tag: "button",
+    action_value: JSON.stringify({ kind: "codex2lark_approval", approvalId: "x", decision: "acceptAlways" }),
+  }), null);
+
+  const resolved = buildResolvedApprovalCard("decline", "ou_1");
+  assert.equal(resolved.header.template, "red");
+  assert.deepEqual(resolved.open_ids, ["ou_1"]);
+  const update = approvalCardUpdateArgs("token_1", resolved);
+  assert.deepEqual(update.slice(0, 6), ["api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot", "--data"]);
+  assert.deepEqual(JSON.parse(update.at(-1)), { token: "token_1", card: resolved });
+});
+
+test("help card exposes common conversation controls and the opposite approval mode", () => {
+  const card = buildHelpCard("auto");
+  const buttons = card.elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  assert.deepEqual(buttons.map((button) => button.text.content), [
+    "新建对话", "继续对话", "改为手动审批", "查看状态", "停止当前操作",
+  ]);
+  assert.deepEqual(buttons.map((button) => button.value.action), [
+    "new", "resume", "approvalMode", "status", "stop",
+  ]);
+  assert.equal(buttons[2].value.mode, "manual");
+  assert.match(buildHelpCard("manual").elements[1].actions[2].text.content, /自动审批/);
+});
+
+test("resume cards show five sessions plus only the available page controls", () => {
+  const threads = Array.from({ length: 5 }, (_, index) => ({
+    id: `thr_${index + 1}`,
+    name: `Session ${index + 1}`,
+    cwd: `C:\\work\\project-${index + 1}`,
+    updatedAt: 1_750_000_000 - index,
+  }));
+  const actions = (card) => card.elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  const first = actions(buildResumeCard(threads, "thr_1", 0, 15));
+  assert.equal(first.length, 6);
+  assert.deepEqual(first.slice(-1)[0].value, {
+    kind: "codex2lark_control", action: "resumePage", pageStart: 5,
+  });
+  const middle = actions(buildResumeCard(threads, "", 5, 15));
+  assert.equal(middle.length, 7);
+  assert.deepEqual(middle.slice(-2).map((button) => button.text.content), ["上一页", "下一页"]);
+  const last = actions(buildResumeCard(threads, "", 10, 15));
+  assert.equal(last.length, 6);
+  assert.equal(last.at(-1).text.content, "上一页");
+  assert.equal(actions(buildResumeCard(threads, "", 0, 5)).length, 5);
+  assert.equal(first[0].value.threadId, "thr_1");
+});
+
+test("control card callbacks accept only the supported typed actions", () => {
+  const raw = {
+    event_id: "evt_control", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
+    token: "token_1", action_tag: "button",
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: 5 }),
+  };
+  assert.deepEqual(parseControlCardAction(raw), {
+    type: "control", eventId: "evt_control", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", action: "resumePage", pageStart: 5,
+  });
+  assert.equal(parseCardAction(raw).type, "control");
+  assert.equal(parseCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: -5 }),
+  }), null);
+  assert.equal(parseCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "deleteEverything" }),
+  }), null);
 });
 
 test("createThreadTitle summarizes the first prompt without another model call", () => {
