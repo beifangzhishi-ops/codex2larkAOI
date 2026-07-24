@@ -14,8 +14,8 @@ Stop only the selected project's bridge process and its `event consume` child. P
    - `codex2lark`: development build, test Feishu bot.
 2. Run the bundled wrapper with an absolute project path:
 
-   ```powershell
-   .\.agents\skills\stop-codex2lark-service\scripts\stop-service.ps1 -ProjectRoot C:\Users\noha\Documents\AAAVitalFile\codex2larkV1.0
+   ```cmd
+   .\.agents\skills\stop-codex2lark-service\scripts\stop-service.cmd "C:\Users\noha\Documents\AAAVitalFile\codex2larkV1.0"
    ```
 
 3. Confirm the PID recorded in `.state\bridge.pid` is absent. Treat a missing PID file as already stopped.
@@ -25,7 +25,7 @@ Stop only the selected project's bridge process and its `event consume` child. P
 
 - Never use `lark-cli event stop --all` for normal project shutdown.
 - Do not use `lark-cli event stop --force` while another project may be running.
-- Let `stop.ps1` write `.state\stop-requested`; the bridge detects it, closes the selected `event consume` child's stdin, and exits gracefully.
+- Let `stop.cmd` write `.state\stop-requested`; the bridge detects it, closes the selected `event consume` child's stdin, and exits gracefully.
 - If shutdown exceeds 10 seconds, inspect `.state\bridge.err.log`, `.state\bridge.out.log`, and the recorded PID. Do not broaden the stop target automatically.
 - Do not look for HTTP port conflicts. This project does not expose an HTTP listener.
 

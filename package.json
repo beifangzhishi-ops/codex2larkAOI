@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Bridge Feishu CLI message events to Codex CLI sessions.",
   "scripts": {
-    "start": "node src/bridge.js",
-    "check": "node --check src/bridge.js && node --test --test-isolation=none"
+    "start": "node src/service-control.js start",
+    "check": "node --check src/bridge.js && node --check src/service-control.js && node --test --test-isolation=none"
   },
   "engines": {
     "node": ">=20"

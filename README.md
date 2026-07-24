@@ -48,24 +48,24 @@ notepad .env
 
 ## 运行
 
-```powershell
+```cmd
 npm run check
-.\start.ps1
+.\start.cmd
 ```
 
-启动失败时，`start.ps1` 会显示错误并等待按 Enter，便于从双击窗口排查问题。后台或自动化调用可避免等待：
+`start.cmd` 在前台运行桥接；启动失败时会显示错误并等待按 Enter，便于从双击窗口排查问题。自动化调用可避免等待：
 
-```powershell
-.\start.ps1 -NoPauseOnError
+```cmd
+.\start.cmd --no-pause-on-error
 ```
 
-看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。后台实例可用以下命令停止：
+兼容旧自动化参数 `-NoPauseOnError`。看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。停止服务：
 
-```powershell
-.\stop.ps1
+```cmd
+.\stop.cmd
 ```
 
-`stop.ps1` 只停止本项目桥接及其子进程，不调用共享的 `lark-cli event stop --all`。
+也可从资源管理器双击 `start.cmd` 或 `stop.cmd`。停止脚本写入本项目 `.state\\stop-requested`，由桥接优雅关闭本项目事件消费者；它不调用共享的 `lark-cli event stop --all`，也不会停止其他项目实例。自动化停止使用 `.\stop.cmd --no-pause-on-error`。
 
 ## 飞书控制
 

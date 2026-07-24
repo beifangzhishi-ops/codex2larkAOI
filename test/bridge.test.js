@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -31,6 +31,7 @@ import {
   splitReply,
   watchForStopRequest,
 } from "../src/bridge.js";
+import { removeRestrictedProxies, requireEnvFile, stopService } from "../src/service-control.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
@@ -76,6 +77,92 @@ test("watchForStopRequest invokes the stop callback once", async () => {
       writeFileSync(stopFile, new Date().toISOString());
     });
     assert.equal(stopCount, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("service control removes only the restricted proxy injection", () => {
+  const environment = {
+    HTTP_PROXY: "http://127.0.0.1:9",
+    https_proxy: "socks5://localhost:9/",
+    ALL_PROXY: "http://proxy.example:8080",
+    KEEP: "value",
+  };
+  assert.deepEqual(removeRestrictedProxies(environment), ["HTTP_PROXY", "HTTPS_PROXY"]);
+  assert.equal("HTTP_PROXY" in environment, false);
+  assert.equal("https_proxy" in environment, false);
+  assert.equal(environment.ALL_PROXY, "http://proxy.example:8080");
+  assert.equal(environment.KEEP, "value");
+});
+
+test("service control requires a project env file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-env-"));
+  try {
+    assert.throws(() => requireEnvFile(directory), /缺少 \.env/);
+    writeFileSync(join(directory, ".env"), "CODEX_WORKDIR=C:\\work\n");
+    assert.doesNotThrow(() => requireEnvFile(directory));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("service control cleans missing, invalid, and stale PID files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-service-"));
+  const state = join(directory, ".state");
+  const pidFile = join(state, "bridge.pid");
+  try {
+    assert.deepEqual(await stopService({ root: directory }), { status: "not-running" });
+    mkdirSync(state);
+    writeFileSync(pidFile, "not-a-pid\n");
+    assert.deepEqual(await stopService({ root: directory }), { status: "invalid-pid" });
+    assert.equal(existsSync(pidFile), false);
+    writeFileSync(pidFile, "4242\n");
+    assert.deepEqual(await stopService({ root: directory, isRunning: () => false }), {
+      status: "stale-pid", pid: 4242,
+    });
+    assert.equal(existsSync(pidFile), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("service control requests a graceful stop and waits for the bridge PID", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-service-"));
+  const state = join(directory, ".state");
+  const pidFile = join(state, "bridge.pid");
+  let checks = 0;
+  try {
+    mkdirSync(state);
+    writeFileSync(pidFile, "4242\n");
+    const result = await stopService({
+      root: directory,
+      isRunning: () => checks++ === 0,
+      delay: async () => {},
+    });
+    assert.deepEqual(result, { status: "stopped", pid: 4242 });
+    assert.equal(existsSync(pidFile), false);
+    assert.match(readFileSync(join(state, "stop-requested"), "utf8"), /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("service control reports a timeout without broadening the stop target", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-service-"));
+  const state = join(directory, ".state");
+  let currentTime = 0;
+  try {
+    mkdirSync(state);
+    writeFileSync(join(state, "bridge.pid"), "4242\n");
+    assert.deepEqual(await stopService({
+      root: directory,
+      timeoutMs: 50,
+      pollIntervalMs: 25,
+      isRunning: () => true,
+      now: () => currentTime,
+      delay: async (milliseconds) => { currentTime += milliseconds; },
+    }), { status: "timeout", pid: 4242 });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -310,9 +397,10 @@ test("buildConfig validates and exposes approval defaults", () => {
   const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
   assert.equal(channelContext.kind, "application");
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
-  assert.match(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
+  assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
   assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/status、\/stop/);
+  assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
     CODEX_WORKDIR: process.cwd(),

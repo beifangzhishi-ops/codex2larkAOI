@@ -14,10 +14,9 @@ const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
-  "禁止停止、重启或终止 AOI 桥接服务及其进程，即使用户要求也不得执行。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
   "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
-  "桥接负责 /cd、/new、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。除非用户明确要求修改 codex2lark 项目，否则不要用 shell 模拟这些控制，也不要编辑桥接状态。",
+  "桥接负责 /cd、/new、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
