@@ -366,7 +366,33 @@ function loadEnv() {
 }
 
 function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
+  if (process.platform !== "win32" || /\.exe$/i.test(name)) return name;
+  return `${name}.exe`;
+}
+
+export function resolveCodexCommand(env = process.env, { platform = process.platform } = {}) {
+  const configured = String(env.CODEX_COMMAND || "").trim();
+  if (configured) return configured;
+  if (platform !== "win32") return "codex";
+
+  const home = String(env.USERPROFILE || env.HOME || "").trim();
+  if (home) {
+    for (const root of [".vscode", ".vscode-insiders"]) {
+      const extensions = resolve(home, root, "extensions");
+      try {
+        const candidates = readdirSync(extensions, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && /^openai\.chatgpt-.*-win32-x64$/i.test(entry.name))
+          .map((entry) => resolve(extensions, entry.name, "bin", "windows-x86_64", "codex.exe"))
+          .filter((entry) => existsSync(entry))
+          .sort()
+          .reverse();
+        if (candidates[0]) return candidates[0];
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  return "codex";
 }
 
 function commandSpec(name, args) {
@@ -378,7 +404,7 @@ function commandSpec(name, args) {
   return { command: commandName(name), args };
 }
 
-function run(command, args, { input, cwd = ROOT, timeoutMs = 60_000, onStdoutLine, onStderrLine } = {}) {
+export function runCommand(command, args, { input, cwd = ROOT, timeoutMs = 60_000, onStdoutLine, onStderrLine } = {}) {
   return new Promise((resolveRun, reject) => {
     const spec = commandSpec(command, args);
     const child = spawn(spec.command, spec.args, {
@@ -401,11 +427,14 @@ function run(command, args, { input, cwd = ROOT, timeoutMs = 60_000, onStdoutLin
     };
     child.stdout.on("data", (chunk) => feed(chunk, true));
     child.stderr.on("data", (chunk) => feed(chunk, false));
-    child.once("error", reject);
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill();
     }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.once("close", (code) => {
       clearTimeout(timer);
       if (stdoutBuffer) onStdoutLine?.(stdoutBuffer);
@@ -474,6 +503,7 @@ export function buildConfig(env) {
     rootDir,
     allowGroups: String(env.FEISHU_ALLOW_GROUPS).toLowerCase() === "true",
     reactions: !["false", "0", "no"].includes(String(env.FEISHU_REACTIONS ?? "true").trim().toLowerCase()),
+    codexCommand: resolveCodexCommand(env),
     model: env.CODEX_MODEL?.trim() || "",
     defaultApprovalMode,
     timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 1_800_000,
@@ -483,10 +513,10 @@ export function buildConfig(env) {
   };
 }
 
-async function preflight() {
-  await run("codex", ["app-server", "--help"]);
-  await run("lark-cli", ["event", "schema", "card.action.trigger"]);
-  const { stdout } = await run("lark-cli", ["auth", "status"]);
+async function preflight(config) {
+  await runCommand(config.codexCommand, ["app-server", "--help"]);
+  await runCommand("lark-cli", ["event", "schema", "card.action.trigger"]);
+  const { stdout } = await runCommand("lark-cli", ["auth", "status"]);
   const status = JSON.parse(stdout);
   if (!status.identities?.bot?.available) throw new Error("lark-cli bot 身份尚未就绪。");
 }
@@ -635,7 +665,7 @@ export function approvalCardUpdateArgs(token, card) {
 }
 
 async function sendApprovalCard(messageId, eventKey, subject, approvalId) {
-  await run("lark-cli", [
+  await runCommand("lark-cli", [
     "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     "--msg-type", "interactive", "--content", JSON.stringify(buildApprovalCard(subject, approvalId)),
     "--idempotency-key", idempotencyKey(eventKey, approvalId),
@@ -643,7 +673,7 @@ async function sendApprovalCard(messageId, eventKey, subject, approvalId) {
 }
 
 async function sendInteractiveCard(messageId, eventKey, card) {
-  await run("lark-cli", [
+  await runCommand("lark-cli", [
     "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     "--msg-type", "interactive", "--content", JSON.stringify(card),
     "--idempotency-key", idempotencyKey(eventKey),
@@ -652,7 +682,7 @@ async function sendInteractiveCard(messageId, eventKey, card) {
 
 async function updateInteractiveCard(event, card) {
   if (!event.token || !event.operatorId) throw new Error("卡片回调缺少更新凭据");
-  await run("lark-cli", approvalCardUpdateArgs(event.token, {
+  await runCommand("lark-cli", approvalCardUpdateArgs(event.token, {
     ...card,
     open_ids: [event.operatorId],
   }));
@@ -660,7 +690,7 @@ async function updateInteractiveCard(event, card) {
 
 async function updateApprovalCard(event) {
   if (!event.token || !event.operatorId) return;
-  await run("lark-cli", approvalCardUpdateArgs(
+  await runCommand("lark-cli", approvalCardUpdateArgs(
     event.token,
     buildResolvedApprovalCard(event.decision, event.operatorId),
   ));
@@ -674,11 +704,11 @@ export async function sendReply(messageId, eventKey, text, config) {
       "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     ];
     try {
-      await run("lark-cli", [...common, "--markdown", chunks[index], "--idempotency-key", key]);
+      await runCommand("lark-cli", [...common, "--markdown", chunks[index], "--idempotency-key", key]);
     } catch (error) {
       if (!isMarkdownValidationError(error)) throw error;
       console.warn(`[bridge] markdown rejected for ${messageId}; retrying as plain text`);
-      await run("lark-cli", [...common, "--text", chunks[index], "--idempotency-key", `${key}-text`]);
+      await runCommand("lark-cli", [...common, "--text", chunks[index], "--idempotency-key", `${key}-text`]);
     }
   }
 }
@@ -702,7 +732,7 @@ export function reactionIdFromOutput(text) {
 }
 
 async function addReaction(messageId, emojiType) {
-  const { stdout } = await run("lark-cli", reactionArgs("create", messageId, emojiType));
+  const { stdout } = await runCommand("lark-cli", reactionArgs("create", messageId, emojiType));
   return reactionIdFromOutput(stdout);
 }
 
@@ -719,7 +749,7 @@ async function beginProcessingReaction(messageId, config) {
 async function finishProcessingReaction(messageId, reactionId, succeeded, config) {
   if (!config.reactions || !reactionId) return;
   try {
-    await run("lark-cli", reactionArgs("delete", messageId, reactionId));
+    await runCommand("lark-cli", reactionArgs("delete", messageId, reactionId));
   } catch (error) {
     console.warn(`[bridge] cannot remove Typing reaction from ${messageId}: ${error.message}`);
     return;
@@ -737,7 +767,7 @@ async function sendAttachment(event, directive, config, index) {
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`文件不存在：${path}`);
   if (statSync(path).size < 1) throw new Error(`文件为空：${path}`);
   const mediaFlag = directive.kind === "MEDIA" ? "--image" : "--file";
-  await run("lark-cli", [
+  await runCommand("lark-cli", [
     "im", "+messages-reply", "--as", "bot", "--message-id", event.messageId,
     mediaFlag, `.\\${basename(path)}`, "--idempotency-key", idempotencyKey(event.eventId, "file", index, path),
   ], { cwd: dirname(path), timeoutMs: 120_000 });
@@ -760,7 +790,7 @@ class BridgeRuntime {
   constructor(state, config) {
     this.state = state;
     this.config = config;
-    this.client = new CodexAppServer({ cwd: ROOT });
+    this.client = new CodexAppServer({ cwd: ROOT, command: config.codexCommand });
     this.loadedThreads = new Set();
     this.activeChats = new Map();
     this.activeThreads = new Map();
@@ -1392,11 +1422,12 @@ export async function main() {
   const env = loadEnv();
   if (env.LARKSUITE_CLI_CONFIG_DIR?.trim()) process.env.LARKSUITE_CLI_CONFIG_DIR = resolve(env.LARKSUITE_CLI_CONFIG_DIR.trim());
   const config = buildConfig(env);
-  await preflight();
+  await preflight(config);
   const state = loadState();
   const runtime = new BridgeRuntime(state, config);
   await runtime.start();
   console.log(`[bridge] root=${config.rootDir}`);
+  console.log(`[bridge] codex=${config.codexCommand}`);
   console.log(`[bridge] allowed_users=${config.allowedIds.size} full_read=true approval=${config.defaultApprovalMode} sandbox=workspace-write`);
   startConsumer(state, config, runtime);
 }

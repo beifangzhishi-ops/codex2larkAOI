@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   approvalCardUpdateArgs,
   buildConfig,
@@ -26,7 +26,9 @@ import {
   parseDotEnv,
   reactionArgs,
   reactionIdFromOutput,
+  resolveCodexCommand,
   resolveWorkdirQuery,
+  runCommand,
   selectResumeThread,
   splitReply,
   watchForStopRequest,
@@ -105,6 +107,28 @@ test("service control requires a project env file", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Codex command uses an explicit path or discovers the VS Code extension binary", () => {
+  const home = mkdtempSync(join(tmpdir(), "codex2lark-codex-"));
+  const discovered = join(home, ".vscode", "extensions", "openai.chatgpt-99-win32-x64",
+    "bin", "windows-x86_64", "codex.exe");
+  try {
+    mkdirSync(dirname(discovered), { recursive: true });
+    writeFileSync(discovered, "binary");
+    assert.equal(resolveCodexCommand({ USERPROFILE: home }, { platform: "win32" }), discovered);
+    assert.equal(resolveCodexCommand({ CODEX_COMMAND: "C:\\tools\\codex.exe" }, { platform: "win32" }),
+      "C:\\tools\\codex.exe");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("missing command rejects immediately instead of retaining the preflight timer", async () => {
+  await assert.rejects(
+    runCommand(`codex2lark-missing-${process.pid}`, ["--version"], { timeoutMs: 60_000 }),
+    /ENOENT/,
+  );
 });
 
 test("service control cleans missing, invalid, and stale PID files", async () => {

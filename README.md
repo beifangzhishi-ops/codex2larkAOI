@@ -40,6 +40,7 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和项目名搜索根目录；项目名优先模糊匹配其第一层目录，也可切换到任意现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
+- `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
 - `FEISHU_REACTIONS=true`：执行普通 Codex 任务时显示消息表情状态。
