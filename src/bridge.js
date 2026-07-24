@@ -370,6 +370,23 @@ function commandName(name) {
   return `${name}.exe`;
 }
 
+export function createConsumerReadiness(eventKeys) {
+  const expected = new Set(eventKeys);
+  const readyEvents = new Set();
+  let resolveReady;
+  const ready = new Promise((resolvePromise) => { resolveReady = resolvePromise; });
+  return {
+    ready,
+    isReady: () => readyEvents.size === expected.size,
+    markReady: (eventKey) => {
+      if (!expected.has(eventKey)) return false;
+      readyEvents.add(eventKey);
+      if (readyEvents.size === expected.size) resolveReady();
+      return readyEvents.size === expected.size;
+    },
+  };
+}
+
 export function resolveCodexCommand(env = process.env, { platform = process.platform } = {}) {
   const configured = String(env.CODEX_COMMAND || "").trim();
   if (configured) return configured;
@@ -1358,6 +1375,7 @@ async function acceptCardEvent(raw, runtime, state, config) {
 
 function startConsumer(state, config, runtime) {
   const retryMs = new Map();
+  const readiness = createConsumerReadiness(["im.message.receive_v1", "card.action.trigger"]);
   let stopping = false;
   const children = new Set();
   let stopWatching;
@@ -1384,7 +1402,10 @@ function startConsumer(state, config, runtime) {
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString("utf8").trim();
       if (text) console.error(`[lark:${eventKey}] ${text}`);
-      if (text.includes("[event] ready")) retryMs.set(eventKey, 1000);
+      if (text.includes("[event] ready")) {
+        retryMs.set(eventKey, 1000);
+        readiness.markReady(eventKey);
+      }
     });
     child.once("error", (error) => console.error(`[lark:${eventKey}] ${error.message}`));
     child.once("close", (code) => {
@@ -1415,6 +1436,7 @@ function startConsumer(state, config, runtime) {
   process.once("SIGTERM", stop);
   start("im.message.receive_v1", acceptEvent);
   start("card.action.trigger", acceptCardEvent);
+  return readiness.ready;
 }
 
 export async function main() {
@@ -1429,7 +1451,7 @@ export async function main() {
   console.log(`[bridge] root=${config.rootDir}`);
   console.log(`[bridge] codex=${config.codexCommand}`);
   console.log(`[bridge] allowed_users=${config.allowedIds.size} full_read=true approval=${config.defaultApprovalMode} sandbox=workspace-write`);
-  startConsumer(state, config, runtime);
+  await startConsumer(state, config, runtime);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

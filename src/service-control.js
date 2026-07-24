@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const SCRIPT = fileURLToPath(import.meta.url);
 const RESTRICTED_PROXY = /^(?:https?|socks5?):\/\/(?:127\.0\.0\.1|localhost):9\/?$/i;
 
 function statePaths(root) {
@@ -11,6 +13,8 @@ function statePaths(root) {
     stateDir,
     pidFile: resolve(stateDir, "bridge.pid"),
     stopFile: resolve(stateDir, "stop-requested"),
+    outputLog: resolve(stateDir, "bridge.out.log"),
+    errorLog: resolve(stateDir, "bridge.err.log"),
   };
 }
 
@@ -109,11 +113,96 @@ export async function startService({ root = ROOT, environment = process.env, sta
     await main();
   });
   await runBridge();
+  if (process.send) {
+    process.send({ type: "ready", pid: process.pid });
+    process.disconnect();
+  }
+}
+
+function failureLog(errorLog) {
+  if (!existsSync(errorLog)) return "";
+  const text = readFileSync(errorLog, "utf8").trim();
+  return text.slice(-4_000);
+}
+
+export function waitForBackgroundStart(child, {
+  timeoutMs = 60_000,
+  readFailureLog = () => "",
+} = {}) {
+  return new Promise((resolveLaunch, rejectLaunch) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("message", onMessage);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+      callback(value);
+    };
+    const fail = (message) => {
+      const log = readFailureLog();
+      finish(rejectLaunch, new Error(log ? `${message}\n${log}` : message));
+    };
+    const onMessage = (message) => {
+      if (message?.type !== "ready") return;
+      child.unref();
+      finish(resolveLaunch, { pid: Number(message.pid) || child.pid });
+    };
+    const onError = (error) => fail(`后台启动失败：${error.message}`);
+    const onClose = (code, signal) => fail(`后台启动失败，退出码=${code ?? "未知"}${signal ? `，信号=${signal}` : ""}。`);
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* child already exited */ }
+      fail(`后台启动超过 ${Math.ceil(timeoutMs / 1000)} 秒，已终止本次启动进程。`);
+    }, timeoutMs);
+    child.once("message", onMessage);
+    child.once("error", onError);
+    child.once("close", onClose);
+  });
+}
+
+export async function launchService({
+  root = ROOT,
+  environment = process.env,
+  startupTimeoutMs = 60_000,
+  spawnProcess = spawn,
+} = {}) {
+  requireEnvFile(root);
+  const { stateDir, outputLog, errorLog } = statePaths(root);
+  mkdirSync(stateDir, { recursive: true });
+  const outputFd = openSync(outputLog, "w");
+  const errorFd = openSync(errorLog, "w");
+  const childEnvironment = { ...environment };
+  removeRestrictedProxies(childEnvironment);
+  let child;
+  try {
+    child = spawnProcess(process.execPath, [SCRIPT, "start"], {
+      cwd: root,
+      env: childEnvironment,
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", outputFd, errorFd, "ipc"],
+    });
+  } finally {
+    closeSync(outputFd);
+    closeSync(errorFd);
+  }
+  const result = await waitForBackgroundStart(child, {
+    timeoutMs: startupTimeoutMs,
+    readFailureLog: () => failureLog(errorLog),
+  });
+  console.log(`[start] 桥接服务已在后台启动，PID=${result.pid}`);
+  console.log(`[start] 日志：${outputLog}`);
+  return result;
 }
 
 export async function runServiceCommand(command, options) {
   if (command === "start") {
     await startService(options);
+    return 0;
+  }
+  if (command === "launch") {
+    await launchService(options);
     return 0;
   }
   if (command === "stop") {
@@ -136,7 +225,7 @@ export async function runServiceCommand(command, options) {
     }
     throw new Error(`桥接服务未在 10 秒内退出，PID=${result.pid}。未停止共享的 lark-cli 事件总线。`);
   }
-  throw new Error("用法：node src/service-control.js <start|stop>");
+  throw new Error("用法：node src/service-control.js <launch|start|stop>");
 }
 
 async function main() {

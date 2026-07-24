@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,6 +12,7 @@ import {
   buildResumeCard,
   buildResolvedApprovalCard,
   createThreadTitle,
+  createConsumerReadiness,
   extractFileDirectives,
   formatResumeThreads,
   formatThreadItem,
@@ -33,7 +35,7 @@ import {
   splitReply,
   watchForStopRequest,
 } from "../src/bridge.js";
-import { removeRestrictedProxies, requireEnvFile, stopService } from "../src/service-control.js";
+import { removeRestrictedProxies, requireEnvFile, stopService, waitForBackgroundStart } from "../src/service-control.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
@@ -82,6 +84,53 @@ test("watchForStopRequest invokes the stop callback once", async () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("consumer startup waits for both event consumers", async () => {
+  const readiness = createConsumerReadiness(["message", "card"]);
+  readiness.markReady("message");
+  assert.equal(readiness.isReady(), false);
+  readiness.markReady("card");
+  await readiness.ready;
+  assert.equal(readiness.isReady(), true);
+});
+
+test("background launcher resolves on ready IPC and reports startup failures", async () => {
+  const success = new EventEmitter();
+  success.pid = 4242;
+  let unrefCalled = false;
+  success.unref = () => { unrefCalled = true; };
+  const ready = waitForBackgroundStart(success, { timeoutMs: 1000 });
+  success.emit("message", { type: "ready", pid: 4242 });
+  assert.deepEqual(await ready, { pid: 4242 });
+  assert.equal(unrefCalled, true);
+
+  const failed = new EventEmitter();
+  failed.pid = 4243;
+  failed.unref = () => {};
+  const failure = waitForBackgroundStart(failed, {
+    timeoutMs: 1000,
+    readFailureLog: () => "[bridge] fatal: 配置无效",
+  });
+  failed.emit("close", 1, null);
+  await assert.rejects(failure, /配置无效/);
+
+  const spawnFailed = new EventEmitter();
+  spawnFailed.pid = 4245;
+  spawnFailed.unref = () => {};
+  const spawnFailure = waitForBackgroundStart(spawnFailed, { timeoutMs: 1000 });
+  spawnFailed.emit("error", new Error("spawn node ENOENT"));
+  await assert.rejects(spawnFailure, /spawn node ENOENT/);
+});
+
+test("background launcher terminates only its timed-out child", async () => {
+  const child = new EventEmitter();
+  child.pid = 4244;
+  child.unref = () => {};
+  let killCalled = false;
+  child.kill = () => { killCalled = true; };
+  await assert.rejects(waitForBackgroundStart(child, { timeoutMs: 1 }), /已终止本次启动进程/);
+  assert.equal(killCalled, true);
 });
 
 test("service control removes only the restricted proxy injection", () => {

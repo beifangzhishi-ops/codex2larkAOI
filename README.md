@@ -54,13 +54,13 @@ npm run check
 .\start.cmd
 ```
 
-`start.cmd` 在前台运行桥接；启动失败时会显示错误并等待按 Enter，便于从双击窗口排查问题。自动化调用可避免等待：
+`start.cmd` 会先确认 Codex App Server 和两个事件消费者均已就绪，再自动退出窗口；桥接继续在后台运行。启动失败时会显示错误并等待按 Enter，便于从双击窗口排查问题。运行日志保存在 `.state\\bridge.out.log` 和 `.state\\bridge.err.log`。自动化调用可避免等待：
 
 ```cmd
 .\start.cmd --no-pause-on-error
 ```
 
-兼容旧自动化参数 `-NoPauseOnError`。看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。停止服务：
+兼容旧自动化参数 `-NoPauseOnError`。使用 `.\start.cmd --foreground` 可在当前窗口实时查看启动日志；`npm start` 默认后台启动，`npm run start:foreground` 保持前台。看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。停止服务：
 
 ```cmd
 .\stop.cmd
