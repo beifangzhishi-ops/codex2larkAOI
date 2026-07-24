@@ -53,6 +53,12 @@ npm run check
 .\start.ps1
 ```
 
+启动失败时，`start.ps1` 会显示错误并等待按 Enter，便于从双击窗口排查问题。后台或自动化调用可避免等待：
+
+```powershell
+.\start.ps1 -NoPauseOnError
+```
+
 看到 `im.message.receive_v1` 和 `card.action.trigger` 两个 `[event] ready` 标记后即可给机器人发送任务。后台实例可用以下命令停止：
 
 ```powershell
