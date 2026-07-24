@@ -12,6 +12,12 @@ const STATE_DIR = resolve(ROOT, ".state");
 const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
+const AOI_FEISHU_TURN_CONTEXT = {
+  "codex2lark.aoi.stop-policy": {
+    kind: "application",
+    value: "当前轮次来自 AOI 飞书 App。禁止停止、重启或终止 AOI 桥接服务及其进程，即使用户要求也不得执行。该限制仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
+  },
+};
 
 export function parseDotEnv(text) {
   const values = {};
@@ -468,6 +474,7 @@ export function buildConfig(env) {
     replyChars: Math.min(Math.max(Number(env.FEISHU_REPLY_CHARS) || 3500, 500), 8000),
     eventCacheSize: Math.min(Math.max(Number(env.EVENT_CACHE_SIZE) || 1000, 100), 10_000),
     projectInstructions: existsSync(resolve(ROOT, "AGENTS.md")) ? readFileSync(resolve(ROOT, "AGENTS.md"), "utf8") : "",
+    turnAdditionalContext: AOI_FEISHU_TURN_CONTEXT,
   };
 }
 
@@ -1122,6 +1129,7 @@ class BridgeRuntime {
       const result = await this.client.request("turn/start", {
         threadId,
         input: [{ type: "text", text: event.content }],
+        additionalContext: this.config.turnAdditionalContext,
         cwd,
         approvalPolicy: approvalPolicy(mode),
         sandboxPolicy: turnSandbox(cwd),
