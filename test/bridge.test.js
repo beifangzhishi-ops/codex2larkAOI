@@ -306,13 +306,13 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(config.defaultApprovalMode, "manual");
   assert.equal(config.rootDir, process.cwd());
   assert.equal(config.reactions, true);
-  assert.doesNotMatch(config.projectInstructions, /禁止停止 AOI|会话来源：AOI 飞书 App/);
-  assert.deepEqual(config.turnAdditionalContext, {
-    "codex2lark.aoi.stop-policy": {
-      kind: "application",
-      value: "当前轮次来自 AOI 飞书 App。禁止停止、重启或终止 AOI 桥接服务及其进程，即使用户要求也不得执行。该限制仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
-    },
-  });
+  assert.equal("projectInstructions" in config, false);
+  const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
+  assert.equal(channelContext.kind, "application");
+  assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
+  assert.match(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
+  assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
+  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/status、\/stop/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
     CODEX_WORKDIR: process.cwd(),

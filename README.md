@@ -98,7 +98,7 @@ npm run check
 
 ## 文件发送
 
-项目级 [AGENTS.md](./AGENTS.md) 要求 Codex 在最终回答中输出独立的交付指令：
+桥接为每个飞书轮次注入的渠道指令要求 Codex 在最终回答中输出独立的交付指令：
 
 ```text
 FILE:C:\absolute\path\report.pdf
@@ -117,6 +117,6 @@ MEDIA:C:\absolute\path\plot.png
 - `approvalModes`：聊天到审批模式；
 - `events`：事件去重窗口。
 
-凭证仍由 `lark-cli` 和 `codex` 自行管理。项目提示词会作为 App Server 的 developer instructions 注入，同时目标项目自身的 `AGENTS.md` 仍按其工作目录加载。
+凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
