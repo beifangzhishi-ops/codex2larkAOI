@@ -348,6 +348,68 @@ export function selectResumeThread(threads, query) {
   return { error: `找不到会话：${value}。发送 \`/resume\` 刷新列表。` };
 }
 
+function turnTimestamp(turn) {
+  const value = Number(turn?.startedAt ?? turn?.completedAt);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function selectLatestTurn(turns) {
+  if (!Array.isArray(turns) || !turns.length) return null;
+  return turns.reduce((latest, turn) => {
+    const latestTime = turnTimestamp(latest);
+    const turnTime = turnTimestamp(turn);
+    return latestTime !== null && turnTime !== null && turnTime < latestTime ? latest : turn;
+  });
+}
+
+function historicalInputText(input) {
+  if (!input || typeof input !== "object") return "[非文本输入]";
+  if (input.type === "text") return String(input.text || "").trim();
+  if (["image", "localImage"].includes(input.type)) return "[图片]";
+  if (["audio", "localAudio"].includes(input.type)) return "[音频]";
+  if (input.type === "skill") return input.name ? `[技能：${input.name}]` : "[技能]";
+  if (input.type === "mention") return input.name ? `[提及：${input.name}]` : "[提及]";
+  return "[非文本输入]";
+}
+
+export function cleanHistoricalFinalText(text) {
+  return String(text || "")
+    .replace(/^\s*(?:FILE|MEDIA):\s*(?:"[^"]+"|'[^']+'|.+?)\s*$/gim, "")
+    .replace(/\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g, (match, label, target) => {
+      const value = String(target || "").trim();
+      return /^(?:https?:|mailto:|#)/i.test(value) ? match : label;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function formatLatestTurnReplay(turns) {
+  const turn = selectLatestTurn(turns);
+  if (!turn) return "最近一轮对话\n\n该会话还没有对话记录。";
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  const userParts = items
+    .filter((item) => item?.type === "userMessage")
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map(historicalInputText)
+    .filter(Boolean);
+  const finalParts = items
+    .filter((item) => item?.type === "agentMessage" && item.phase !== "commentary" &&
+      (item.phase === "final_answer" || item.phase == null))
+    .map((item) => cleanHistoricalFinalText(item.text))
+    .filter(Boolean);
+  if (!finalParts.length) {
+    const plan = [...items].reverse().find((item) => item?.type === "plan" && item.text?.trim());
+    if (plan) finalParts.push(cleanHistoricalFinalText(plan.text));
+  }
+  const userText = userParts.join("\n").trim() || "（该轮没有可回放的用户输入）";
+  const finalText = finalParts.join("\n\n").trim() || "（该轮没有最终答复）";
+  return `最近一轮对话\n\n用户：${userText}\n\nCodex：${finalText}`;
+}
+
+export function hasCompleteTurnHistory(thread) {
+  return Array.isArray(thread?.turns) && thread.turns.every((turn) => !turn?.itemsView || turn.itemsView === "full");
+}
+
 function directoryCandidates(parent, segment) {
   const needle = segment.toLocaleLowerCase();
   const names = readdirSync(parent, { withFileTypes: true })
@@ -1565,31 +1627,44 @@ class BridgeRuntime {
       return;
     }
     const threadId = selected.thread.id;
+    let historyThread;
     if (threadId === this.state.sessions[event.chatId]) {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
-        `已经在该会话中：${threadLabel(selected.thread)}`, this.config);
-      return;
+        `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
+    } else {
+      const active = this.activeThreads.get(threadId);
+      if (active) {
+        await sendReply(event.messageId, `${event.eventId}-resume-active`,
+          "该会话正在执行其他任务，暂时不能切换。", this.config);
+        return;
+      }
+      const selectedCwd = availableThreadCwd(selected.thread);
+      if (!this.loadedThreads.has(threadId)) {
+        const resumed = await this.client.request("thread/resume", {
+          threadId,
+          ...this.#threadOptions(event.chatId, selectedCwd || this.cwdFor(event.chatId)),
+        });
+        if (hasCompleteTurnHistory(resumed?.thread)) historyThread = resumed.thread;
+        this.loadedThreads.add(threadId);
+      }
+      this.state.sessions[event.chatId] = threadId;
+      if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
+      this.resumeCandidates.delete(event.chatId);
+      saveState(this.state);
+      await sendReply(event.messageId, `${event.eventId}-resume-done`,
+        `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
     }
-    const active = this.activeThreads.get(threadId);
-    if (active) {
-      await sendReply(event.messageId, `${event.eventId}-resume-active`,
-        "该会话正在执行其他任务，暂时不能切换。", this.config);
-      return;
+    try {
+      if (!historyThread) {
+        const read = await this.client.request("thread/read", { threadId, includeTurns: true });
+        historyThread = read?.thread;
+      }
+      await sendReply(event.messageId, `${event.eventId}-resume-replay`,
+        formatLatestTurnReplay(historyThread?.turns), this.config);
+    } catch (error) {
+      await sendReply(event.messageId, `${event.eventId}-resume-replay-error`,
+        `最近一轮读取失败：${String(error.message || error).slice(0, 1500)}`, this.config);
     }
-    const selectedCwd = availableThreadCwd(selected.thread);
-    if (!this.loadedThreads.has(threadId)) {
-      await this.client.request("thread/resume", {
-        threadId,
-        ...this.#threadOptions(event.chatId, selectedCwd || this.cwdFor(event.chatId)),
-      });
-      this.loadedThreads.add(threadId);
-    }
-    this.state.sessions[event.chatId] = threadId;
-    if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
-    this.resumeCandidates.delete(event.chatId);
-    saveState(this.state);
-    await sendReply(event.messageId, `${event.eventId}-resume-done`,
-      `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${basename(this.cwdFor(event.chatId))}`, this.config);
   }
 
   async #handleResumePage(event, requestedStart) {

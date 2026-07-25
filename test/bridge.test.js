@@ -19,10 +19,12 @@ import {
   buildScreenshotPowerShellCommand,
   buildTitleThreadOptions,
   buildTitleTurnParams,
+  cleanHistoricalFinalText,
   createPendingTitleJob,
   createConsumerReadiness,
   extractFileDirectives,
   formatResumeThreads,
+  formatLatestTurnReplay,
   formatThreadItem,
   idempotencyKey,
   isMarkdownValidationError,
@@ -42,9 +44,11 @@ import {
   sanitizeGeneratedTitle,
   parseGeneratedTitle,
   runCommand,
+  selectLatestTurn,
   selectResumeThread,
   splitReply,
   watchForStopRequest,
+  hasCompleteTurnHistory,
 } from "../src/bridge.js";
 import {
   launchService,
@@ -450,6 +454,59 @@ test("help card exposes common conversation controls and the opposite approval m
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/screen/);
+});
+
+test("resume replay selects the actual latest turn without falling back from failures", () => {
+  const turns = [
+    {
+      id: "newer", startedAt: 200, status: "failed", items: [
+        { type: "userMessage", content: [{ type: "text", text: "最后一个请求" }, { type: "image", url: "data:" }] },
+        { type: "agentMessage", phase: "commentary", text: "处理中" },
+        { type: "reasoning", summary: ["隐藏过程"] },
+        { type: "commandExecution", command: "dir", aggregatedOutput: "secret" },
+      ],
+    },
+    {
+      id: "older", startedAt: 100, status: "completed", items: [
+        { type: "userMessage", content: [{ type: "text", text: "旧请求" }] },
+        { type: "agentMessage", phase: "final_answer", text: "旧答案" },
+      ],
+    },
+  ];
+  assert.equal(selectLatestTurn(turns).id, "newer");
+  const replay = formatLatestTurnReplay(turns);
+  assert.match(replay, /用户：最后一个请求\n\[图片\]/);
+  assert.match(replay, /该轮没有最终答复/);
+  assert.doesNotMatch(replay, /处理中|隐藏过程|secret|旧答案/);
+});
+
+test("resume replay accepts legacy finals, plan fallback, placeholders, and cleans local attachments", () => {
+  const legacy = formatLatestTurnReplay([{ status: "completed", items: [
+    { type: "userMessage", content: [
+      { type: "audio", url: "data:" }, { type: "localImage", path: "C:\\plot.png" },
+      { type: "skill", name: "报告" }, { type: "mention", name: "Excel" },
+    ] },
+    { type: "agentMessage", text: "完成。\nFILE:C:\\report.pdf\n[报告](C:\\report.pdf)\n[官网](https://example.com)" },
+    { type: "mcpToolCall", server: "docs", tool: "search", result: "隐藏" },
+  ] }]);
+  assert.match(legacy, /\[音频\]\n\[图片\]\n\[技能：报告\]\n\[提及：Excel\]/);
+  assert.match(legacy, /Codex：完成。\n\n报告\n\[官网\]\(https:\/\/example.com\)/);
+  assert.doesNotMatch(legacy, /FILE:|report\.pdf|隐藏/);
+
+  const plan = formatLatestTurnReplay([{ status: "interrupted", items: [
+    { type: "userMessage", content: [{ type: "text", text: "制定方案" }] },
+    { type: "plan", text: "最终计划" },
+  ] }]);
+  assert.match(plan, /Codex：最终计划/);
+  assert.equal(formatLatestTurnReplay([]), "最近一轮对话\n\n该会话还没有对话记录。");
+  assert.equal(cleanHistoricalFinalText("MEDIA:C:\\plot.png\n查看 [图片](./plot.png)"), "查看 图片");
+});
+
+test("resume history completeness requires full turn items", () => {
+  assert.equal(hasCompleteTurnHistory({ turns: [] }), true);
+  assert.equal(hasCompleteTurnHistory({ turns: [{ itemsView: "full", items: [] }] }), true);
+  assert.equal(hasCompleteTurnHistory({ turns: [{ itemsView: "summary", items: [] }] }), false);
+  assert.equal(hasCompleteTurnHistory({}), false);
 });
 
 test("model catalog and selection use only server-supported model efforts", () => {
