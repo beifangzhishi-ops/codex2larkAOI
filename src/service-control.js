@@ -1,11 +1,97 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SCRIPT = fileURLToPath(import.meta.url);
 const RESTRICTED_PROXY = /^(?:https?|socks5?):\/\/(?:127\.0\.0\.1|localhost):9\/?$/i;
+
+function pathEntries(environment) {
+  return Object.keys(environment)
+    .filter((key) => key.toUpperCase() === "PATH")
+    .flatMap((key) => String(environment[key] || "").split(";"))
+    .map((entry) => entry.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
+function isWindowsAppsPowerShell(candidate, environment) {
+  const normalized = win32.normalize(candidate).toLowerCase();
+  const localAppData = String(environment.LOCALAPPDATA || "").trim();
+  const userAlias = localAppData
+    ? win32.join(localAppData, "Microsoft", "WindowsApps", "pwsh.exe").toLowerCase()
+    : "";
+  return normalized === userAlias
+    || /\\Users\\[^\\]+\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh\.exe$/i.test(normalized)
+    || /\\Program Files\\WindowsApps\\Microsoft\.PowerShell_[^\\]+\\pwsh\.exe$/i.test(normalized);
+}
+
+function canRunPowerShell(candidate, environment, spawnSyncProcess = spawnSync) {
+  const result = spawnSyncProcess(candidate, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0",
+  ], {
+    encoding: "utf8",
+    env: environment,
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  return !result.error && result.status === 0;
+}
+
+export function resolvePowerShellExecutable(environment = process.env, {
+  platform = process.platform,
+  fileExists = existsSync,
+  validateExecutable,
+  spawnSyncProcess = spawnSync,
+} = {}) {
+  if (platform !== "win32") return null;
+  const candidates = [];
+  if (environment.CODEX_POWERSHELL_PATH) candidates.push(String(environment.CODEX_POWERSHELL_PATH).trim());
+  if (environment.LOCALAPPDATA) {
+    candidates.push(win32.join(environment.LOCALAPPDATA, "Programs", "PowerShell", "7", "pwsh.exe"));
+  }
+  for (const programFiles of [environment.ProgramW6432, environment.ProgramFiles]) {
+    if (programFiles) candidates.push(win32.join(programFiles, "PowerShell", "7", "pwsh.exe"));
+  }
+  candidates.push(...pathEntries(environment).map((entry) => win32.join(entry, "pwsh.exe")));
+
+  const validate = validateExecutable
+    || ((candidate) => canRunPowerShell(candidate, environment, spawnSyncProcess));
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const normalized = win32.normalize(candidate);
+    const key = normalized.toLowerCase();
+    if (seen.has(key) || isWindowsAppsPowerShell(normalized, environment)) continue;
+    seen.add(key);
+    if (fileExists(normalized) && validate(normalized)) return normalized;
+  }
+  throw new Error(
+    "找不到适用于 Codex Windows 沙箱的非 AppX PowerShell 7。"
+      + "请安装便携版或 MSI 版 PowerShell，避免使用 WindowsApps 中的执行别名或 Store 安装目录。",
+  );
+}
+
+export function preparePowerShellEnvironment(environment = process.env, options = {}) {
+  const executable = resolvePowerShellExecutable(environment, options);
+  if (!executable) return null;
+  const directory = win32.dirname(executable);
+  const pathKeys = Object.keys(environment).filter((key) => key.toUpperCase() === "PATH");
+  const targetKey = pathKeys.find((key) => key === "Path") || pathKeys[0] || "Path";
+  const entries = [directory, ...pathEntries(environment)];
+  const uniqueEntries = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const key = win32.normalize(entry).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueEntries.push(entry);
+  }
+  for (const key of pathKeys) {
+    if (key !== targetKey) delete environment[key];
+  }
+  environment[targetKey] = uniqueEntries.join(";");
+  return executable;
+}
 
 function statePaths(root) {
   const stateDir = resolve(root, ".state");
@@ -103,11 +189,18 @@ export async function stopService({
   return { status: "timeout", pid };
 }
 
-export async function startService({ root = ROOT, environment = process.env, startBridge } = {}) {
+export async function startService({
+  root = ROOT,
+  environment = process.env,
+  startBridge,
+  powerShellOptions,
+} = {}) {
   requireEnvFile(root);
   process.chdir(root);
   const removed = removeRestrictedProxies(environment);
   if (removed.length) console.log(`[start] 已移除受限环境代理：${removed.join(", ")}`);
+  const powerShell = preparePowerShellEnvironment(environment, powerShellOptions);
+  if (powerShell) console.log(`[start] PowerShell：${powerShell}`);
   const runBridge = startBridge || (async () => {
     const { main } = await import("./bridge.js");
     await main();
@@ -166,14 +259,17 @@ export async function launchService({
   environment = process.env,
   startupTimeoutMs = 60_000,
   spawnProcess = spawn,
+  powerShellOptions,
 } = {}) {
   requireEnvFile(root);
+  const childEnvironment = { ...environment };
+  removeRestrictedProxies(childEnvironment);
+  const powerShell = preparePowerShellEnvironment(childEnvironment, powerShellOptions);
+  if (powerShell) console.log(`[start] PowerShell：${powerShell}`);
   const { stateDir, outputLog, errorLog } = statePaths(root);
   mkdirSync(stateDir, { recursive: true });
   const outputFd = openSync(outputLog, "w");
   const errorFd = openSync(errorLog, "w");
-  const childEnvironment = { ...environment };
-  removeRestrictedProxies(childEnvironment);
   let child;
   try {
     child = spawnProcess(process.execPath, [SCRIPT, "start"], {

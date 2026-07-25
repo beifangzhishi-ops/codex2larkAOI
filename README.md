@@ -27,6 +27,8 @@ lark-cli auth login --recommend
 lark-cli auth status
 ```
 
+Windows 主机还必须安装非 AppX 形式的 PowerShell 7，例如用户便携版 `%LOCALAPPDATA%\\Programs\\PowerShell\\7\\pwsh.exe` 或 MSI 版 `%ProgramFiles%\\PowerShell\\7\\pwsh.exe`。服务启动时会自动查找并试运行该程序，把其目录放到后台子进程 `Path` 的最前面。AOI 明确排除用户目录中的 App Execution Alias 和 `%ProgramFiles%\\WindowsApps` 下的 Store/AppX 程序；它们可能在普通用户会话中运行，但无法由 Codex 的 `unelevated` Windows 沙箱受限令牌启动。如果没有合适的 PowerShell，AOI 会在启动阶段明确报错，不会通过管理员常驻、沙箱外自动重试或关闭 Codex 沙箱绕过问题。
+
 在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件和添加/删除消息表情所需权限。要使用审批卡片，还必须在“应用 -> 事件与回调 -> 回调配置”中启用回调并订阅 `card.action.trigger`，同时授予 `im:message:readonly`；长连接模式不需要配置回调 URL。
 
 复制模板并填写配置：
@@ -55,7 +57,7 @@ npm run check
 .\start.cmd
 ```
 
-`start.cmd` 会先确认 Codex App Server 和两个事件消费者均已就绪，再自动退出窗口；桥接继续在后台运行。启动失败时会显示错误并等待按 Enter，便于从双击窗口排查问题。运行日志保存在 `.state\\bridge.out.log` 和 `.state\\bridge.err.log`。自动化调用可避免等待：
+`start.cmd` 会先校验 PowerShell 7、确认 Codex App Server 和两个事件消费者均已就绪，再自动退出窗口；桥接继续在后台运行。启动时显示的 `[start] PowerShell` 应指向 `LocalAppData\\Programs` 或普通 `Program Files\\PowerShell` 安装目录，不应包含 `WindowsApps`。启动失败时会显示错误并等待按 Enter，便于从双击窗口排查问题。运行日志保存在 `.state\\bridge.out.log` 和 `.state\\bridge.err.log`。自动化调用可避免等待：
 
 ```cmd
 .\start.cmd --no-pause-on-error

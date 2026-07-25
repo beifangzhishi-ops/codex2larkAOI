@@ -36,7 +36,15 @@ import {
   splitReply,
   watchForStopRequest,
 } from "../src/bridge.js";
-import { removeRestrictedProxies, requireEnvFile, stopService, waitForBackgroundStart } from "../src/service-control.js";
+import {
+  launchService,
+  preparePowerShellEnvironment,
+  removeRestrictedProxies,
+  requireEnvFile,
+  resolvePowerShellExecutable,
+  stopService,
+  waitForBackgroundStart,
+} from "../src/service-control.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
@@ -146,6 +154,88 @@ test("service control removes only the restricted proxy injection", () => {
   assert.equal("https_proxy" in environment, false);
   assert.equal(environment.ALL_PROXY, "http://proxy.example:8080");
   assert.equal(environment.KEEP, "value");
+});
+
+test("service control excludes WindowsApps paths and prepends portable PowerShell", () => {
+  const aliasDirectory = "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps";
+  const appxDirectory = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.4.0_x64__test";
+  const portableDirectory = "C:\\Users\\tester\\AppData\\Local\\Programs\\PowerShell\\7";
+  const executable = `${portableDirectory}\\pwsh.exe`;
+  const environment = {
+    LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+    Path: `${aliasDirectory};${appxDirectory};C:\\tools`,
+    PATH: "C:\\other-tools",
+  };
+  const options = {
+    platform: "win32",
+    fileExists: (candidate) => candidate.toLowerCase() === executable.toLowerCase(),
+    validateExecutable: () => true,
+  };
+
+  assert.equal(resolvePowerShellExecutable(environment, options), executable);
+  assert.equal(preparePowerShellEnvironment(environment, options), executable);
+  assert.equal(environment.Path.split(";")[0], portableDirectory);
+  assert.match(environment.Path, /C:\\tools/);
+  assert.match(environment.Path, /C:\\other-tools/);
+  assert.equal("PATH" in environment, false);
+});
+
+test("service control fails when only WindowsApps PowerShell paths are available", () => {
+  const aliasDirectory = "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps";
+  const appxDirectory = "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.4.0_x64__test";
+  const environment = {
+    LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+    Path: `${aliasDirectory};${appxDirectory}`,
+  };
+  assert.throws(() => resolvePowerShellExecutable(environment, {
+    platform: "win32",
+    fileExists: (candidate) => [
+      `${aliasDirectory}\\pwsh.exe`,
+      `${appxDirectory}\\pwsh.exe`,
+    ].some((entry) => entry.toLowerCase() === candidate.toLowerCase()),
+    validateExecutable: () => true,
+  }), /找不到适用于 Codex Windows 沙箱的非 AppX PowerShell 7/);
+});
+
+test("service control leaves non-Windows environments unchanged", () => {
+  const environment = { PATH: "/usr/local/bin:/usr/bin" };
+  assert.equal(preparePowerShellEnvironment(environment, { platform: "linux" }), null);
+  assert.deepEqual(environment, { PATH: "/usr/local/bin:/usr/bin" });
+});
+
+test("background launcher passes the repaired PowerShell path to its child", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-launch-"));
+  const executable = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+  let childEnvironment;
+  try {
+    writeFileSync(join(directory, ".env"), "CODEX_WORKDIR=C:\\work\n");
+    const spawnProcess = (_command, _args, options) => {
+      childEnvironment = options.env;
+      const child = new EventEmitter();
+      child.pid = 4246;
+      child.unref = () => {};
+      queueMicrotask(() => child.emit("message", { type: "ready", pid: child.pid }));
+      return child;
+    };
+    await launchService({
+      root: directory,
+      environment: {
+        LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+        ProgramFiles: "C:\\Program Files",
+        Path: "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps",
+      },
+      startupTimeoutMs: 1000,
+      spawnProcess,
+      powerShellOptions: {
+        platform: "win32",
+        fileExists: (candidate) => candidate.toLowerCase() === executable.toLowerCase(),
+        validateExecutable: () => true,
+      },
+    });
+    assert.equal(childEnvironment.Path.split(";")[0], "C:\\Program Files\\PowerShell\\7");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("service control requires a project env file", () => {
