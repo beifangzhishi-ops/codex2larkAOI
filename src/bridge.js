@@ -1160,17 +1160,102 @@ function turnSandbox(cwd) {
   };
 }
 
+export function snapshotTurnSettings({ threadId, cwd, approvalMode, model, effort }) {
+  return Object.freeze({
+    threadId: String(threadId),
+    cwd: resolve(cwd),
+    approvalMode: String(approvalMode),
+    model: String(model),
+    effort: String(effort),
+  });
+}
+
+export class ThreadTaskQueueManager {
+  constructor(worker, onError = (error) => console.error(error)) {
+    this.worker = worker;
+    this.onError = onError;
+    this.queues = new Map();
+  }
+
+  enqueue(threadId, task) {
+    const queue = this.#queue(threadId);
+    queue.tasks.push(task);
+    this.#drain(threadId, queue);
+  }
+
+  pause(threadId) {
+    this.#queue(threadId).paused = true;
+  }
+
+  resume(threadId) {
+    const queue = this.queues.get(threadId);
+    if (!queue) return;
+    queue.paused = false;
+    this.#drain(threadId, queue);
+  }
+
+  clearPending(threadId) {
+    const queue = this.queues.get(threadId);
+    return queue ? queue.tasks.splice(0) : [];
+  }
+
+  current(threadId) {
+    return this.queues.get(threadId)?.current || null;
+  }
+
+  hasWork(threadId) {
+    const queue = this.queues.get(threadId);
+    return Boolean(queue && (queue.running || queue.tasks.length));
+  }
+
+  pendingCount(threadId) {
+    return this.queues.get(threadId)?.tasks.length || 0;
+  }
+
+  #queue(threadId) {
+    let queue = this.queues.get(threadId);
+    if (!queue) {
+      queue = { tasks: [], running: false, paused: false, current: null };
+      this.queues.set(threadId, queue);
+    }
+    return queue;
+  }
+
+  #drain(threadId, queue) {
+    if (queue.running || queue.paused) return;
+    const task = queue.tasks.shift();
+    if (!task) {
+      this.queues.delete(threadId);
+      return;
+    }
+    queue.running = true;
+    queue.current = task;
+    void Promise.resolve()
+      .then(() => this.worker(task))
+      .catch((error) => this.onError(error, task))
+      .finally(() => {
+        queue.running = false;
+        queue.current = null;
+        this.#drain(threadId, queue);
+      });
+  }
+}
+
 class BridgeRuntime {
   constructor(state, config) {
     this.state = state;
     this.config = config;
     this.client = new CodexAppServer({ cwd: ROOT, command: config.codexCommand });
     this.loadedThreads = new Set();
-    this.activeChats = new Map();
     this.activeThreads = new Map();
+    this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
     this.resumeCandidates = new Map();
-    this.chatQueues = new Map();
+    this.chatRouteQueues = new Map();
+    this.threadQueues = new ThreadTaskQueueManager(
+      (task) => this.#executeThreadTask(task),
+      (error, task) => console.error(`[bridge] thread ${task.snapshot.threadId} event ${task.event.eventId} failed: ${error.stack || error}`),
+    );
     this.titleRuns = new Map();
     this.titleJobsRunning = new Set();
     this.client.on("stderr", (text) => console.error(`[codex] ${text}`));
@@ -1202,28 +1287,27 @@ class BridgeRuntime {
     }
   }
 
-  enqueue(event, command) {
-    const previous = this.chatQueues.get(event.chatId) || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.#processQueued(event, command));
-    this.chatQueues.set(event.chatId, next);
+  route(event, command) {
+    const previous = this.chatRouteQueues.get(event.chatId) || Promise.resolve();
+    const next = previous.catch(() => {}).then(() => this.#processRoute(event, command));
+    this.chatRouteQueues.set(event.chatId, next);
     const cleanup = () => {
-      if (this.chatQueues.get(event.chatId) === next) this.chatQueues.delete(event.chatId);
+      if (this.chatRouteQueues.get(event.chatId) === next) this.chatRouteQueues.delete(event.chatId);
     };
     next.then(cleanup, (error) => {
-      console.error(`[bridge] chat ${event.chatId} event ${event.eventId} failed: ${error.stack || error}`);
+      console.error(`[bridge] chat route ${event.chatId} event ${event.eventId} failed: ${error.stack || error}`);
+      void sendReply(event.messageId, `${event.eventId}-route-error`,
+        `操作失败：${String(error.message || error).slice(0, 2000)}`, this.config).catch((replyError) => {
+        console.error(`[bridge] route error reply failed: ${replyError.message}`);
+      });
       cleanup();
     });
+    return next;
   }
 
-  async handleImmediate(event, command) {
+  async #handleImmediate(event, command) {
     if (command.type === "stop") {
-      const active = this.activeChats.get(event.chatId);
-      if (!active?.turnId) {
-        await sendReply(event.messageId, `${event.eventId}-stop`, "当前没有正在执行的操作。", this.config);
-        return;
-      }
-      await this.client.request("turn/interrupt", { threadId: active.threadId, turnId: active.turnId });
-      await sendReply(event.messageId, `${event.eventId}-stop`, "已请求停止当前操作。", this.config);
+      await this.#stopSelectedThread(event);
       return;
     }
     if (command.type === "approvalMode") {
@@ -1241,10 +1325,63 @@ class BridgeRuntime {
     }
   }
 
-  async #processQueued(event, command) {
+  async #stopSelectedThread(event) {
+    const threadId = this.state.sessions[event.chatId];
+    if (!threadId) {
+      await sendReply(event.messageId, `${event.eventId}-stop`,
+        "当前未选择会话；未中断后台任务，也没有清除排队消息。", this.config);
+      return;
+    }
+    this.threadQueues.pause(threadId);
+    const cleared = this.threadQueues.clearPending(threadId);
+    const current = this.threadQueues.current(threadId);
+    const active = this.activeThreads.get(threadId);
+    let clearedCount = cleared.length;
+    let interruptText = "当前会话没有活跃任务。";
+    try {
+      if (active) {
+        active.stopRequested = true;
+        interruptText = "已请求中断当前会话的活跃任务。";
+        if (active.turnId) {
+          try {
+            active.interruptSent = true;
+            await this.client.request("turn/interrupt", { threadId, turnId: active.turnId });
+          } catch (error) {
+            active.interruptSent = false;
+            interruptText = `活跃任务中断请求失败：${String(error.message || error).slice(0, 500)}`;
+          }
+        }
+      } else if (current && !current.startedTurn) {
+        current.cancelRequested = true;
+        clearedCount += 1;
+        interruptText = "当前会话没有已启动的 Codex turn。";
+      }
+      await Promise.allSettled(cleared.map((task) => sendReply(
+        task.event.messageId,
+        `${task.event.eventId}-cancelled-before-start`,
+        "任务已由 `/stop` 在开始前取消。",
+        this.config,
+      )));
+    } finally {
+      this.threadQueues.resume(threadId);
+    }
+    await sendReply(event.messageId, `${event.eventId}-stop`,
+      `${interruptText}\n已清除 ${clearedCount} 条尚未开始的排队消息。`, this.config);
+  }
+
+  async #processRoute(event, command) {
+    if (["stop", "approvalMode", "approve", "deny"].includes(command?.type)) {
+      await this.#handleImmediate(event, command);
+      return;
+    }
+    if (command?.type === "approvalCard") {
+      await this.#handleApprovalCard(event);
+      return;
+    }
     if (command?.type === "new") {
       const previousThreadId = this.state.sessions[event.chatId];
-      if (this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn") {
+      if (this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
+          !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId)) {
         delete this.state.pendingTitleJobs[previousThreadId];
       }
       delete this.state.sessions[event.chatId];
@@ -1341,40 +1478,40 @@ class BridgeRuntime {
 
     const directFiles = extractFileDirectives(event.content, { cwd: this.cwdFor(event.chatId) });
     if (directFiles.files.length && !directFiles.text) {
-      await this.#deliverFiles(event, directFiles.files);
+      void this.#deliverFiles(event, directFiles.files);
       return;
     }
 
-    const processingReactionId = await beginProcessingReaction(event.messageId, this.config);
-    let succeeded = false;
-    try {
-      const completed = await this.#runTurn(event);
-      const delivery = extractFileDirectives(completed.answer || "", { cwd: this.cwdFor(event.chatId) });
-      if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
-      else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
-      await this.#deliverFiles(event, delivery.files);
-      succeeded = true;
-      const titleJob = this.state.pendingTitleJobs[completed.threadId];
-      if (titleJob?.state === "awaitingFirstTurn") {
-        Object.assign(titleJob, createPendingTitleJob(
-          completed.threadId, completed.cwd, event.content, completed.answer,
-        ));
-        saveState(this.state);
-      }
-      this.#retryPendingTitleJobs();
-    } catch (error) {
-      console.error(error);
-      await sendReply(event.messageId, `${event.eventId}-error`, `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
-    } finally {
-      await finishProcessingReaction(event.messageId, processingReactionId, succeeded, this.config);
+    const cwd = this.cwdFor(event.chatId);
+    const approvalMode = this.modeFor(event.chatId);
+    const { selection } = await this.#selectionFor(event.chatId);
+    if (this.#repairModelSetting(event.chatId, selection)) {
+      await sendReply(event.messageId, `${event.eventId}-model-fallback`,
+        `模型设置已自动回退。\n${selection.fallbackNotice}\n下一轮使用：${selection.entry.displayName}（${selection.entry.model}）/ ${selection.effort}`, this.config);
     }
+    const { threadId } = await this.#ensureThread(
+      event.chatId, selection.entry.model, cwd, approvalMode,
+    );
+    const snapshot = snapshotTurnSettings({
+      threadId,
+      cwd,
+      approvalMode,
+      model: selection.entry.model,
+      effort: selection.effort,
+    });
+    this.threadQueues.enqueue(threadId, {
+      event,
+      snapshot,
+      cancelRequested: false,
+      startedTurn: false,
+    });
   }
 
-  #threadOptions(chatId, cwd = this.cwdFor(chatId), model = "") {
+  #threadOptions(chatId, cwd = this.cwdFor(chatId), model = "", mode = this.modeFor(chatId)) {
     return {
       cwd,
       approvalPolicy: approvalPolicy(),
-      approvalsReviewer: approvalsReviewer(this.modeFor(chatId)),
+      approvalsReviewer: approvalsReviewer(mode),
       sandbox: "workspace-write",
       ...(model ? { model } : {}),
     };
@@ -1546,10 +1683,10 @@ class BridgeRuntime {
     await sendInteractiveCard(event.messageId, `${event.eventId}-model-result`, buildModelResultCard(resolved));
   }
 
-  async handleCardAction(event) {
+  handleCardAction(event) {
     if (event.type === "control") {
       if (["model", "modelPage", "modelPick", "modelEffort", "modelDefault"].includes(event.action)) {
-        this.enqueue(event, { ...event, type: "modelCard" });
+        this.route(event, { ...event, type: "modelCard" });
         return;
       }
       const command = event.action === "approvalMode"
@@ -1559,10 +1696,13 @@ class BridgeRuntime {
           : event.action === "resumePage"
             ? { type: "resumePage", pageStart: event.pageStart }
             : { type: event.action };
-      if (["stop", "approvalMode"].includes(command.type)) await this.handleImmediate(event, command);
-      else this.enqueue(event, command);
+      this.route(event, command);
       return;
     }
+    this.route(event, { ...event, type: "approvalCard" });
+  }
+
+  async #handleApprovalCard(event) {
     let resolved;
     try {
       resolved = this.#resolveApprovalById(event.chatId, event.approvalId, event.decision);
@@ -1632,12 +1772,6 @@ class BridgeRuntime {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
         `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
     } else {
-      const active = this.activeThreads.get(threadId);
-      if (active) {
-        await sendReply(event.messageId, `${event.eventId}-resume-active`,
-          "该会话正在执行其他任务，暂时不能切换。", this.config);
-        return;
-      }
       const selectedCwd = availableThreadCwd(selected.thread);
       if (!this.loadedThreads.has(threadId)) {
         const resumed = await this.client.request("thread/resume", {
@@ -1703,10 +1837,10 @@ class BridgeRuntime {
     }
   }
 
-  async #ensureThread(chatId, model = "") {
+  async #ensureThread(chatId, model = "", cwd = this.cwdFor(chatId), mode = this.modeFor(chatId)) {
     let threadId = this.state.sessions[chatId];
     let isNew = false;
-    const common = this.#threadOptions(chatId, this.cwdFor(chatId), model);
+    const common = this.#threadOptions(chatId, cwd, model, mode);
     if (threadId && !this.loadedThreads.has(threadId)) {
       try {
         await this.client.request("thread/resume", { threadId, ...common });
@@ -1721,7 +1855,7 @@ class BridgeRuntime {
       threadId = result.thread.id;
       this.state.sessions[chatId] = threadId;
       this.state.pendingTitleJobs[threadId] = {
-        ...createPendingTitleJob(threadId, this.cwdFor(chatId), "", ""),
+        ...createPendingTitleJob(threadId, cwd, "", ""),
         state: "awaitingFirstTurn",
       };
       this.loadedThreads.add(threadId);
@@ -1733,14 +1867,14 @@ class BridgeRuntime {
 
   async #startThread(chatId, cwd) {
     const previousThreadId = this.state.sessions[chatId];
-    if (this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn") {
-      delete this.state.pendingTitleJobs[previousThreadId];
-    }
+    const discardPreviousTitle = this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
+      !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId);
     const result = await this.client.request("thread/start", {
       ...this.#threadOptions(chatId, cwd),
       serviceName: "codex2lark",
     });
     const threadId = result.thread.id;
+    if (discardPreviousTitle) delete this.state.pendingTitleJobs[previousThreadId];
     this.state.sessions[chatId] = threadId;
     this.state.workdirs[chatId] = resolve(cwd);
     this.state.pendingTitleJobs[threadId] = {
@@ -1751,27 +1885,71 @@ class BridgeRuntime {
     return threadId;
   }
 
-  async #runTurn(event) {
-    const cwd = this.cwdFor(event.chatId);
-    const mode = this.modeFor(event.chatId);
-    const { selection } = await this.#selectionFor(event.chatId);
-    if (this.#repairModelSetting(event.chatId, selection)) {
-      await sendReply(event.messageId, `${event.eventId}-model-fallback`,
-        `模型设置已自动回退。\n${selection.fallbackNotice}\n下一轮使用：${selection.entry.displayName}（${selection.entry.model}）/ ${selection.effort}`, this.config);
+  async #executeThreadTask(task) {
+    const { event, snapshot } = task;
+    if (task.cancelRequested) {
+      await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+        "任务已由 `/stop` 在开始前取消。", this.config);
+      return;
     }
-    const { threadId, isNew } = await this.#ensureThread(event.chatId, selection.entry.model);
+    const processingReactionId = await beginProcessingReaction(event.messageId, this.config);
+    let succeeded = false;
+    try {
+      if (task.cancelRequested) {
+        await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+          "任务已由 `/stop` 在开始前取消。", this.config);
+        succeeded = true;
+        return;
+      }
+      const completed = await this.#runTurn(task);
+      const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd });
+      if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
+      else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
+      await this.#deliverFiles(event, delivery.files);
+      succeeded = true;
+      const titleJob = this.state.pendingTitleJobs[snapshot.threadId];
+      if (titleJob?.state === "awaitingFirstTurn") {
+        Object.assign(titleJob, createPendingTitleJob(
+          snapshot.threadId, snapshot.cwd, event.content, completed.answer,
+        ));
+        saveState(this.state);
+      }
+      this.#retryPendingTitleJobs();
+    } catch (error) {
+      console.error(error);
+      await sendReply(event.messageId, `${event.eventId}-error`,
+        `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
+    } finally {
+      await finishProcessingReaction(event.messageId, processingReactionId, succeeded, this.config);
+    }
+  }
+
+  async #runTurn(task) {
+    const { event, snapshot } = task;
+    const { threadId, cwd, approvalMode, model, effort } = snapshot;
+    if (!this.loadedThreads.has(threadId)) {
+      await this.client.request("thread/resume", {
+        threadId,
+        ...this.#threadOptions(event.chatId, cwd, model, approvalMode),
+      });
+      this.loadedThreads.add(threadId);
+    }
     let resolveDone;
     let rejectDone;
     const done = new Promise((resolvePromise, rejectPromise) => {
       resolveDone = resolvePromise;
       rejectDone = rejectPromise;
     });
+    void done.catch(() => {});
     const active = {
-      chatId: event.chatId, threadId, turnId: "", event,
+      chatId: event.chatId, threadId, turnId: "", event, approvalMode, stopRequested: false, interruptSent: false,
       finalMessages: [], progressKeys: new Set(), sendQueue: Promise.resolve(), resolveDone, rejectDone,
     };
-    this.activeChats.set(event.chatId, active);
+    task.startedTurn = true;
     this.activeThreads.set(threadId, active);
+    const chatThreads = this.chatActiveThreads.get(event.chatId) || new Set();
+    chatThreads.add(threadId);
+    this.chatActiveThreads.set(event.chatId, chatThreads);
 
     try {
       const result = await this.client.request("turn/start", {
@@ -1780,12 +1958,16 @@ class BridgeRuntime {
         additionalContext: this.config.turnAdditionalContext,
         cwd,
         approvalPolicy: approvalPolicy(),
-        approvalsReviewer: approvalsReviewer(mode),
+        approvalsReviewer: approvalsReviewer(approvalMode),
         sandboxPolicy: turnSandbox(cwd),
-        model: selection.entry.model,
-        effort: selection.effort,
+        model,
+        effort,
       });
       active.turnId = result.turn.id;
+      if (active.stopRequested && !active.interruptSent) {
+        active.interruptSent = true;
+        await this.client.request("turn/interrupt", { threadId, turnId: active.turnId });
+      }
       const timeout = setTimeout(() => rejectDone(new Error(`Codex turn timed out after ${this.config.timeoutMs} ms`)), this.config.timeoutMs);
       try {
         const completion = await done;
@@ -1800,10 +1982,12 @@ class BridgeRuntime {
         clearTimeout(timeout);
       }
       await active.sendQueue;
-      return { answer: active.finalMessages.join("\n\n").trim(), threadId, isNew, cwd };
+      return { answer: active.finalMessages.join("\n\n").trim() };
     } finally {
-      this.activeChats.delete(event.chatId);
-      this.activeThreads.delete(threadId);
+      if (this.activeThreads.get(threadId) === active) this.activeThreads.delete(threadId);
+      const remainingThreads = this.chatActiveThreads.get(event.chatId);
+      remainingThreads?.delete(threadId);
+      if (!remainingThreads?.size) this.chatActiveThreads.delete(event.chatId);
       await this.#clearPendingForTurn(event.chatId, active.turnId);
     }
   }
@@ -1941,7 +2125,7 @@ class BridgeRuntime {
       this.client.respond(message.id, { decision: "cancel" });
       return;
     }
-    if (this.modeFor(active.chatId) === "auto") {
+    if (active.approvalMode === "auto") {
       this.client.respond(message.id, { decision: "acceptForSession" });
       return;
     }
@@ -1995,7 +2179,7 @@ class BridgeRuntime {
 
   #onClientClosed(error) {
     this.loadedThreads.clear();
-    for (const active of this.activeChats.values()) active.rejectDone(error);
+    for (const active of this.activeThreads.values()) active.rejectDone(error);
     for (const titleRun of this.titleRuns.values()) titleRun.rejectDone(error);
   }
 }
@@ -2018,9 +2202,7 @@ async function acceptEvent(raw, runtime, state, config) {
   }
   const command = parseControlCommand(event.content);
   console.log(`[bridge] received event=${event.eventId} chat=${event.chatId} command=${command?.type || "turn"}`);
-  if (["stop", "approvalMode", "approve", "deny"].includes(command?.type)) {
-    await runtime.handleImmediate(event, command);
-  } else runtime.enqueue(event, command);
+  runtime.route(event, command);
 }
 
 async function acceptCardEvent(raw, runtime, state, config) {
@@ -2038,7 +2220,7 @@ async function acceptCardEvent(raw, runtime, state, config) {
     return;
   }
   console.log(`[bridge] received card action event=${event.eventId} chat=${event.chatId}`);
-  await runtime.handleCardAction(event);
+  runtime.handleCardAction(event);
 }
 
 function startConsumer(state, config, runtime) {

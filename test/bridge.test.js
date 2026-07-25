@@ -47,6 +47,8 @@ import {
   selectLatestTurn,
   selectResumeThread,
   splitReply,
+  snapshotTurnSettings,
+  ThreadTaskQueueManager,
   watchForStopRequest,
   hasCompleteTurnHistory,
 } from "../src/bridge.js";
@@ -116,6 +118,63 @@ test("consumer startup waits for both event consumers", async () => {
   readiness.markReady("card");
   await readiness.ready;
   assert.equal(readiness.isReady(), true);
+});
+
+test("thread task queues serialize one thread, run different threads concurrently, and clear only old pending tasks", async () => {
+  const deferred = () => {
+    let resolvePromise;
+    const promise = new Promise((resolveValue) => { resolvePromise = resolveValue; });
+    return { promise, resolve: resolvePromise };
+  };
+  const gates = { a1: deferred(), a3: deferred(), b1: deferred() };
+  const started = [];
+  const finished = [];
+  const manager = new ThreadTaskQueueManager(async (task) => {
+    started.push(task.id);
+    await gates[task.id].promise;
+    finished.push(task.id);
+  });
+  const settle = () => new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  manager.enqueue("thread-a", { id: "a1" });
+  manager.enqueue("thread-a", { id: "a2" });
+  manager.enqueue("thread-b", { id: "b1" });
+  await settle();
+  assert.deepEqual(started, ["a1", "b1"]);
+  assert.equal(manager.current("thread-a").id, "a1");
+  assert.equal(manager.pendingCount("thread-a"), 1);
+
+  manager.pause("thread-a");
+  assert.deepEqual(manager.clearPending("thread-a").map((task) => task.id), ["a2"]);
+  manager.enqueue("thread-a", { id: "a3" });
+  gates.a1.resolve();
+  await settle();
+  assert.deepEqual(started, ["a1", "b1"]);
+  manager.resume("thread-a");
+  await settle();
+  assert.deepEqual(started, ["a1", "b1", "a3"]);
+
+  gates.a3.resolve();
+  gates.b1.resolve();
+  await settle();
+  assert.deepEqual(finished.sort(), ["a1", "a3", "b1"]);
+  assert.equal(manager.hasWork("thread-a"), false);
+  assert.equal(manager.hasWork("thread-b"), false);
+});
+
+test("turn settings are immutable routing-time snapshots", () => {
+  const source = {
+    threadId: "thr_old", cwd: process.cwd(), approvalMode: "manual", model: "gpt-old", effort: "high",
+  };
+  const snapshot = snapshotTurnSettings(source);
+  source.threadId = "thr_new";
+  source.approvalMode = "auto";
+  source.model = "gpt-new";
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(snapshot.threadId, "thr_old");
+  assert.equal(snapshot.approvalMode, "manual");
+  assert.equal(snapshot.model, "gpt-old");
+  assert.equal(snapshot.effort, "high");
 });
 
 test("background launcher resolves on ready IPC and reports startup failures", async () => {
