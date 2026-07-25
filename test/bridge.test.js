@@ -372,9 +372,11 @@ test("approval settings keep on-request policy and delegate only new turns", () 
   assert.equal(approvalsReviewer("manual"), "user");
 });
 
-test("screenshot command renders a self-contained virtual desktop capture", () => {
+test("screenshot command captures physical pixels across the DPI-aware virtual desktop", () => {
   const command = buildScreenshotPowerShellCommand("C:\\temp\\screen's.png");
-  assert.match(command, /SystemInformation\]::VirtualScreen/);
+  assert.match(command, /SetThreadDpiAwarenessContext/);
+  assert.match(command, /GetSystemMetrics\(76\)/);
+  assert.match(command, /GetSystemMetrics\(79\)/);
   assert.match(command, /CopyFromScreen/);
   assert.match(command, /screen''s\.png/);
 });
@@ -432,15 +434,16 @@ test("help card exposes common conversation controls and the opposite approval m
   const buttons = card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.deepEqual(buttons.map((button) => button.text.content), [
-    "新建对话", "继续对话", "模型设置", "截取屏幕", "查看状态", "改为人工审批", "停止当前操作",
+    "继续对话", "模型设置", "改为人工审批", "查看状态", "停止当前操作",
   ]);
   assert.deepEqual(buttons.map((button) => button.value.action), [
-    "new", "resume", "model", "screen", "status", "approvalMode", "stop",
+    "resume", "model", "approvalMode", "status", "stop",
   ]);
-  assert.equal(buttons[5].value.mode, "manual");
+  assert.equal(buttons[2].value.mode, "manual");
   const manualButtons = buildHelpCard("manual").elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
-  assert.match(manualButtons[5].text.content, /替我审批/);
+  assert.match(manualButtons[2].text.content, /替我审批/);
+  assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/screen/);
 });

@@ -714,22 +714,15 @@ export function buildHelpCard(approvalMode = "auto") {
       {
         tag: "action",
         actions: [
-          controlButton("新建对话", "primary", "new"),
           controlButton("继续对话", "default", "resume"),
           controlButton("模型设置", "default", "model"),
-        ],
-      },
-      {
-        tag: "action",
-        actions: [
-          controlButton("截取屏幕", "default", "screen"),
-          controlButton("查看状态", "default", "status"),
           controlButton(`改为${nextMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextMode }),
         ],
       },
       {
         tag: "action",
         actions: [
+          controlButton("查看状态", "default", "status"),
           controlButton("停止当前操作", "danger", "stop"),
         ],
       },
@@ -963,13 +956,18 @@ async function sendAttachment(event, directive, config, index) {
 export function buildScreenshotPowerShellCommand(outputPath) {
   const path = String(outputPath).replaceAll("'", "''");
   return [
-    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class Codex2LarkNativeScreen { [DllImport(\"user32.dll\")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext); [DllImport(\"user32.dll\")] public static extern int GetSystemMetrics(int index); }'",
+    "[Codex2LarkNativeScreen]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null",
     "Add-Type -AssemblyName System.Drawing",
-    "$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen",
-    "$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height",
+    "$left = [Codex2LarkNativeScreen]::GetSystemMetrics(76)",
+    "$top = [Codex2LarkNativeScreen]::GetSystemMetrics(77)",
+    "$width = [Codex2LarkNativeScreen]::GetSystemMetrics(78)",
+    "$height = [Codex2LarkNativeScreen]::GetSystemMetrics(79)",
+    "if ($width -le 0 -or $height -le 0) { throw '无法读取虚拟桌面尺寸。' }",
+    "$bitmap = New-Object System.Drawing.Bitmap $width, $height",
     "$graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
     "try {",
-    "  $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)",
+    "  $graphics.CopyFromScreen($left, $top, 0, 0, $bitmap.Size, [System.Drawing.CopyPixelOperation]::SourceCopy)",
     `  $bitmap.Save('${path}', [System.Drawing.Imaging.ImageFormat]::Png)`,
     "} finally {",
     "  $graphics.Dispose()",
