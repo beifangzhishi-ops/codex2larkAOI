@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { basename, dirname, extname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexAppServer } from "./codex-app-server.js";
 
@@ -99,29 +99,19 @@ export function normalizeEvent(value) {
 export function parseControlCommand(text) {
   const value = text.trim();
   const lower = value.toLowerCase();
-  if (lower === "/stop" || value === "停止当前操作" || value === "停止执行") return { type: "stop" };
-  if (/^\/(?:approval|mode)\s+(?:auto|automatic)$/i.test(value) ||
-      (value.length <= 40 && /(?:切换|改成|改为|设为|使用|开启).{0,8}自动审批/.test(value))) {
-    return { type: "approvalMode", mode: "auto" };
-  }
-  if (/^\/(?:approval|mode)\s+manual$/i.test(value) ||
-      (value.length <= 40 && /(?:切换|改成|改为|设为|使用|开启).{0,8}手动审批/.test(value))) {
-    return { type: "approvalMode", mode: "manual" };
-  }
-  if (/^\/approve(?:\s+(?:session|always))?$/i.test(value) ||
-      /^(?:批准|同意执行|允许一次|本次同意)$/.test(value)) {
+  if (lower === "/stop") return { type: "stop" };
+  if (/^\/approval\s+auto$/i.test(value)) return { type: "approvalMode", mode: "auto" };
+  if (/^\/approval\s+manual$/i.test(value)) return { type: "approvalMode", mode: "manual" };
+  if (/^\/approve(?:\s+session)?$/i.test(value)) {
     return { type: "approve", session: /session|always/i.test(value) };
   }
-  if (/^(?:\/deny|\/reject)$/i.test(value) || /^(?:拒绝|不同意|拒绝执行)$/.test(value)) {
-    return { type: "deny" };
-  }
+  if (lower === "/deny") return { type: "deny" };
   if (lower === "/new") return { type: "new" };
   const resume = value.match(/^\/resume(?:\s+(.+))?$/i);
   if (resume) return { type: "resume", query: (resume[1] || "").trim() };
   if (lower === "/status") return { type: "status" };
   if (lower === "/help") return { type: "help" };
-  const cd = value.match(/^\/cd(?:\s+(.+))?$/i) ||
-    (value.length <= 120 ? value.match(/^(?:切换|进入|转到)(?:到|至)?\s*(.+?)(?:项目|目录)?$/) : null);
+  const cd = value.match(/^\/cd(?:\s+(.+))?$/i);
   if (cd) return { type: "cd", query: (cd[1] || "").trim() };
   return null;
 }
@@ -256,41 +246,63 @@ export function selectResumeThread(threads, query) {
   return { error: `找不到会话：${value}。发送 \`/resume\` 刷新列表。` };
 }
 
-export function parsePendingWorkdirReply(text, waitingForPath) {
-  if (!waitingForPath) return null;
-  const query = String(text || "").trim().replace(/^['"]|['"]$/g, "");
-  if (!query || !isAbsolute(query)) return null;
-  return { type: "cd", query };
-}
-
-export function resolveWorkdirQuery(query, rootDir) {
-  const root = resolve(rootDir);
-  const trimmed = query.trim().replace(/^['"]|['"]$/g, "");
-  if (!trimmed) return { error: "请提供项目名或目录路径。" };
-  const candidate = resolve(root, trimmed);
-  if (existsSync(candidate) && statSync(candidate).isDirectory()) {
-    return { path: candidate };
-  }
-  if (isAbsolute(trimmed)) {
-    return { error: `目录不存在或不是文件夹：${candidate}`, needsPath: true };
-  }
-
-  const needle = trimmed.toLocaleLowerCase();
-  const directories = readdirSync(root, { withFileTypes: true })
+function directoryCandidates(parent, segment) {
+  const needle = segment.toLocaleLowerCase();
+  const names = readdirSync(parent, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name);
-  const exact = directories.find((name) => name.toLocaleLowerCase() === needle);
-  if (exact) return { path: resolve(root, exact) };
-  const matches = directories.filter((name) => {
-    const normalized = name.toLocaleLowerCase();
-    return normalized.includes(needle) || needle.includes(normalized);
-  });
-  if (matches.length === 1) return { path: resolve(root, matches[0]) };
-  if (matches.length > 1) return { error: `匹配到多个项目：${matches.join("、")}` };
-  return {
-    error: `在 ${root} 的第一层目录中找不到“${trimmed}”。请发送该文件夹的绝对路径。`,
-    needsPath: true,
-  };
+  const ranks = [
+    (name) => name.toLocaleLowerCase() === needle,
+    (name) => name.toLocaleLowerCase().startsWith(needle),
+    (name) => name.toLocaleLowerCase().includes(needle) || needle.includes(name.toLocaleLowerCase()),
+  ];
+  for (const matches of ranks.map((match) => names.filter(match))) {
+    if (matches.length) return matches;
+  }
+  return [];
+}
+
+function resolveWorkdirFrom(query, start) {
+  const normalized = query.replace(/[\\/]+/g, sep);
+  if (isAbsolute(normalized)) {
+    const path = resolve(normalized);
+    return existsSync(path) && statSync(path).isDirectory()
+      ? { path }
+      : { error: `目录不存在或不是文件夹：${path}` };
+  }
+  let current = resolve(start);
+  for (const segment of normalized.split(/[\\/]+/).filter(Boolean)) {
+    if (segment === ".") continue;
+    if (segment === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const candidates = directoryCandidates(current, segment);
+    if (candidates.length !== 1) {
+      if (candidates.length > 1) return { candidates: candidates.map((name) => resolve(current, name)) };
+      return { missing: segment };
+    }
+    current = resolve(current, candidates[0]);
+  }
+  return { path: current };
+}
+
+export function resolveWorkdirQuery(query, rootDir, currentDir = rootDir) {
+  const trimmed = String(query || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!trimmed) return { error: "请提供目录路径。" };
+  const starts = [resolve(currentDir)];
+  if (resolve(rootDir) !== starts[0]) starts.push(resolve(rootDir));
+  const failures = [];
+  for (const start of starts) {
+    const result = resolveWorkdirFrom(trimmed, start);
+    if (result.path || result.candidates) return result.path ? result : {
+      error: `“${trimmed}”匹配到多个目录：${result.candidates.join("、")}`,
+      candidates: result.candidates,
+    };
+    failures.push(result);
+  }
+  const detail = failures.find((failure) => failure.missing)?.missing || trimmed;
+  return { error: `找不到目录层级：${detail}` };
 }
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
@@ -619,7 +631,7 @@ export function buildHelpCard(approvalMode = "auto") {
         actions: [
           controlButton("新建对话", "primary", "new"),
           controlButton("继续对话", "default", "resume"),
-          controlButton(`改为${nextMode === "auto" ? "自动" : "手动"}审批`, "default", "approvalMode", { mode: nextMode }),
+          controlButton(`改为${nextMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextMode }),
         ],
       },
       {
@@ -790,8 +802,12 @@ async function sendAttachment(event, directive, config, index) {
   ], { cwd: dirname(path), timeoutMs: 120_000 });
 }
 
-function approvalPolicy(mode) {
-  return mode === "manual" ? "on-request" : "never";
+export function approvalPolicy() {
+  return "on-request";
+}
+
+export function approvalsReviewer(mode) {
+  return mode === "auto" ? "auto_review" : "user";
 }
 
 function turnSandbox(cwd) {
@@ -870,9 +886,8 @@ class BridgeRuntime {
     if (command.type === "approvalMode") {
       this.state.approvalModes[event.chatId] = command.mode;
       saveState(this.state);
-      if (command.mode === "auto") await this.#resolvePending(event.chatId, "acceptForSession");
       await sendReply(event.messageId, `${event.eventId}-mode`,
-        `已切换为${command.mode === "auto" ? "自动" : "手动"}审批。该设置从当前待审批项和后续操作开始生效。`, this.config);
+        `已切换为${command.mode === "auto" ? "替我审批" : "人工审批"}。该设置仅影响后续轮次；已发出的审批请求仍需由原审批者处理。`, this.config);
       return;
     }
     if (command.type === "approve" || command.type === "deny") {
@@ -884,10 +899,6 @@ class BridgeRuntime {
   }
 
   async #processQueued(event, command) {
-    command ||= parsePendingWorkdirReply(
-      event.content,
-      this.state.pendingWorkdirQueries[event.chatId],
-    );
     if (command?.type === "new") {
       delete this.state.sessions[event.chatId];
       delete this.state.pendingWorkdirQueries[event.chatId];
@@ -898,7 +909,7 @@ class BridgeRuntime {
     }
     if (command?.type === "status") {
       await sendReply(event.messageId, `${event.eventId}-status`,
-        `桥接服务正常。\n\n工作目录：${this.cwdFor(event.chatId)}\n会话：${this.state.sessions[event.chatId] || "尚未创建"}\n审批：${this.modeFor(event.chatId) === "auto" ? "自动" : "手动"}\n权限：全盘读取、当前项目目录写入`, this.config);
+        `桥接服务正常。\n\n工作目录：${this.cwdFor(event.chatId)}\n会话：${this.state.sessions[event.chatId] || "尚未创建"}\n审批：${this.modeFor(event.chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}\n权限：全盘读取、当前项目目录写入`, this.config);
       return;
     }
     if (command?.type === "help") {
@@ -926,18 +937,28 @@ class BridgeRuntime {
     }
     if (command?.type === "cd") {
       delete this.state.pendingWorkdirQueries[event.chatId];
-      const result = resolveWorkdirQuery(command.query, this.config.rootDir);
+      const result = resolveWorkdirQuery(command.query, this.config.rootDir, this.cwdFor(event.chatId));
       if (result.error) {
-        if (result.needsPath) this.state.pendingWorkdirQueries[event.chatId] = command.query;
         saveState(this.state);
         await sendReply(event.messageId, `${event.eventId}-cd`, result.error, this.config);
         return;
       }
-      this.state.workdirs[event.chatId] = result.path;
-      delete this.state.pendingWorkdirQueries[event.chatId];
-      this.resumeCandidates.delete(event.chatId);
-      saveState(this.state);
-      await sendReply(event.messageId, `${event.eventId}-cd`, `已切换工作目录：${result.path}\n后续轮次会在该目录执行，会话上下文保留。`, this.config);
+      const previousCwd = this.state.workdirs[event.chatId];
+      const previousThread = this.state.sessions[event.chatId];
+      let threadId;
+      try {
+        threadId = await this.#startThread(event.chatId, result.path);
+        this.resumeCandidates.delete(event.chatId);
+        saveState(this.state);
+      } catch (error) {
+        if (previousCwd) this.state.workdirs[event.chatId] = previousCwd;
+        else delete this.state.workdirs[event.chatId];
+        if (previousThread) this.state.sessions[event.chatId] = previousThread;
+        else delete this.state.sessions[event.chatId];
+        saveState(this.state);
+        throw error;
+      }
+      await sendReply(event.messageId, `${event.eventId}-cd`, `已切换工作目录并创建新会话：${result.path}\n会话：${threadId}`, this.config);
       return;
     }
 
@@ -967,7 +988,8 @@ class BridgeRuntime {
   #threadOptions(chatId, cwd = this.cwdFor(chatId)) {
     return {
       cwd,
-      approvalPolicy: approvalPolicy(this.modeFor(chatId)),
+      approvalPolicy: approvalPolicy(),
+      approvalsReviewer: approvalsReviewer(this.modeFor(chatId)),
       sandbox: "workspace-write",
       ...(this.config.model ? { model: this.config.model } : {}),
     };
@@ -1159,6 +1181,18 @@ class BridgeRuntime {
     return { threadId, isNew };
   }
 
+  async #startThread(chatId, cwd) {
+    const result = await this.client.request("thread/start", {
+      ...this.#threadOptions(chatId, cwd),
+      serviceName: "codex2lark",
+    });
+    const threadId = result.thread.id;
+    this.state.sessions[chatId] = threadId;
+    this.state.workdirs[chatId] = resolve(cwd);
+    this.loadedThreads.add(threadId);
+    return threadId;
+  }
+
   async #runTurn(event) {
     const cwd = this.cwdFor(event.chatId);
     const mode = this.modeFor(event.chatId);
@@ -1182,7 +1216,8 @@ class BridgeRuntime {
         input: [{ type: "text", text: event.content }],
         additionalContext: this.config.turnAdditionalContext,
         cwd,
-        approvalPolicy: approvalPolicy(mode),
+        approvalPolicy: approvalPolicy(),
+        approvalsReviewer: approvalsReviewer(mode),
         sandboxPolicy: turnSandbox(cwd),
         ...(this.config.model ? { model: this.config.model } : {}),
       });

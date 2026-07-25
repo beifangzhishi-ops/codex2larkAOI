@@ -5,6 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  approvalPolicy,
+  approvalsReviewer,
   approvalCardUpdateArgs,
   buildConfig,
   buildApprovalCard,
@@ -24,7 +26,6 @@ import {
   parseApprovalCardAction,
   parseCardAction,
   parseControlCardAction,
-  parsePendingWorkdirReply,
   parseDotEnv,
   reactionArgs,
   reactionIdFromOutput,
@@ -241,15 +242,28 @@ test("service control reports a timeout without broadening the stop target", asy
   }
 });
 
-test("parseControlCommand recognizes control and natural-language commands", () => {
+test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/approval manual"), { type: "approvalMode", mode: "manual" });
-  assert.deepEqual(parseControlCommand("改为自动审批"), { type: "approvalMode", mode: "auto" });
+  assert.deepEqual(parseControlCommand("/approval auto"), { type: "approvalMode", mode: "auto" });
   assert.deepEqual(parseControlCommand("/approve session"), { type: "approve", session: true });
-  assert.deepEqual(parseControlCommand("停止当前操作"), { type: "stop" });
+  assert.deepEqual(parseControlCommand("/stop"), { type: "stop" });
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
-  assert.deepEqual(parseControlCommand("切换到 Demo 项目"), { type: "cd", query: "Demo" });
+  assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
+  assert.equal(parseControlCommand("/approval"), null);
+  assert.equal(parseControlCommand("/mode auto"), null);
+  assert.equal(parseControlCommand("/reject"), null);
+  assert.equal(parseControlCommand("改为自动审批"), null);
+  assert.equal(parseControlCommand("停止当前操作"), null);
+  assert.equal(parseControlCommand("同意执行"), null);
+  assert.equal(parseControlCommand("切换到 Demo 项目"), null);
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
+});
+
+test("approval settings keep on-request policy and delegate only new turns", () => {
+  assert.equal(approvalPolicy(), "on-request");
+  assert.equal(approvalsReviewer("auto"), "auto_review");
+  assert.equal(approvalsReviewer("manual"), "user");
 });
 
 test("resume helpers format compact pages and select history without ambiguous title guesses", () => {
@@ -305,13 +319,13 @@ test("help card exposes common conversation controls and the opposite approval m
   const buttons = card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.deepEqual(buttons.map((button) => button.text.content), [
-    "新建对话", "继续对话", "改为手动审批", "查看状态", "停止当前操作",
+    "新建对话", "继续对话", "改为人工审批", "查看状态", "停止当前操作",
   ]);
   assert.deepEqual(buttons.map((button) => button.value.action), [
     "new", "resume", "approvalMode", "status", "stop",
   ]);
   assert.equal(buttons[2].value.mode, "manual");
-  assert.match(buildHelpCard("manual").elements[1].actions[2].text.content, /自动审批/);
+  assert.match(buildHelpCard("manual").elements[1].actions[2].text.content, /替我审批/);
 });
 
 test("resume cards show five sessions plus only the available page controls", () => {
@@ -366,30 +380,30 @@ test("createThreadTitle summarizes the first prompt without another model call",
   assert.equal(createThreadTitle(""), "新会话");
 });
 
-test("resolveWorkdirQuery prioritizes first-level names and accepts arbitrary paths", () => {
+test("resolveWorkdirQuery resolves each directory level from the current directory then root", () => {
   const parent = mkdtempSync(join(tmpdir(), "codex2lark-root-"));
   const root = join(parent, "AAAVitalFile");
   const outside = join(parent, "ExternalProject");
   try {
     mkdirSync(root);
     mkdirSync(join(root, "BubbleDynamics"));
+    mkdirSync(join(root, "BubbleDynamics", "Results"));
     mkdirSync(join(root, "Other"));
+    mkdirSync(join(root, "Other", "ReleaseEquipment"), { recursive: true });
+    mkdirSync(join(root, "AlphaOne"));
+    mkdirSync(join(root, "AlphaTwo"));
     mkdirSync(outside);
-    assert.equal(resolveWorkdirQuery("bubble", root).path, resolve(root, "BubbleDynamics"));
+    assert.equal(resolveWorkdirQuery("bubble/results", root).path, resolve(root, "BubbleDynamics", "Results"));
+    assert.equal(resolveWorkdirQuery("releaseequi", root, join(root, "Other")).path,
+      resolve(root, "Other", "ReleaseEquipment"));
     assert.equal(resolveWorkdirQuery(outside, root).path, resolve(outside));
     assert.equal(resolveWorkdirQuery(join("..", "ExternalProject"), root).path, resolve(outside));
-    assert.equal(resolveWorkdirQuery("missing", root).needsPath, true);
-    assert.match(resolveWorkdirQuery(join(parent, "does-not-exist"), root).error, /不存在/);
+    assert.match(resolveWorkdirQuery("alpha", root).error, /匹配到多个目录/);
+    assert.match(resolveWorkdirQuery("missing", root).error, /找不到目录层级/);
+    assert.match(resolveWorkdirQuery(join(parent, "does-not-exist"), root).error, /找不到目录层级|不存在/);
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
-});
-
-test("parsePendingWorkdirReply accepts a direct absolute-path answer only while waiting", () => {
-  const directory = resolve(tmpdir());
-  assert.deepEqual(parsePendingWorkdirReply(`"${directory}"`, "missing"), { type: "cd", query: directory });
-  assert.equal(parsePendingWorkdirReply(directory, ""), null);
-  assert.equal(parsePendingWorkdirReply("继续处理任务", "missing"), null);
 });
 
 test("extractFileDirectives removes native-delivery markers", () => {
