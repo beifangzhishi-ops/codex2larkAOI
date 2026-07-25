@@ -45,6 +45,7 @@ notepad .env
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
+- `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：仅用于异步生成会话标题，默认分别为 `gpt-5.6-luna` 和 `low`，不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
 - `FEISHU_REACTIONS=true`：执行普通 Codex 任务时显示消息表情状态。
@@ -85,7 +86,7 @@ npm run check
 - `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
-- 新建 Codex 会话的首轮开始后，桥接会根据首条用户消息自动设置简短标题；
+- 新建 Codex 会话首轮成功回复后，桥接通过独立的临时线程异步生成简短中文标题；失败任务会有限重试，且不会阻塞业务答复；
 - `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
 - `/approval manual`：把审批请求作为飞书交互卡片发出，可点击“允许一次”“本会话允许”“拒绝”；按钮不可用时仍可使用下列文字命令；
