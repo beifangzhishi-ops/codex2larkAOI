@@ -62,6 +62,7 @@ import {
   stopService,
   waitForBackgroundStart,
 } from "../src/service-control.js";
+import { CodexAppServer } from "../src/codex-app-server.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
@@ -143,6 +144,30 @@ test("consumer startup waits for both event consumers", async () => {
   readiness.markReady("card");
   await readiness.ready;
   assert.equal(readiness.isReady(), true);
+});
+
+test("stopping App Server rejects active requests and emits one close event", async () => {
+  const client = new CodexAppServer({ requestTimeoutMs: 60_000 });
+  let stdinEnded = false;
+  let closeCount = 0;
+  client.child = {
+    stdin: {
+      writable: true,
+      write: () => true,
+      end: () => { stdinEnded = true; },
+    },
+    kill: () => {},
+  };
+  client.on("closed", () => { closeCount += 1; });
+  const request = client.request("thread/read", { threadId: "thr_active" });
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(client.pending.size, 1);
+  client.stop();
+  await assert.rejects(request, /app-server stopped/);
+  assert.equal(stdinEnded, true);
+  assert.equal(client.pending.size, 0);
+  assert.equal(client.child, null);
+  assert.equal(closeCount, 1);
 });
 
 test("thread task queues serialize one thread, run different threads concurrently, and clear only old pending tasks", async () => {

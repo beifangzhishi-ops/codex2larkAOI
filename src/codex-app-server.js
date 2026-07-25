@@ -39,8 +39,8 @@ export class CodexAppServer extends EventEmitter {
       const text = chunk.toString("utf8").trim();
       if (text && !text.includes("failed to clean up stale arg0")) this.emit("stderr", text);
     });
-    child.once("error", (error) => this.#onClose(error));
-    child.once("close", (code) => this.#onClose(new Error(`codex app-server exited ${code}`)));
+    child.once("error", (error) => this.#onClose(child, error));
+    child.once("close", (code) => this.#onClose(child, new Error(`codex app-server exited ${code}`)));
 
     await this.#requestRaw("initialize", {
       clientInfo: {
@@ -85,8 +85,11 @@ export class CodexAppServer extends EventEmitter {
 
   stop() {
     const child = this.child;
-    this.child = null;
     if (!child) return;
+    this.child = null;
+    const error = new Error("codex app-server stopped");
+    this.#rejectPending(error);
+    this.emit("closed", error);
     try { child.stdin.end(); } catch { /* process already closed */ }
     setTimeout(() => child.kill(), 2000).unref();
   }
@@ -118,14 +121,18 @@ export class CodexAppServer extends EventEmitter {
     else if (message.method) this.emit("notification", message);
   }
 
-  #onClose(error) {
-    if (!this.child) return;
-    this.child = null;
+  #rejectPending(error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  #onClose(child, error) {
+    if (this.child !== child) return;
+    this.child = null;
+    this.#rejectPending(error);
     this.emit("closed", error);
   }
 }
