@@ -640,22 +640,23 @@ export function runCommand(command, args, { input, cwd = ROOT, timeoutMs = 60_00
   });
 }
 
+export function normalizePersistedState(value = {}) {
+  return {
+    sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
+    workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
+    approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
+    modelSettings: value.modelSettings && typeof value.modelSettings === "object" ? value.modelSettings : {},
+    pendingTitleJobs: value.pendingTitleJobs && typeof value.pendingTitleJobs === "object" ? value.pendingTitleJobs : {},
+    pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
+    events: Array.isArray(value.events) ? value.events : [],
+  };
+}
+
 function loadState() {
   try {
-    const value = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-    return {
-      sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
-      workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
-      approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
-      modelSettings: value.modelSettings && typeof value.modelSettings === "object" ? value.modelSettings : {},
-      pendingTitleJobs: value.pendingTitleJobs && typeof value.pendingTitleJobs === "object" ? value.pendingTitleJobs : {},
-      pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
-      events: Array.isArray(value.events) ? value.events : [],
-    };
+    return normalizePersistedState(JSON.parse(readFileSync(STATE_FILE, "utf8")));
   } catch {
-    return {
-      sessions: {}, workdirs: {}, approvalModes: {}, modelSettings: {}, pendingTitleJobs: {}, pendingWorkdirQueries: {}, events: [],
-    };
+    return normalizePersistedState();
   }
 }
 
@@ -1974,7 +1975,7 @@ class BridgeRuntime {
         if (completion.status === "failed") throw new Error(completion.error?.message || "Codex turn failed");
         if (completion.status === "interrupted" && !active.finalMessages.length) active.finalMessages.push("操作已停止。");
       } catch (error) {
-        if (active.turnId) {
+        if (active.turnId && this.client.child) {
           try { await this.client.request("turn/interrupt", { threadId, turnId: active.turnId }); } catch { /* already finished */ }
         }
         throw error;
@@ -2041,7 +2042,7 @@ class BridgeRuntime {
       saveState(this.state);
       console.log(`[codex] named thread ${threadId}: ${title}`);
     } catch (error) {
-      if (titleThreadId && titleRun?.turnId) {
+      if (titleThreadId && titleRun?.turnId && this.client.child) {
         try {
           await this.client.request("turn/interrupt", { threadId: titleThreadId, turnId: titleRun.turnId });
         } catch { /* already finished */ }

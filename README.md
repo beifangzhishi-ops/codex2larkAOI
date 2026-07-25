@@ -87,7 +87,7 @@ npm run check
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
 - 新建 Codex 会话首轮成功回复后，桥接通过独立的临时线程异步生成简短中文标题；失败任务会有限重试，且不会阻塞业务答复；
-- `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
+- `/stop`：中断当前选中 thread 的活跃 turn，并清除该 thread 尚未开始的任务；不停止桥接服务或已经切换离开的后台 thread；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
 - `/approval manual`：把审批请求作为飞书交互卡片发出，可点击“允许一次”“本会话允许”“拒绝”；按钮不可用时仍可使用下列文字命令；
 - `/approve`：允许一个待审批操作；
@@ -134,7 +134,12 @@ MEDIA:C:\absolute\path\plot.png
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `modelSettings`：聊天到后续轮次的模型和思考强度策略；
+- `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、重试次数和最近错误；
 - `events`：事件去重窗口。
+
+`chatRouteQueues`、`threadQueues`、活跃 turn、恢复候选和审批请求只存在于内存，不写入状态文件。服务重启后会恢复聊天绑定、目录、模型、审批模式和未完成标题任务，但不会把旧运行态误判为仍在执行。
+
+每次更新后的推荐收尾顺序为：运行 `npm run check`，提交该阶段纯文本改动，执行 `stop.cmd --no-pause-on-error`，再执行 `start.cmd --no-pause-on-error`。确认新 PID 存在、两类事件消费者均输出 `[event] ready`，且 `.env` 中 `LARKSUITE_CLI_CONFIG_DIR` 仍指向 AOI 开发槽。不要使用 `lark-cli event stop --all`，否则可能影响其他项目实例。
 
 凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
 

@@ -30,6 +30,7 @@ import {
   isMarkdownValidationError,
   mergeProjectEnv,
   normalizeModelCatalog,
+  normalizePersistedState,
   normalizeEvent,
   parseControlCommand,
   parseApprovalCardAction,
@@ -109,6 +110,30 @@ test("watchForStopRequest invokes the stop callback once", async () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("persisted state remains backward compatible and excludes runtime queues", () => {
+  const legacy = normalizePersistedState({
+    sessions: { chat: "thr_1" },
+    workdirs: { chat: "C:\\work" },
+    approvalModes: { chat: "manual" },
+    pendingWorkdirQueries: { chat: "project" },
+    events: ["event_1"],
+    activeThreads: { thr_1: { turnId: "turn_1" } },
+    threadQueues: { thr_1: ["task"] },
+  });
+  assert.deepEqual(legacy.modelSettings, {});
+  assert.deepEqual(legacy.pendingTitleJobs, {});
+  assert.equal("activeThreads" in legacy, false);
+  assert.equal("threadQueues" in legacy, false);
+  assert.equal(legacy.sessions.chat, "thr_1");
+
+  const current = normalizePersistedState({
+    modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
+    pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
+  });
+  assert.equal(current.modelSettings.chat.modelId, "sol");
+  assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
 });
 
 test("consumer startup waits for both event consumers", async () => {
