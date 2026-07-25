@@ -6,7 +6,7 @@
 飞书消息 -> lark-cli event consume -> Codex App Server -> 飞书回复/文件
 ```
 
-使用 App Server 而非一次性的 `codex exec`，因此支持运行中过程消息、工具调用、人工审批和中断。每个聊天独立保存 Codex thread、当前项目目录和审批模式。
+使用 App Server 而非一次性的 `codex exec`，因此支持运行中过程消息、工具调用、人工审批和中断。每个聊天独立保存 Codex thread、当前项目目录、审批模式以及模型设置。
 
 ## 权限边界
 
@@ -44,6 +44,7 @@ notepad .env
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
+- `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
 - `FEISHU_REACTIONS=true`：执行普通 Codex 任务时显示消息表情状态。
@@ -74,10 +75,16 @@ npm run check
 ## 飞书控制
 
 - `/cd 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
-- `/new`：清除当前聊天的 Codex thread，保留工作目录和审批模式；下一条普通任务到达时再创建新 thread；
+- `/new`：清除当前聊天的 Codex thread，保留工作目录、审批模式和模型设置；下一条普通任务到达时再创建新 thread；
 - `/resume`：用交互卡片按更新时间列出最近 5 个未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话），可直接点击会话继续；
 - 恢复卡片按需显示“上一页”和“下一页”，中间页共 5 个会话按钮和 2 个翻页按钮；也可使用 `/resume prev|next`；
 - `/resume 编号|标题`：继续当前列表中的历史会话，将当前飞书聊天绑定到该 thread，并切换到其工作目录；标题必须唯一匹配；
+- `/model`：通过交互卡片选择模型，再选择该模型实际支持的思考强度；模型列表来自 App Server `model/list`，不会硬编码；
+- `/model default`：恢复部署级 `CODEX_MODEL` 或 Codex 默认模型和默认思考强度；
+- `/model <model-id>`：选择模型并采用该模型的默认思考强度；
+- `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
+- 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
+- `/screen`：截取 Windows 桥接主机的虚拟桌面并作为图片回复，发送完成后删除临时图片；
 - 新建 Codex 会话的首轮开始后，桥接会根据首条用户消息自动设置简短标题；
 - `/stop`：通过 `turn/interrupt` 停止当前操作，不停止桥接服务；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
@@ -85,8 +92,8 @@ npm run check
 - `/approve`：允许一个待审批操作；
 - `/approve session`：允许当前 session 范围内的同类操作；
 - `/deny`：拒绝一个待审批操作；
-- `/status`：查看当前目录、thread、审批和权限；
-- `/help`：显示带有新建对话、继续对话、切换审批模式、查看状态和停止操作按钮的交互卡片。
+- `/status`：查看当前目录、会话名和 ID、审批方式、下一轮模型、思考强度、设置来源及权限；
+- `/help`：显示带有新建对话、继续对话、模型设置、截取屏幕、切换审批模式、查看状态和停止操作按钮的交互卡片。
 
 桥接只识别以上完整斜杠命令。自然语言中的“停止执行”“切换项目”“改为自动审批”等内容始终作为普通 Codex 任务处理。
 
@@ -123,6 +130,7 @@ MEDIA:C:\absolute\path\plot.png
 - `workdirs`：聊天到当前项目目录；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
+- `modelSettings`：聊天到后续轮次的模型和思考强度策略；
 - `events`：事件去重窗口。
 
 凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。

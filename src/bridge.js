@@ -16,7 +16,7 @@ const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
   "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
-  "桥接负责 /cd、/new、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /cd、/new、/resume、/model、/screen、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -111,6 +111,9 @@ export function parseControlCommand(text) {
   if (resume) return { type: "resume", query: (resume[1] || "").trim() };
   if (lower === "/status") return { type: "status" };
   if (lower === "/help") return { type: "help" };
+  if (lower === "/screen") return { type: "screen" };
+  const model = value.match(/^\/model(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
+  if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
   const cd = value.match(/^\/cd(?:\s+(.+))?$/i);
   if (cd) return { type: "cd", query: (cd[1] || "").trim() };
   return null;
@@ -134,7 +137,10 @@ function threadTimestamp(thread) {
 }
 
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
-const CONTROL_CARD_ACTIONS = new Set(["new", "resume", "resumePage", "approvalMode", "status", "stop", "help"]);
+const CONTROL_CARD_ACTIONS = new Set([
+  "new", "resume", "resumePage", "approvalMode", "status", "stop", "help", "screen",
+  "model", "modelPage", "modelPick", "modelEffort", "modelDefault",
+]);
 
 function parseCardActionValue(value) {
   try {
@@ -170,6 +176,12 @@ export function parseControlCardAction(value) {
       typeof actionValue.threadId !== "string") return null;
   if (actionValue.action === "resumePage" &&
       (!Number.isInteger(actionValue.pageStart) || actionValue.pageStart < 0)) return null;
+  if (actionValue.action === "modelPage" &&
+      (!Number.isInteger(actionValue.pageStart) || actionValue.pageStart < 0)) return null;
+  if ((actionValue.action === "modelPick" || actionValue.action === "modelEffort") &&
+      (typeof actionValue.modelId !== "string" || !actionValue.modelId)) return null;
+  if (actionValue.action === "modelEffort" &&
+      (typeof actionValue.effort !== "string" || !actionValue.effort)) return null;
   return {
     type: "control",
     eventId: String(value.event_id || ""),
@@ -181,6 +193,8 @@ export function parseControlCardAction(value) {
     ...(actionValue.mode ? { mode: actionValue.mode } : {}),
     ...(actionValue.threadId !== undefined ? { threadId: actionValue.threadId } : {}),
     ...(actionValue.pageStart !== undefined ? { pageStart: actionValue.pageStart } : {}),
+    ...(actionValue.modelId !== undefined ? { modelId: actionValue.modelId } : {}),
+    ...(actionValue.effort !== undefined ? { effort: actionValue.effort } : {}),
   };
 }
 
@@ -483,11 +497,12 @@ function loadState() {
       sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
       workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
       approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
+      modelSettings: value.modelSettings && typeof value.modelSettings === "object" ? value.modelSettings : {},
       pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
       events: Array.isArray(value.events) ? value.events : [],
     };
   } catch {
-    return { sessions: {}, workdirs: {}, approvalModes: {}, pendingWorkdirQueries: {}, events: [] };
+    return { sessions: {}, workdirs: {}, approvalModes: {}, modelSettings: {}, pendingWorkdirQueries: {}, events: [] };
   }
 }
 
@@ -575,6 +590,74 @@ function controlButton(text, type, action, details = {}) {
   return cardButton(text, type, { kind: "codex2lark_control", action, ...details });
 }
 
+export function normalizeModelCatalog(result) {
+  return (Array.isArray(result?.data) ? result.data : [])
+    .filter((entry) => entry && !entry.hidden && typeof entry.id === "string" && entry.id)
+    .map((entry) => ({
+      id: entry.id,
+      model: String(entry.model || entry.id),
+      displayName: String(entry.displayName || entry.model || entry.id),
+      isDefault: entry.isDefault === true,
+      defaultReasoningEffort: String(entry.defaultReasoningEffort || ""),
+      supportedReasoningEfforts: (Array.isArray(entry.supportedReasoningEfforts)
+        ? entry.supportedReasoningEfforts : [])
+        .map((effort) => typeof effort === "string" ? { reasoningEffort: effort, description: "" } : effort)
+        .filter((effort) => typeof effort?.reasoningEffort === "string" && effort.reasoningEffort)
+        .map((effort) => ({
+          reasoningEffort: effort.reasoningEffort,
+          description: String(effort.description || ""),
+        })),
+    }));
+}
+
+export function resolveModelSelection(catalog, setting = null, deploymentModel = "") {
+  const entries = Array.isArray(catalog) ? catalog : [];
+  const find = (value) => entries.find((entry) => entry.id === value || entry.model === value);
+  const deploymentEntry = find(deploymentModel);
+  const codexDefaultEntry = entries.find((entry) => entry.isDefault);
+  const defaultEntry = deploymentEntry || codexDefaultEntry;
+  if (!defaultEntry) return { error: "App Server 未返回可用的默认模型。" };
+
+  const explicit = setting?.mode === "explicit";
+  const explicitEntry = explicit ? find(setting.modelId) : null;
+  const entry = explicitEntry || defaultEntry;
+  let source = explicitEntry ? "聊天指定" : deploymentEntry ? "部署默认" : "Codex 默认";
+  let fallbackNotice = "";
+  let repairedSetting = null;
+  if (explicit && !explicitEntry) {
+    const fallbackTarget = deploymentEntry ? "部署默认" : "Codex 默认";
+    source = `聊天指定已失效，已回退${fallbackTarget}`;
+    fallbackNotice = `原聊天模型 ${String(setting.modelId || "（未知）")} 已不可用，已回退${fallbackTarget}。`;
+    repairedSetting = { mode: "default" };
+  } else if (deploymentModel && !deploymentEntry) {
+    source = "部署模型已失效，已回退 Codex 默认";
+  }
+
+  const supported = new Set(entry.supportedReasoningEfforts.map((item) => item.reasoningEffort));
+  const requestedEffort = explicitEntry ? String(setting.effort || "") : entry.defaultReasoningEffort;
+  let effort = requestedEffort;
+  if (!supported.has(effort)) {
+    effort = entry.defaultReasoningEffort;
+    if (!effort || !supported.has(effort)) {
+      return { error: `模型 ${entry.displayName} 未提供可用的默认思考强度。` };
+    }
+    if (explicitEntry) {
+      source = "聊天思考强度已失效，已回退模型默认";
+      fallbackNotice = `原思考强度 ${String(setting.effort || "（未知）")} 已不可用，已回退到 ${effort}。`;
+      repairedSetting = { mode: "explicit", modelId: entry.id, effort };
+    }
+  }
+  return { entry, effort, source, fallbackNotice, repairedSetting };
+}
+
+function modelSummary(selection) {
+  return [
+    `${selection.entry.displayName}（${selection.entry.model}）`,
+    `思考强度：${selection.effort}`,
+    `设置来源：${selection.source}`,
+  ].join("\n");
+}
+
 export function buildApprovalCard(subject, approvalId) {
   return {
     config: { wide_screen_mode: true },
@@ -624,6 +707,8 @@ export function buildHelpCard(approvalMode = "auto") {
         "直接发送任务即可。常用命令：",
         "`/cd 项目名或路径` 切换目录 · `/new` 新建对话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
+        "`/model [模型] [思考强度]` 设置后续轮次模型",
+        "`/screen` 截取桥接主机屏幕",
         "`/approval auto|manual` 切换审批 · `/status` 查看状态",
       ].join("\n") },
       {
@@ -631,17 +716,90 @@ export function buildHelpCard(approvalMode = "auto") {
         actions: [
           controlButton("新建对话", "primary", "new"),
           controlButton("继续对话", "default", "resume"),
+          controlButton("模型设置", "default", "model"),
+        ],
+      },
+      {
+        tag: "action",
+        actions: [
+          controlButton("截取屏幕", "default", "screen"),
+          controlButton("查看状态", "default", "status"),
           controlButton(`改为${nextMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextMode }),
         ],
       },
       {
         tag: "action",
         actions: [
-          controlButton("查看状态", "default", "status"),
           controlButton("停止当前操作", "danger", "stop"),
         ],
       },
     ],
+  };
+}
+
+export function buildModelCard(catalog, selection, pageStart = 0) {
+  const pageSize = 5;
+  const page = catalog.slice(pageStart, pageStart + pageSize);
+  const elements = [
+    { tag: "markdown", content: selection ? `当前设置：\n${modelSummary(selection)}` : "请选择后续轮次使用的模型。" },
+  ];
+  for (const entry of page) {
+    elements.push({
+      tag: "action",
+      actions: [controlButton(
+        `${entry.displayName}${entry.isDefault ? "（默认）" : ""}`,
+        entry.id === selection?.entry?.id ? "primary" : "default",
+        "modelPick", { modelId: entry.id },
+      )],
+    });
+  }
+  elements.push({ tag: "action", actions: [controlButton("恢复默认设置", "default", "modelDefault")] });
+  const navigation = [];
+  if (pageStart > 0) navigation.push(controlButton("上一页", "default", "modelPage", {
+    pageStart: Math.max(0, pageStart - pageSize),
+  }));
+  if (pageStart + pageSize < catalog.length) navigation.push(controlButton("下一页", "default", "modelPage", {
+    pageStart: pageStart + pageSize,
+  }));
+  if (navigation.length) elements.push({ tag: "action", actions: navigation });
+  elements.push({ tag: "note", elements: [{
+    tag: "plain_text",
+    content: `第 ${Math.floor(pageStart / pageSize) + 1} 页 · 共 ${catalog.length} 个可选模型`,
+  }] });
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "blue", title: { tag: "plain_text", content: "选择模型" } },
+    elements,
+  };
+}
+
+export function buildEffortCard(entry) {
+  const rows = [];
+  for (let index = 0; index < entry.supportedReasoningEfforts.length; index += 3) {
+    rows.push({
+      tag: "action",
+      actions: entry.supportedReasoningEfforts.slice(index, index + 3).map((item) => controlButton(
+        `${item.reasoningEffort}${item.reasoningEffort === entry.defaultReasoningEffort ? "（默认）" : ""}`,
+        item.reasoningEffort === entry.defaultReasoningEffort ? "primary" : "default",
+        "modelEffort", { modelId: entry.id, effort: item.reasoningEffort },
+      )),
+    });
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "blue", title: { tag: "plain_text", content: "选择思考强度" } },
+    elements: [
+      { tag: "markdown", content: `模型：${entry.displayName}（${entry.model}）` },
+      ...rows,
+    ],
+  };
+}
+
+export function buildModelResultCard(selection) {
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "green", title: { tag: "plain_text", content: "模型设置已更新" } },
+    elements: [{ tag: "markdown", content: `${modelSummary(selection)}\n生效范围：后续轮次` }],
   };
 }
 
@@ -802,6 +960,36 @@ async function sendAttachment(event, directive, config, index) {
   ], { cwd: dirname(path), timeoutMs: 120_000 });
 }
 
+export function buildScreenshotPowerShellCommand(outputPath) {
+  const path = String(outputPath).replaceAll("'", "''");
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen",
+    "$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height",
+    "$graphics = [System.Drawing.Graphics]::FromImage($bitmap)",
+    "try {",
+    "  $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)",
+    `  $bitmap.Save('${path}', [System.Drawing.Imaging.ImageFormat]::Png)`,
+    "} finally {",
+    "  $graphics.Dispose()",
+    "  $bitmap.Dispose()",
+    "}",
+  ].join("; ");
+}
+
+async function captureScreen() {
+  if (process.platform !== "win32") throw new Error("截屏仅支持 Windows 桥接主机。");
+  const directory = resolve(STATE_DIR, "screenshots");
+  mkdirSync(directory, { recursive: true });
+  const path = resolve(directory, `screen-${Date.now()}-${randomUUID()}.png`);
+  await runCommand("powershell", [
+    "-NoProfile", "-NonInteractive", "-Command", buildScreenshotPowerShellCommand(path),
+  ], { timeoutMs: 30_000 });
+  if (!existsSync(path) || statSync(path).size < 1) throw new Error("截屏文件未生成。");
+  return path;
+}
+
 export function approvalPolicy() {
   return "on-request";
 }
@@ -908,8 +1096,7 @@ class BridgeRuntime {
       return;
     }
     if (command?.type === "status") {
-      await sendReply(event.messageId, `${event.eventId}-status`,
-        `桥接服务正常。\n\n工作目录：${this.cwdFor(event.chatId)}\n会话：${this.state.sessions[event.chatId] || "尚未创建"}\n审批：${this.modeFor(event.chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}\n权限：全盘读取、当前项目目录写入`, this.config);
+      await sendReply(event.messageId, `${event.eventId}-status`, await this.#statusText(event.chatId), this.config);
       return;
     }
     if (command?.type === "help") {
@@ -918,7 +1105,38 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
+      }
+      return;
+    }
+    if (command?.type === "screen") {
+      let path = "";
+      try {
+        path = await captureScreen();
+        await this.#deliverFiles(event, [{ kind: "MEDIA", path }]);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-screen-error`,
+          `截屏失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      } finally {
+        if (path && existsSync(path)) unlinkSync(path);
+      }
+      return;
+    }
+    if (command?.type === "modelCard") {
+      try {
+        await this.#handleModelCard(command);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-model-card-error`,
+          `模型设置失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
+    if (command?.type === "model") {
+      try {
+        await this.#handleModelCommand(event, command);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-model-error`,
+          `模型设置失败：${String(error.message || error).slice(0, 1500)}`, this.config);
       }
       return;
     }
@@ -985,13 +1203,13 @@ class BridgeRuntime {
     }
   }
 
-  #threadOptions(chatId, cwd = this.cwdFor(chatId)) {
+  #threadOptions(chatId, cwd = this.cwdFor(chatId), model = "") {
     return {
       cwd,
       approvalPolicy: approvalPolicy(),
       approvalsReviewer: approvalsReviewer(this.modeFor(chatId)),
       sandbox: "workspace-write",
-      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(model ? { model } : {}),
     };
   }
 
@@ -1017,8 +1235,145 @@ class BridgeRuntime {
     return threads;
   }
 
+  async #listModels() {
+    const entries = [];
+    const modelIds = new Set();
+    const cursors = new Set();
+    let cursor;
+    do {
+      const result = await this.client.request("model/list", {
+        limit: 100,
+        includeHidden: false,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const entry of normalizeModelCatalog(result)) {
+        if (modelIds.has(entry.id)) continue;
+        modelIds.add(entry.id);
+        entries.push(entry);
+      }
+      const nextCursor = typeof result?.nextCursor === "string" ? result.nextCursor : "";
+      if (!nextCursor || cursors.has(nextCursor)) break;
+      cursors.add(nextCursor);
+      cursor = nextCursor;
+    } while (cursor);
+    return entries;
+  }
+
+  async #selectionFor(chatId) {
+    const catalog = await this.#listModels();
+    const selection = resolveModelSelection(catalog, this.state.modelSettings[chatId], this.config.model);
+    if (selection.error) throw new Error(selection.error);
+    return { catalog, selection };
+  }
+
+  #repairModelSetting(chatId, selection) {
+    if (!selection.repairedSetting) return false;
+    this.state.modelSettings[chatId] = selection.repairedSetting;
+    saveState(this.state);
+    return true;
+  }
+
+  async #statusText(chatId) {
+    const threadId = this.state.sessions[chatId] || "";
+    let threadNameValue = "尚未创建";
+    if (threadId) {
+      try {
+        const result = await this.client.request("thread/read", { threadId, includeTurns: false });
+        threadNameValue = String(result?.thread?.name || "").trim() || "未命名";
+      } catch (error) {
+        threadNameValue = `无法读取（${String(error.message || error).slice(0, 160)}）`;
+      }
+    }
+    let modelLines;
+    try {
+      const { selection } = await this.#selectionFor(chatId);
+      this.#repairModelSetting(chatId, selection);
+      modelLines = `下一轮模型：${selection.entry.displayName}（${selection.entry.model}）\n下一轮思考强度：${selection.effort}\n设置来源：${selection.source}`;
+    } catch (error) {
+      modelLines = `下一轮模型：无法读取（${String(error.message || error).slice(0, 160)}）\n下一轮思考强度：无法读取\n设置来源：未知`;
+    }
+    return [
+      "桥接服务正常。",
+      "",
+      `工作目录：${this.cwdFor(chatId)}`,
+      `当前会话名：${threadNameValue}`,
+      `当前会话 ID：${threadId || "尚未创建"}`,
+      `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
+      modelLines,
+      "权限：全盘读取、当前项目目录写入",
+    ].join("\n");
+  }
+
+  async #handleModelCommand(event, command) {
+    const { catalog, selection } = await this.#selectionFor(event.chatId);
+    this.#repairModelSetting(event.chatId, selection);
+    if (!command.modelId) {
+      await sendInteractiveCard(event.messageId, `${event.eventId}-model`, buildModelCard(catalog, selection));
+      return;
+    }
+    if (command.modelId.toLowerCase() === "default") {
+      if (command.effort) throw new Error("`/model default` 不接受思考强度参数。");
+      this.state.modelSettings[event.chatId] = { mode: "default" };
+      saveState(this.state);
+      const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
+      if (resolved.error) throw new Error(resolved.error);
+      await sendReply(event.messageId, `${event.eventId}-model-default`,
+        `已恢复部署/Codex 默认。\n${modelSummary(resolved)}\n生效范围：后续轮次`, this.config);
+      return;
+    }
+    const entry = catalog.find((item) => item.id === command.modelId);
+    if (!entry) throw new Error(`找不到可选模型：${command.modelId}`);
+    const supported = new Set(entry.supportedReasoningEfforts.map((item) => item.reasoningEffort));
+    const effort = command.effort || entry.defaultReasoningEffort;
+    if (!supported.has(effort)) throw new Error(`模型 ${entry.displayName} 不支持思考强度：${effort || "（未提供）"}`);
+    this.state.modelSettings[event.chatId] = { mode: "explicit", modelId: entry.id, effort };
+    saveState(this.state);
+    const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
+    if (resolved.error) throw new Error(resolved.error);
+    await sendReply(event.messageId, `${event.eventId}-model-set`,
+      `模型设置已更新。\n${modelSummary(resolved)}\n生效范围：后续轮次`, this.config);
+  }
+
+  async #handleModelCard(event) {
+    const { catalog, selection } = await this.#selectionFor(event.chatId);
+    this.#repairModelSetting(event.chatId, selection);
+    if (event.action === "model" || event.action === "modelPage") {
+      const lastStart = Math.max(0, Math.floor((Math.max(1, catalog.length) - 1) / 5) * 5);
+      const pageStart = event.action === "modelPage" ? Math.min(event.pageStart, lastStart) : 0;
+      await sendInteractiveCard(event.messageId, `${event.eventId}-model-page-${pageStart}`,
+        buildModelCard(catalog, selection, pageStart));
+      return;
+    }
+    if (event.action === "modelDefault") {
+      this.state.modelSettings[event.chatId] = { mode: "default" };
+      saveState(this.state);
+      const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
+      if (resolved.error) throw new Error(resolved.error);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-model-default`, buildModelResultCard(resolved));
+      return;
+    }
+    const entry = catalog.find((item) => item.id === event.modelId);
+    if (!entry) throw new Error("所选模型已不可用，请重新打开 /model。");
+    if (event.action === "modelPick") {
+      if (!entry.supportedReasoningEfforts.length) throw new Error(`模型 ${entry.displayName} 没有可选思考强度。`);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-model-effort-${entry.id}`, buildEffortCard(entry));
+      return;
+    }
+    const supported = new Set(entry.supportedReasoningEfforts.map((item) => item.reasoningEffort));
+    if (!supported.has(event.effort)) throw new Error("所选思考强度已不可用，请重新打开 /model。");
+    this.state.modelSettings[event.chatId] = { mode: "explicit", modelId: entry.id, effort: event.effort };
+    saveState(this.state);
+    const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
+    if (resolved.error) throw new Error(resolved.error);
+    await sendInteractiveCard(event.messageId, `${event.eventId}-model-result`, buildModelResultCard(resolved));
+  }
+
   async handleCardAction(event) {
     if (event.type === "control") {
+      if (["model", "modelPage", "modelPick", "modelEffort", "modelDefault"].includes(event.action)) {
+        this.enqueue(event, { ...event, type: "modelCard" });
+        return;
+      }
       const command = event.action === "approvalMode"
         ? { type: "approvalMode", mode: event.mode }
         : event.action === "resume"
@@ -1157,10 +1512,10 @@ class BridgeRuntime {
     }
   }
 
-  async #ensureThread(chatId) {
+  async #ensureThread(chatId, model = "") {
     let threadId = this.state.sessions[chatId];
     let isNew = false;
-    const common = this.#threadOptions(chatId);
+    const common = this.#threadOptions(chatId, this.cwdFor(chatId), model);
     if (threadId && !this.loadedThreads.has(threadId)) {
       try {
         await this.client.request("thread/resume", { threadId, ...common });
@@ -1196,7 +1551,12 @@ class BridgeRuntime {
   async #runTurn(event) {
     const cwd = this.cwdFor(event.chatId);
     const mode = this.modeFor(event.chatId);
-    const { threadId, isNew } = await this.#ensureThread(event.chatId);
+    const { selection } = await this.#selectionFor(event.chatId);
+    if (this.#repairModelSetting(event.chatId, selection)) {
+      await sendReply(event.messageId, `${event.eventId}-model-fallback`,
+        `模型设置已自动回退。\n${selection.fallbackNotice}\n下一轮使用：${selection.entry.displayName}（${selection.entry.model}）/ ${selection.effort}`, this.config);
+    }
+    const { threadId, isNew } = await this.#ensureThread(event.chatId, selection.entry.model);
     let resolveDone;
     let rejectDone;
     const done = new Promise((resolvePromise, rejectPromise) => {
@@ -1219,7 +1579,8 @@ class BridgeRuntime {
         approvalPolicy: approvalPolicy(),
         approvalsReviewer: approvalsReviewer(mode),
         sandboxPolicy: turnSandbox(cwd),
-        ...(this.config.model ? { model: this.config.model } : {}),
+        model: selection.entry.model,
+        effort: selection.effort,
       });
       active.turnId = result.turn.id;
       if (isNew) {

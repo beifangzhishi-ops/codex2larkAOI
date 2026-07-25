@@ -10,9 +10,13 @@ import {
   approvalCardUpdateArgs,
   buildConfig,
   buildApprovalCard,
+  buildEffortCard,
   buildHelpCard,
+  buildModelCard,
+  buildModelResultCard,
   buildResumeCard,
   buildResolvedApprovalCard,
+  buildScreenshotPowerShellCommand,
   createThreadTitle,
   createConsumerReadiness,
   extractFileDirectives,
@@ -21,6 +25,7 @@ import {
   idempotencyKey,
   isMarkdownValidationError,
   mergeProjectEnv,
+  normalizeModelCatalog,
   normalizeEvent,
   parseControlCommand,
   parseApprovalCardAction,
@@ -30,6 +35,7 @@ import {
   reactionArgs,
   reactionIdFromOutput,
   resolveCodexCommand,
+  resolveModelSelection,
   resolveWorkdirQuery,
   runCommand,
   selectResumeThread,
@@ -267,7 +273,7 @@ test("Codex command uses an explicit path or discovers the VS Code extension bin
 test("missing command rejects immediately instead of retaining the preflight timer", async () => {
   await assert.rejects(
     runCommand(`codex2lark-missing-${process.pid}`, ["--version"], { timeoutMs: 60_000 }),
-    /ENOENT/,
+    /ENOENT|EPERM/,
   );
 });
 
@@ -340,7 +346,17 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
   assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
+  assert.deepEqual(parseControlCommand("/screen"), { type: "screen" });
+  assert.deepEqual(parseControlCommand("/model"), { type: "model", modelId: "", effort: "" });
+  assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high"), {
+    type: "model", modelId: "gpt-5.6-sol", effort: "high",
+  });
   assert.equal(parseControlCommand("/approval"), null);
+  assert.equal(parseControlCommand("/screen now"), null);
+  assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
+  assert.deepEqual(parseControlCommand("/model default high"), {
+    type: "model", modelId: "default", effort: "high",
+  });
   assert.equal(parseControlCommand("/mode auto"), null);
   assert.equal(parseControlCommand("/reject"), null);
   assert.equal(parseControlCommand("改为自动审批"), null);
@@ -354,6 +370,13 @@ test("approval settings keep on-request policy and delegate only new turns", () 
   assert.equal(approvalPolicy(), "on-request");
   assert.equal(approvalsReviewer("auto"), "auto_review");
   assert.equal(approvalsReviewer("manual"), "user");
+});
+
+test("screenshot command renders a self-contained virtual desktop capture", () => {
+  const command = buildScreenshotPowerShellCommand("C:\\temp\\screen's.png");
+  assert.match(command, /SystemInformation\]::VirtualScreen/);
+  assert.match(command, /CopyFromScreen/);
+  assert.match(command, /screen''s\.png/);
 });
 
 test("resume helpers format compact pages and select history without ambiguous title guesses", () => {
@@ -409,13 +432,84 @@ test("help card exposes common conversation controls and the opposite approval m
   const buttons = card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.deepEqual(buttons.map((button) => button.text.content), [
-    "新建对话", "继续对话", "改为人工审批", "查看状态", "停止当前操作",
+    "新建对话", "继续对话", "模型设置", "截取屏幕", "查看状态", "改为人工审批", "停止当前操作",
   ]);
   assert.deepEqual(buttons.map((button) => button.value.action), [
-    "new", "resume", "approvalMode", "status", "stop",
+    "new", "resume", "model", "screen", "status", "approvalMode", "stop",
   ]);
-  assert.equal(buttons[2].value.mode, "manual");
-  assert.match(buildHelpCard("manual").elements[1].actions[2].text.content, /替我审批/);
+  assert.equal(buttons[5].value.mode, "manual");
+  const manualButtons = buildHelpCard("manual").elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  assert.match(manualButtons[5].text.content, /替我审批/);
+  assert.match(card.elements[0].content, /\/model/);
+  assert.match(card.elements[0].content, /\/screen/);
+});
+
+test("model catalog and selection use only server-supported model efforts", () => {
+  const catalog = normalizeModelCatalog({ data: [
+    { id: "hidden", hidden: true, defaultReasoningEffort: "low" },
+    {
+      id: "sol", model: "gpt-sol", displayName: "Sol", isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+    },
+    {
+      id: "terra", model: "gpt-terra", displayName: "Terra", defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["medium"],
+    },
+  ] });
+  assert.equal(catalog.length, 2);
+  const defaultSelection = resolveModelSelection(catalog);
+  assert.equal(defaultSelection.entry.id, "sol");
+  assert.equal(defaultSelection.effort, "low");
+  assert.equal(defaultSelection.source, "Codex 默认");
+
+  const explicit = resolveModelSelection(catalog, { mode: "explicit", modelId: "sol", effort: "high" });
+  assert.equal(explicit.effort, "high");
+  assert.equal(explicit.source, "聊天指定");
+  assert.equal(explicit.repairedSetting, null);
+
+  const invalidEffort = resolveModelSelection(catalog, { mode: "explicit", modelId: "sol", effort: "none" });
+  assert.equal(invalidEffort.effort, "low");
+  assert.deepEqual(invalidEffort.repairedSetting, { mode: "explicit", modelId: "sol", effort: "low" });
+  assert.match(invalidEffort.fallbackNotice, /none.*low/);
+
+  const removed = resolveModelSelection(catalog, { mode: "explicit", modelId: "removed", effort: "high" });
+  assert.equal(removed.entry.id, "sol");
+  assert.deepEqual(removed.repairedSetting, { mode: "default" });
+  assert.match(removed.source, /已失效/);
+
+  const deployment = resolveModelSelection(catalog, { mode: "default" }, "gpt-terra");
+  assert.equal(deployment.entry.id, "terra");
+  assert.equal(deployment.source, "部署默认");
+  assert.match(resolveModelSelection([{ ...catalog[1], isDefault: false }]).error, /默认模型/);
+});
+
+test("model cards keep model and effort selection in separate validated steps", () => {
+  const entries = Array.from({ length: 6 }, (_, index) => ({
+    id: `model-${index + 1}`,
+    model: `gpt-${index + 1}`,
+    displayName: `模型 ${index + 1}`,
+    isDefault: index === 0,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: [
+      { reasoningEffort: "low", description: "" },
+      { reasoningEffort: "high", description: "" },
+      { reasoningEffort: "max", description: "" },
+    ],
+  }));
+  const selection = { entry: entries[0], effort: "low", source: "Codex 默认" };
+  const firstPage = buildModelCard(entries, selection);
+  const firstActions = firstPage.elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  assert.equal(firstActions.filter((button) => button.value.action === "modelPick").length, 5);
+  assert.equal(firstActions.at(-1).value.action, "modelPage");
+  assert.equal(firstActions.at(-1).value.pageStart, 5);
+  assert.match(firstPage.elements[0].content, /设置来源：Codex 默认/);
+
+  const effortCard = buildEffortCard(entries[0]);
+  assert.deepEqual(effortCard.elements[1].actions.map((button) => button.value.effort), ["low", "high", "max"]);
+  assert.match(buildModelResultCard({ ...selection, effort: "high", source: "聊天指定" }).elements[0].content, /后续轮次/);
 });
 
 test("resume cards show five sessions plus only the available page controls", () => {
@@ -456,6 +550,19 @@ test("control card callbacks accept only the supported typed actions", () => {
   assert.equal(parseCardAction({
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: -5 }),
+  }), null);
+  assert.deepEqual(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({
+      kind: "codex2lark_control", action: "modelEffort", modelId: "sol", effort: "high",
+    }),
+  }), {
+    type: "control", eventId: "evt_control", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", action: "modelEffort", modelId: "sol", effort: "high",
+  });
+  assert.equal(parseCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "modelEffort", modelId: "sol" }),
   }), null);
   assert.equal(parseCardAction({
     ...raw,
@@ -576,7 +683,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
-  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/status、\/stop/);
+  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/resume、\/model、\/screen/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
