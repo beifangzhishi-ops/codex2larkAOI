@@ -1521,6 +1521,10 @@ export function snapshotTurnSettings({ threadId, cwd, approvalMode, model, effor
   });
 }
 
+export function shouldDeliverThreadOutput(state, chatId, threadId) {
+  return Boolean(threadId) && state?.sessions?.[chatId] === threadId;
+}
+
 export class ThreadTaskQueueManager {
   constructor(worker, onError = (error) => console.error(error)) {
     this.worker = worker;
@@ -1736,6 +1740,7 @@ class BridgeRuntime {
         delete this.state.pendingTitleJobs[previousThreadId];
       }
       delete this.state.sessions[event.chatId];
+      this.#cancelDetachedApprovals(event.chatId, "");
       delete this.state.pendingWorkdirQueries[event.chatId];
       this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
@@ -2143,6 +2148,7 @@ class BridgeRuntime {
         this.loadedThreads.add(threadId);
       }
       this.state.sessions[event.chatId] = threadId;
+      this.#cancelDetachedApprovals(event.chatId, threadId);
       if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
       this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
@@ -2188,8 +2194,9 @@ class BridgeRuntime {
     }
   }
 
-  async #deliverFiles(event, files) {
+  async #deliverFiles(event, files, threadId = "") {
     for (let index = 0; index < files.length; index += 1) {
+      if (threadId && !shouldDeliverThreadOutput(this.state, event.chatId, threadId)) break;
       try {
         await sendAttachment(event, files[index], this.config, index);
       } catch (error) {
@@ -2238,6 +2245,7 @@ class BridgeRuntime {
     const threadId = result.thread.id;
     if (discardPreviousTitle) delete this.state.pendingTitleJobs[previousThreadId];
     this.state.sessions[chatId] = threadId;
+    this.#cancelDetachedApprovals(chatId, threadId);
     this.state.workdirs[chatId] = resolve(cwd);
     this.state.pendingTitleJobs[threadId] = {
       ...createPendingTitleJob(threadId, cwd, "", ""),
@@ -2250,24 +2258,34 @@ class BridgeRuntime {
   async #executeThreadTask(task) {
     const { event, snapshot } = task;
     if (task.cancelRequested) {
-      await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
-        "任务已由 `/stop` 在开始前取消。", this.config);
+      if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
+        await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+          "任务已由 `/stop` 在开始前取消。", this.config);
+      }
       return;
     }
-    const processingReactionId = await beginProcessingReaction(event.messageId, this.config);
+    const processingReactionId = shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)
+      ? await beginProcessingReaction(event.messageId, this.config)
+      : "";
     let succeeded = false;
     try {
       if (task.cancelRequested) {
-        await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
-          "任务已由 `/stop` 在开始前取消。", this.config);
+        if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
+          await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+            "任务已由 `/stop` 在开始前取消。", this.config);
+        }
         succeeded = true;
         return;
       }
       const completed = await this.#runTurn(task);
       const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd });
-      if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
-      else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
-      await this.#deliverFiles(event, delivery.files);
+      if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
+        if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
+        else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
+        await this.#deliverFiles(event, delivery.files, snapshot.threadId);
+      } else {
+        console.log(`[bridge] suppressed detached thread output thread=${snapshot.threadId} chat=${event.chatId}`);
+      }
       succeeded = true;
       const titleJob = this.state.pendingTitleJobs[snapshot.threadId];
       if (titleJob?.state === "awaitingFirstTurn") {
@@ -2279,10 +2297,13 @@ class BridgeRuntime {
       this.#retryPendingTitleJobs();
     } catch (error) {
       console.error(error);
-      await sendReply(event.messageId, `${event.eventId}-error`,
-        `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
+      if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
+        await sendReply(event.messageId, `${event.eventId}-error`,
+          `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
+      }
     } finally {
-      await finishProcessingReaction(event.messageId, processingReactionId, succeeded, this.config);
+      const detached = !shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId);
+      await finishProcessingReaction(event.messageId, processingReactionId, succeeded || detached, this.config);
     }
   }
 
@@ -2421,7 +2442,9 @@ class BridgeRuntime {
     if (!text || active.progressKeys.has(key)) return;
     active.progressKeys.add(key);
     active.sendQueue = active.sendQueue
-      .then(() => sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config))
+      .then(() => shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)
+        ? sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config)
+        : undefined)
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
   }
 
@@ -2429,6 +2452,7 @@ class BridgeRuntime {
     if (active.progressKeys.has(key)) return;
     active.progressKeys.add(key);
     active.sendQueue = active.sendQueue.then(async () => {
+      if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
       try {
         await sendApprovalCard(active.event.messageId, `${active.event.eventId}-${key}`, subject, approvalId);
       } catch (error) {
@@ -2491,6 +2515,10 @@ class BridgeRuntime {
       this.client.respond(message.id, { decision: "acceptForSession" });
       return;
     }
+    if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) {
+      this.client.respond(message.id, { decision: "cancel" });
+      return;
+    }
     const pending = this.pendingApprovals.get(active.chatId) || [];
     const approvalId = randomUUID();
     pending.push({ approvalId, requestId: message.id, method: message.method, params });
@@ -2515,6 +2543,20 @@ class BridgeRuntime {
     if (pending.length) this.pendingApprovals.set(chatId, pending);
     else this.pendingApprovals.delete(chatId);
     return true;
+  }
+
+  #cancelDetachedApprovals(chatId, selectedThreadId) {
+    const pending = this.pendingApprovals.get(chatId) || [];
+    const remaining = [];
+    for (const approval of pending) {
+      if (selectedThreadId && approval.params?.threadId === selectedThreadId) {
+        remaining.push(approval);
+        continue;
+      }
+      try { this.client.respond(approval.requestId, { decision: "cancel" }); } catch { /* request already resolved */ }
+    }
+    if (remaining.length) this.pendingApprovals.set(chatId, remaining);
+    else this.pendingApprovals.delete(chatId);
   }
 
   async #resolvePending(chatId, decision, oneOnly = false) {

@@ -172,12 +172,13 @@ Codex：...
 2. `threadQueues`
    - 按 `threadId` 保存明确的待执行任务数组，不使用无法清空的长 Promise 链。
    - 同一 thread 的普通任务严格串行。
-   - 不同 thread 可以并行运行；每个结果和过程消息仍回复各自原始飞书消息。
+   - 不同 thread 可以并行运行；只有聊天当前选中的 thread 可以继续向该聊天推送过程和结果消息。
 
 3. 活动状态
    - `activeThreads` 按 `threadId` 保存活跃 turn。
    - 按 `chatId` 记录该聊天仍在后台运行的 thread 集合，不能继续使用只能保存一个任务的 `activeChats` 作为唯一事实来源。
-   - App Server 通知、审批和最终结果始终按 `threadId` 路由。
+   - App Server 通知、审批和最终结果始终按 `threadId` 路由，并在实际发送前再次确认该 thread 仍是聊天当前选择。
+   - 切换离开的 thread 继续后台执行并保留历史，但停止推送进度、审批提示、最终答复、错误和附件；其待处理人工审批自动取消。
 
 ### 5.3 到达顺序
 
@@ -263,7 +264,7 @@ Codex：...
 
 1. 长任务运行时，`/help`、`/status`、`/model`、`/screen`、`/resume` 和 `/cd` 能及时响应。
 2. 连续发送控制命令和普通任务时，普通任务使用其前面最近一次已完成控制操作确定的 thread 与设置。
-3. 同一 thread 的多个任务不并发；不同 thread 的任务可以并发，结果不会串到其他飞书消息。
+3. 同一 thread 的多个任务不并发；不同 thread 的任务可以并发，切换后旧 thread 的后续消息不会串入当前飞书聊天。
 4. `/stop` 中断当前选中 thread 并清空其排队任务，不影响后台其他 thread。
 5. `/new` 不创建空 thread；下一条任务创建新 thread。
 6. `/cd` 成功后立即创建新 thread，失败时恢复旧状态。

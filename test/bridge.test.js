@@ -51,6 +51,7 @@ import {
   runCommand,
   selectLatestTurn,
   selectResumeThread,
+  shouldDeliverThreadOutput,
   splitReply,
   snapshotTurnSettings,
   splitLatexMarkdown,
@@ -303,6 +304,16 @@ test("turn settings are immutable routing-time snapshots", () => {
   assert.equal(snapshot.approvalMode, "manual");
   assert.equal(snapshot.model, "gpt-old");
   assert.equal(snapshot.effort, "high");
+});
+
+test("thread output follows the chat's current selection instead of the original routing snapshot", () => {
+  const state = { sessions: { chat: "thread-a" } };
+  assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-a"), true);
+  state.sessions.chat = "thread-b";
+  assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-a"), false);
+  assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-b"), true);
+  delete state.sessions.chat;
+  assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-b"), false);
 });
 
 test("background launcher resolves on ready IPC and reports startup failures", async () => {
