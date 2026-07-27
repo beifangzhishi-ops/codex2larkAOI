@@ -20,6 +20,10 @@ const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
 const LATEX_DIR = resolve(STATE_DIR, "latex");
+const LATEX_CANVAS_WIDTH = 1200;
+const LATEX_CANVAS_PADDING_X = 60;
+const LATEX_CANVAS_PADDING_Y = 28;
+const LATEX_RENDER_DENSITY = 320;
 const latexAdaptor = liteAdaptor();
 RegisterHTMLHandler(latexAdaptor);
 const latexDocument = mathjax.document("", {
@@ -264,6 +268,27 @@ export function latexImageUploadSpec(path) {
   };
 }
 
+export function latexCanvasLayout(sourceWidth, sourceHeight, {
+  canvasWidth = LATEX_CANVAS_WIDTH,
+  paddingX = LATEX_CANVAS_PADDING_X,
+  paddingY = LATEX_CANVAS_PADDING_Y,
+} = {}) {
+  const safeWidth = Math.max(1, Number(sourceWidth) || 1);
+  const safeHeight = Math.max(1, Number(sourceHeight) || 1);
+  const contentWidth = Math.max(1, canvasWidth - (paddingX * 2));
+  const scale = Math.min(1, contentWidth / safeWidth);
+  const width = Math.max(1, Math.round(safeWidth * scale));
+  const height = Math.max(1, Math.round(safeHeight * scale));
+  return {
+    canvasWidth,
+    canvasHeight: height + (paddingY * 2),
+    width,
+    height,
+    left: Math.floor((canvasWidth - width) / 2),
+    top: paddingY,
+  };
+}
+
 async function renderLatexImage(formula, display = false) {
   mkdirSync(LATEX_DIR, { recursive: true });
   const outputPath = resolve(LATEX_DIR, `${randomUUID()}.png`);
@@ -275,7 +300,25 @@ async function renderLatexImage(formula, display = false) {
     const svgEnd = rendered.indexOf("</svg>", svgStart);
     if (svgEnd < 0) throw new Error("MathJax SVG 公式不完整");
     const svg = rendered.slice(svgStart, svgEnd + "</svg>".length);
-    await sharp(Buffer.from(svg), { density: display ? 192 : 160 }).png().toFile(outputPath);
+    const source = sharp(Buffer.from(svg), { density: LATEX_RENDER_DENSITY });
+    const metadata = await source.metadata();
+    const layout = latexCanvasLayout(metadata.width, metadata.height);
+    const renderedFormula = await source
+      .resize({ width: layout.width, height: layout.height, fit: "fill" })
+      .png()
+      .toBuffer();
+    await sharp({
+      create: {
+        width: layout.canvasWidth,
+        height: layout.canvasHeight,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 0 },
+      },
+    }).composite([{
+      input: renderedFormula,
+      left: layout.left,
+      top: layout.top,
+    }]).png().toFile(outputPath);
     const upload = latexImageUploadSpec(outputPath);
     const { stdout } = await runCommand("lark-cli", upload.args, {
       cwd: upload.cwd,

@@ -28,6 +28,7 @@ import {
   formatThreadItem,
   idempotencyKey,
   isMarkdownValidationError,
+  latexCanvasLayout,
   latexImageUploadSpec,
   mergeProjectEnv,
   normalizeModelCatalog,
@@ -146,6 +147,25 @@ test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
   assert.equal(upload.cwd, dirname(imagePath));
   assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\formula.png");
   assert.equal(upload.args.includes(imagePath), false);
+});
+
+test("latexCanvasLayout keeps a stable canvas width and only shrinks long formulas", () => {
+  assert.deepEqual(latexCanvasLayout(400, 80), {
+    canvasWidth: 1200,
+    canvasHeight: 136,
+    width: 400,
+    height: 80,
+    left: 400,
+    top: 28,
+  });
+  assert.deepEqual(latexCanvasLayout(2160, 200), {
+    canvasWidth: 1200,
+    canvasHeight: 156,
+    width: 1080,
+    height: 100,
+    left: 60,
+    top: 28,
+  });
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {
