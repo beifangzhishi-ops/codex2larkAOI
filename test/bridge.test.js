@@ -30,6 +30,7 @@ import {
   isMarkdownValidationError,
   latexCanvasLayout,
   latexImageUploadSpec,
+  loadResumeThreadStatuses,
   mergeProjectEnv,
   normalizeModelCatalog,
   normalizePersistedState,
@@ -695,6 +696,43 @@ test("resume history completeness requires full turn items", () => {
   assert.equal(hasCompleteTurnHistory({}), false);
 });
 
+test("resume status loader resolves not-loaded threads from their latest persisted turn", async () => {
+  const requests = [];
+  const statuses = {
+    completed: [{ startedAt: 1, status: "completed" }],
+    interrupted: [{ startedAt: 2, status: "interrupted" }],
+    failed: [{ startedAt: 3, status: "failed" }],
+    empty: [],
+  };
+  const client = {
+    async request(method, params) {
+      requests.push([method, params]);
+      return { thread: { turns: statuses[params.threadId] } };
+    },
+  };
+  const threads = [
+    { id: "active", status: { type: "active", activeFlags: [] } },
+    ...Object.keys(statuses).map((id) => ({ id, status: { type: "notLoaded" } })),
+  ];
+  const loaded = await loadResumeThreadStatuses(client, threads);
+  assert.equal(requests.length, 4);
+  assert.ok(requests.every(([method, params]) => method === "thread/read" && params.includeTurns === true));
+  assert.deepEqual(loaded.map((thread) => resumeThreadStatusLabel(thread)), [
+    "进行中", "已完成", "已中断", "失败", "无记录",
+  ]);
+});
+
+test("resume status loader degrades one failed history read without blocking the card", async () => {
+  const errors = [];
+  const [thread] = await loadResumeThreadStatuses({
+    request: async () => { throw new Error("read failed"); },
+  }, [{ id: "unavailable", status: { type: "notLoaded" } }], (error, item) => {
+    errors.push([error.message, item.id]);
+  });
+  assert.equal(resumeThreadStatusLabel(thread), "未加载");
+  assert.deepEqual(errors, [["read failed", "unavailable"]]);
+});
+
 test("model catalog and selection use only server-supported model efforts", () => {
   const catalog = normalizeModelCatalog({ data: [
     { id: "hidden", hidden: true, defaultReasoningEffort: "low" },
@@ -775,6 +813,7 @@ test("resume cards show five sessions plus only the available page controls", ()
       { type: "systemError" },
       undefined,
     ][index],
+    resumeTurnStatus: index === 2 ? "completed" : undefined,
   }));
   const actions = (card) => card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
@@ -796,9 +835,9 @@ test("resume cards show five sessions plus only the available page controls", ()
     .map((element) => element.content);
   assert.match(summaries[0], /当前 · 进行中/);
   assert.match(summaries[1], /空闲/);
-  assert.match(summaries[2], /未加载/);
+  assert.match(summaries[2], /已完成/);
   assert.match(summaries[3], /异常/);
-  assert.doesNotMatch(summaries[4], /进行中|空闲|未加载|异常/);
+  assert.doesNotMatch(summaries[4], /进行中|空闲|已完成|异常/);
   assert.equal(resumeThreadStatusLabel({ status: { type: "active" } }), "进行中");
   assert.equal(resumeThreadStatusLabel({}), "");
 });

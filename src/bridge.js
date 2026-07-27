@@ -632,8 +632,15 @@ export function resumeThreadStatusLabel(thread) {
   const type = thread?.status?.type;
   if (type === "active") return "进行中";
   if (type === "idle") return "空闲";
-  if (type === "notLoaded") return "未加载";
   if (type === "systemError") return "异常";
+  if (type === "notLoaded") {
+    if (thread.resumeTurnStatus === "inProgress") return "进行中";
+    if (thread.resumeTurnStatus === "completed") return "已完成";
+    if (thread.resumeTurnStatus === "interrupted") return "已中断";
+    if (thread.resumeTurnStatus === "failed") return "失败";
+    if (thread.resumeTurnStatus === "empty") return "无记录";
+    return "未加载";
+  }
   return "";
 }
 
@@ -667,6 +674,20 @@ export function selectLatestTurn(turns) {
     const turnTime = turnTimestamp(turn);
     return latestTime !== null && turnTime !== null && turnTime < latestTime ? latest : turn;
   });
+}
+
+export async function loadResumeThreadStatuses(client, threads, onError = () => {}) {
+  return Promise.all(threads.map(async (thread) => {
+    if (thread?.status?.type !== "notLoaded" || thread.resumeTurnStatus) return thread;
+    try {
+      const result = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+      const latestTurn = selectLatestTurn(result?.thread?.turns);
+      return { ...thread, resumeTurnStatus: latestTurn?.status || "empty" };
+    } catch (error) {
+      onError(error, thread);
+      return { ...thread, resumeTurnStatus: "unavailable" };
+    }
+  }));
 }
 
 function historicalInputText(input) {
@@ -1893,6 +1914,15 @@ class BridgeRuntime {
     return entries;
   }
 
+  async #loadResumePage(candidates, pageStart, pageSize) {
+    const page = candidates.threads.slice(pageStart, pageStart + pageSize);
+    const loaded = await loadResumeThreadStatuses(this.client, page, (error, thread) => {
+      console.warn(`[codex] cannot read resume status for ${thread.id}: ${error.message}`);
+    });
+    candidates.threads.splice(pageStart, loaded.length, ...loaded);
+    return loaded;
+  }
+
   async #selectionFor(chatId) {
     const catalog = await this.#listModels();
     const selection = resolveModelSelection(catalog, this.state.modelSettings[chatId], this.config.model);
@@ -2065,8 +2095,9 @@ class BridgeRuntime {
       const threads = await this.#listResumeThreads(event.chatId);
       const candidates = { threads, pageStart: 0 };
       this.resumeCandidates.set(event.chatId, candidates);
+      const page = await this.#loadResumePage(candidates, 0, pageSize);
       await sendInteractiveCard(event.messageId, `${event.eventId}-resume-list`,
-        buildResumeCard(threads.slice(0, pageSize), this.state.sessions[event.chatId], 0, threads.length));
+        buildResumeCard(page, this.state.sessions[event.chatId], 0, threads.length));
       return;
     }
     let candidates = this.resumeCandidates.get(event.chatId);
@@ -2083,7 +2114,7 @@ class BridgeRuntime {
         return;
       }
       candidates.pageStart = nextStart;
-      const page = candidates.threads.slice(nextStart, nextStart + pageSize);
+      const page = await this.#loadResumePage(candidates, nextStart, pageSize);
       await sendInteractiveCard(event.messageId, `${event.eventId}-resume-page-${nextStart}`,
         buildResumeCard(page, this.state.sessions[event.chatId], nextStart, candidates.threads.length));
       return;
@@ -2142,8 +2173,9 @@ class BridgeRuntime {
     const lastStart = Math.max(0, Math.floor((Math.max(1, candidates.threads.length) - 1) / pageSize) * pageSize);
     const pageStart = Math.min(Math.max(0, requestedStart), lastStart);
     candidates.pageStart = pageStart;
+    const page = await this.#loadResumePage(candidates, pageStart, pageSize);
     const card = buildResumeCard(
-      candidates.threads.slice(pageStart, pageStart + pageSize),
+      page,
       this.state.sessions[event.chatId],
       pageStart,
       candidates.threads.length,
