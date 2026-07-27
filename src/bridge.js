@@ -628,6 +628,15 @@ export function formatResumeThreads(threads, currentThreadId = "", hasMore = fal
   return `历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\` 或 \`/resume 标题\` 继续。${next}`;
 }
 
+export function resumeThreadStatusLabel(thread) {
+  const type = thread?.status?.type;
+  if (type === "active") return "进行中";
+  if (type === "idle") return "空闲";
+  if (type === "notLoaded") return "未加载";
+  if (type === "systemError") return "异常";
+  return "";
+}
+
 export function selectResumeThread(threads, query) {
   const value = String(query || "").trim();
   if (!value) return { error: "请选择要恢复的会话。" };
@@ -1256,10 +1265,14 @@ export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, to
     elements.push({ tag: "markdown", content: "没有可恢复的历史会话。" });
   } else {
     for (const [index, thread] of threads.entries()) {
-      const current = thread.id === currentThreadId ? " · 当前" : "";
+      const markers = [
+        thread.id === currentThreadId ? "当前" : "",
+        resumeThreadStatusLabel(thread),
+      ].filter(Boolean);
+      const markerText = markers.length ? ` · ${markers.join(" · ")}` : "";
       elements.push({
         tag: "markdown",
-        content: `**${pageStart + index + 1}. ${threadLabel(thread)}**${current}\n${threadTimestamp(thread)} · ${threadCwdLabel(thread)}`,
+        content: `**${pageStart + index + 1}. ${threadLabel(thread)}**${markerText}\n${threadTimestamp(thread)} · ${threadCwdLabel(thread)}`,
       });
       elements.push({
         tag: "action",

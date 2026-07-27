@@ -41,6 +41,7 @@ import {
   parseDotEnv,
   reactionArgs,
   reactionIdFromOutput,
+  resumeThreadStatusLabel,
   resolveCodexCommand,
   resolveModelSelection,
   resolveWorkdirQuery,
@@ -767,6 +768,13 @@ test("resume cards show five sessions plus only the available page controls", ()
     name: `Session ${index + 1}`,
     cwd: `C:\\work\\project-${index + 1}`,
     updatedAt: 1_750_000_000 - index,
+    status: [
+      { type: "active", activeFlags: [] },
+      { type: "idle" },
+      { type: "notLoaded" },
+      { type: "systemError" },
+      undefined,
+    ][index],
   }));
   const actions = (card) => card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
@@ -783,6 +791,16 @@ test("resume cards show five sessions plus only the available page controls", ()
   assert.equal(last.at(-1).text.content, "上一页");
   assert.equal(actions(buildResumeCard(threads, "", 0, 5)).length, 5);
   assert.equal(first[0].value.threadId, "thr_1");
+  const summaries = buildResumeCard(threads, "thr_1", 0, 5).elements
+    .filter((element) => element.tag === "markdown")
+    .map((element) => element.content);
+  assert.match(summaries[0], /当前 · 进行中/);
+  assert.match(summaries[1], /空闲/);
+  assert.match(summaries[2], /未加载/);
+  assert.match(summaries[3], /异常/);
+  assert.doesNotMatch(summaries[4], /进行中|空闲|未加载|异常/);
+  assert.equal(resumeThreadStatusLabel({ status: { type: "active" } }), "进行中");
+  assert.equal(resumeThreadStatusLabel({}), "");
 });
 
 test("control card callbacks accept only the supported typed actions", () => {
