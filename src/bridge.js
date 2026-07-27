@@ -5,6 +5,13 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mathjax } from "mathjax-full/js/mathjax.js";
+import { TeX } from "mathjax-full/js/input/tex.js";
+import { AllPackages } from "mathjax-full/js/input/tex/AllPackages.js";
+import { SVG } from "mathjax-full/js/output/svg.js";
+import { liteAdaptor } from "mathjax-full/js/adaptors/liteAdaptor.js";
+import { RegisterHTMLHandler } from "mathjax-full/js/handlers/html.js";
+import sharp from "sharp";
 import { CodexAppServer } from "./codex-app-server.js";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -12,6 +19,13 @@ const STATE_DIR = resolve(ROOT, ".state");
 const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
+const LATEX_DIR = resolve(STATE_DIR, "latex");
+const latexAdaptor = liteAdaptor();
+RegisterHTMLHandler(latexAdaptor);
+const latexDocument = mathjax.document("", {
+  InputJax: new TeX({ packages: AllPackages, maxBuffer: 20_000 }),
+  OutputJax: new SVG({ fontCache: "none" }),
+});
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
@@ -56,6 +70,135 @@ export function splitReply(text, maxChars) {
   }
   if (remaining) chunks.push(remaining);
   return chunks.length ? chunks : ["Codex 未返回文本结果。"];
+}
+
+function pushLatexText(segments, value) {
+  if (!value) return;
+  const previous = segments.at(-1);
+  if (previous?.type === "text") previous.value += value;
+  else segments.push({ type: "text", value });
+}
+
+function findUnescaped(value, needle, start) {
+  for (let index = start; index < value.length; index += 1) {
+    if (value[index] !== needle) continue;
+    let slashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) slashes += 1;
+    if (slashes % 2 === 0) return index;
+  }
+  return -1;
+}
+
+export function splitLatexMarkdown(text) {
+  const value = String(text ?? "");
+  const segments = [];
+  let cursor = 0;
+  let textStart = 0;
+  const flushText = (end) => {
+    pushLatexText(segments, value.slice(textStart, end));
+    cursor = end;
+    textStart = end;
+  };
+  while (cursor < value.length) {
+    if (value.startsWith("```", cursor)) {
+      const endMarker = value.indexOf("```", cursor + 3);
+      if (endMarker < 0) break;
+      cursor = endMarker + 3;
+      continue;
+    }
+    if (value[cursor] === "`") {
+      const endMarker = value.indexOf("`", cursor + 1);
+      if (endMarker < 0) break;
+      cursor = endMarker + 1;
+      continue;
+    }
+
+    let delimiter = "";
+    let display = false;
+    if (value.startsWith("$$", cursor)) {
+      delimiter = "$$";
+      display = true;
+    } else if (value.startsWith("\\[", cursor)) {
+      delimiter = "\\]";
+      display = true;
+    } else if (value.startsWith("\\(", cursor)) {
+      delimiter = "\\)";
+    } else if (value[cursor] === "$" && value[cursor - 1] !== "\\" && value[cursor + 1] !== "$") {
+      delimiter = "$";
+    }
+    if (!delimiter) {
+      cursor += 1;
+      continue;
+    }
+
+    let end;
+    if (delimiter.length === 2) end = value.indexOf(delimiter, cursor + 2);
+    else if (delimiter === "$") end = findUnescaped(value, "$", cursor + 1);
+    else end = value.indexOf(delimiter, cursor + 2);
+    if (end < 0) {
+      cursor += delimiter.length;
+      continue;
+    }
+    const formulaStart = cursor + delimiter.length;
+    const formula = value.slice(formulaStart, end).trim();
+    if (!formula || formula.length > 4_000 || (!display && /\r?\n/.test(formula))) {
+      cursor = end + delimiter.length;
+      continue;
+    }
+    flushText(cursor);
+    segments.push({ type: "math", value: formula, display });
+    cursor = end + delimiter.length;
+    textStart = cursor;
+  }
+  pushLatexText(segments, value.slice(textStart));
+  return segments;
+}
+
+async function renderLatexImage(formula, display = false) {
+  mkdirSync(LATEX_DIR, { recursive: true });
+  const outputPath = resolve(LATEX_DIR, `${randomUUID()}.png`);
+  try {
+    const node = latexDocument.convert(formula, { display });
+    const rendered = latexAdaptor.outerHTML(node);
+    const svgStart = rendered.indexOf("<svg");
+    if (svgStart < 0) throw new Error("MathJax 未生成 SVG 公式");
+    const svgEnd = rendered.indexOf("</svg>", svgStart);
+    if (svgEnd < 0) throw new Error("MathJax SVG 公式不完整");
+    const svg = rendered.slice(svgStart, svgEnd + "</svg>".length);
+    await sharp(Buffer.from(svg), { density: display ? 192 : 160 }).png().toFile(outputPath);
+    const { stdout } = await runCommand("lark-cli", [
+      "im", "images", "create", "--as", "bot", "--file", `image=${outputPath}`,
+      "--data", JSON.stringify({ image_type: "message" }),
+    ], { timeoutMs: 120_000 });
+    const response = JSON.parse(stdout);
+    const imageKey = response.data?.image_key || response.image_key;
+    if (!imageKey) throw new Error("飞书图片上传未返回 image_key");
+    return imageKey;
+  } finally {
+    try { unlinkSync(outputPath); } catch { /* best effort cleanup */ }
+  }
+}
+
+export async function buildLatexPostContent(text) {
+  const segments = splitLatexMarkdown(text);
+  if (!segments.some((segment) => segment.type === "math")) return null;
+  const paragraphs = [[]];
+  for (const segment of segments) {
+    if (segment.type === "text") {
+      if (segment.value) paragraphs.at(-1).push({ tag: "md", text: segment.value });
+      continue;
+    }
+    const imageKey = await renderLatexImage(segment.value, segment.display);
+    if (segment.display) {
+      if (paragraphs.at(-1).length) paragraphs.push([]);
+      paragraphs.push([{ tag: "img", image_key: imageKey }]);
+      paragraphs.push([]);
+    } else {
+      paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
+    }
+  }
+  const content = paragraphs.filter((paragraph) => paragraph.length);
+  return { zh_cn: { content } };
 }
 
 export function watchForStopRequest(stopFile, onStop, intervalMs = 250) {
@@ -1040,6 +1183,24 @@ export async function sendReply(messageId, eventKey, text, config) {
       "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     ];
     try {
+      let latexContent = null;
+      try {
+        latexContent = await buildLatexPostContent(chunks[index]);
+      } catch (error) {
+        console.warn(`[bridge] LaTeX rendering failed for ${messageId}; keeping source markdown: ${error.message}`);
+      }
+      if (latexContent) {
+        try {
+          await runCommand("lark-cli", [
+            ...common, "--msg-type", "post", "--content", JSON.stringify(latexContent),
+            "--idempotency-key", key,
+          ]);
+          continue;
+        } catch (error) {
+          if (!isMarkdownValidationError(error)) throw error;
+          console.warn(`[bridge] LaTeX post rejected for ${messageId}; retrying as markdown`);
+        }
+      }
       await runCommand("lark-cli", [...common, "--markdown", chunks[index], "--idempotency-key", key]);
     } catch (error) {
       if (!isMarkdownValidationError(error)) throw error;

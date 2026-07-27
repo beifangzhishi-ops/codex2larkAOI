@@ -49,6 +49,7 @@ import {
   selectResumeThread,
   splitReply,
   snapshotTurnSettings,
+  splitLatexMarkdown,
   ThreadTaskQueueManager,
   watchForStopRequest,
   hasCompleteTurnHistory,
@@ -90,6 +91,25 @@ test("normalizeEvent accepts flattened and JSON-wrapped text", () => {
 
 test("splitReply prefers newline boundaries", () => {
   assert.deepEqual(splitReply("12345\n67890", 7), ["12345", "67890"]);
+});
+
+test("splitLatexMarkdown extracts inline and display formulas but preserves code", () => {
+  assert.deepEqual(splitLatexMarkdown("前 $x^2$ 后\n\n$$y=mx+b$$\n`$not_math$`"), [
+    { type: "text", value: "前 " },
+    { type: "math", value: "x^2", display: false },
+    { type: "text", value: " 后\n\n" },
+    { type: "math", value: "y=mx+b", display: true },
+    { type: "text", value: "\n`$not_math$`" },
+  ]);
+});
+
+test("splitLatexMarkdown supports bracket delimiters and ignores unfinished formulas", () => {
+  assert.deepEqual(splitLatexMarkdown(String.raw`\(a+b\) and \[c=d\] and $unfinished`), [
+    { type: "math", value: "a+b", display: false },
+    { type: "text", value: " and " },
+    { type: "math", value: "c=d", display: true },
+    { type: "text", value: " and $unfinished" },
+  ]);
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {
