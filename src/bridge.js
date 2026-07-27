@@ -305,6 +305,7 @@ async function renderLatexImage(formula, display = false) {
     const layout = latexCanvasLayout(metadata.width, metadata.height);
     const renderedFormula = await source
       .resize({ width: layout.width, height: layout.height, fit: "fill" })
+      .negate({ alpha: false })
       .png()
       .toBuffer();
     await sharp({
@@ -312,7 +313,7 @@ async function renderLatexImage(formula, display = false) {
         width: layout.canvasWidth,
         height: layout.canvasHeight,
         channels: 4,
-        background: { r: 255, g: 255, b: 255, alpha: 0 },
+        background: { r: 0, g: 0, b: 0, alpha: 1 },
       },
     }).composite([{
       input: renderedFormula,
