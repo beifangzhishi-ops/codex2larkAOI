@@ -28,6 +28,7 @@ import {
   formatThreadItem,
   idempotencyKey,
   isMarkdownValidationError,
+  latexImageUploadSpec,
   mergeProjectEnv,
   normalizeModelCatalog,
   normalizePersistedState,
@@ -110,6 +111,41 @@ test("splitLatexMarkdown supports bracket delimiters and ignores unfinished form
     { type: "math", value: "c=d", display: true },
     { type: "text", value: " and $unfinished" },
   ]);
+});
+
+test("splitLatexMarkdown recognizes bare boxed blocks and standalone formula lines", () => {
+  const segments = splitLatexMarkdown(String.raw`本项目采用的定义为：
+
+\boxed{
+Fr=\frac{a_\eta}{(\beta-1)g_{\mathrm{eff}}}
+}
+
+g_{\mathrm{eff}}=g-G_p
+
+\varepsilon=\beta^*k\\omega,\\qquad \\beta^*=0.09
+
+Fr<1：重力主导；
+Fr\approx1：湍流与重力相当；
+
+\`x=1\``);
+  assert.deepEqual(segments.filter((segment) => segment.type === "math"), [
+    { type: "math", value: String.raw`\boxed{
+Fr=\frac{a_\eta}{(\beta-1)g_{\mathrm{eff}}}
+}`, display: true },
+    { type: "math", value: String.raw`g_{\mathrm{eff}}=g-G_p`, display: true },
+    { type: "math", value: String.raw`\varepsilon=\beta^*k\omega,\qquad \beta^*=0.09`, display: true },
+    { type: "math", value: "Fr<1", display: false },
+    { type: "math", value: String.raw`Fr\approx1`, display: false },
+  ]);
+  assert.match(segments.at(-1).value, /x=1/);
+});
+
+test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
+  const imagePath = resolve(".state", "latex", "formula.png");
+  const upload = latexImageUploadSpec(imagePath);
+  assert.equal(upload.cwd, dirname(imagePath));
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\formula.png");
+  assert.equal(upload.args.includes(imagePath), false);
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {

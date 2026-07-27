@@ -89,6 +89,85 @@ function findUnescaped(value, needle, start) {
   return -1;
 }
 
+function normalizeLatexFormula(value) {
+  return String(value).replace(/\\\\(?=[A-Za-z]+)/g, "\\").trim();
+}
+
+function looksLikeBareFormula(value) {
+  const candidate = String(value).trim();
+  if (!candidate || candidate.length > 4_000 || /[\u3400-\u9fff]/u.test(candidate)) return false;
+  if (/https?:\/\/|^[#/]|```|`/.test(candidate)) return false;
+  const hasOperand = /[A-Za-z0-9]|\\[A-Za-z]+/.test(candidate);
+  const hasMathSyntax = /\\[A-Za-z]+|[_^]|[=<>]/.test(candidate);
+  return hasOperand && hasMathSyntax;
+}
+
+function splitBareFormulaLines(value) {
+  const segments = [];
+  for (const line of String(value).match(/[^\n]*(?:\n|$)/g) || []) {
+    if (!line) continue;
+    const newline = line.endsWith("\n") ? "\n" : "";
+    const body = newline ? line.slice(0, -1) : line;
+    const leading = body.match(/^\s*/)?.[0] || "";
+    const trimmed = body.trim();
+    const explanation = trimmed.match(/^(.+?)([：:][\u3400-\u9fff].*)$/u);
+    const formula = explanation?.[1]?.trim() || trimmed;
+    if (!looksLikeBareFormula(formula)) {
+      pushLatexText(segments, line);
+      continue;
+    }
+    pushLatexText(segments, leading);
+    segments.push({ type: "math", value: normalizeLatexFormula(formula), display: !explanation });
+    pushLatexText(segments, `${explanation?.[2] || ""}${newline}`);
+  }
+  return segments;
+}
+
+function findBalancedBrace(value, openBrace) {
+  let depth = 0;
+  for (let index = openBrace; index < value.length; index += 1) {
+    if (value[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (value[index] === "{") depth += 1;
+    else if (value[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function splitBareLatexText(value) {
+  const segments = [];
+  let cursor = 0;
+  const boxedPattern = /\\boxed\s*\{/g;
+  for (let match = boxedPattern.exec(value); match; match = boxedPattern.exec(value)) {
+    const lineStart = value.lastIndexOf("\n", match.index - 1) + 1;
+    if (value.slice(lineStart, match.index).trim()) continue;
+    const openBrace = value.indexOf("{", match.index);
+    const closeBrace = findBalancedBrace(value, openBrace);
+    if (closeBrace < 0) continue;
+    for (const segment of splitBareFormulaLines(value.slice(cursor, lineStart))) {
+      if (segment.type === "text") pushLatexText(segments, segment.value);
+      else segments.push(segment);
+    }
+    segments.push({
+      type: "math",
+      value: normalizeLatexFormula(value.slice(match.index, closeBrace + 1)),
+      display: true,
+    });
+    cursor = closeBrace + 1;
+    boxedPattern.lastIndex = cursor;
+  }
+  for (const segment of splitBareFormulaLines(value.slice(cursor))) {
+    if (segment.type === "text") pushLatexText(segments, segment.value);
+    else segments.push(segment);
+  }
+  return segments;
+}
+
 export function splitLatexMarkdown(text) {
   const value = String(text ?? "");
   const segments = [];
@@ -103,13 +182,19 @@ export function splitLatexMarkdown(text) {
     if (value.startsWith("```", cursor)) {
       const endMarker = value.indexOf("```", cursor + 3);
       if (endMarker < 0) break;
+      flushText(cursor);
+      segments.push({ type: "protected", value: value.slice(cursor, endMarker + 3) });
       cursor = endMarker + 3;
+      textStart = cursor;
       continue;
     }
     if (value[cursor] === "`") {
       const endMarker = value.indexOf("`", cursor + 1);
       if (endMarker < 0) break;
+      flushText(cursor);
+      segments.push({ type: "protected", value: value.slice(cursor, endMarker + 1) });
       cursor = endMarker + 1;
+      textStart = cursor;
       continue;
     }
 
@@ -146,12 +231,37 @@ export function splitLatexMarkdown(text) {
       continue;
     }
     flushText(cursor);
-    segments.push({ type: "math", value: formula, display });
+    segments.push({ type: "math", value: normalizeLatexFormula(formula), display });
     cursor = end + delimiter.length;
     textStart = cursor;
   }
   pushLatexText(segments, value.slice(textStart));
-  return segments;
+  const expanded = [];
+  for (const segment of segments) {
+    if (segment.type === "math") {
+      expanded.push(segment);
+      continue;
+    }
+    const bareSegments = segment.type === "protected"
+      ? [{ type: "text", value: segment.value }]
+      : splitBareLatexText(segment.value);
+    for (const bare of bareSegments) {
+      if (bare.type === "text") pushLatexText(expanded, bare.value);
+      else expanded.push(bare);
+    }
+  }
+  return expanded;
+}
+
+export function latexImageUploadSpec(path) {
+  const imagePath = resolve(path);
+  return {
+    args: [
+      "im", "images", "create", "--as", "bot", "--file", `image=.\\${basename(imagePath)}`,
+      "--data", JSON.stringify({ image_type: "message" }),
+    ],
+    cwd: dirname(imagePath),
+  };
 }
 
 async function renderLatexImage(formula, display = false) {
@@ -166,10 +276,11 @@ async function renderLatexImage(formula, display = false) {
     if (svgEnd < 0) throw new Error("MathJax SVG 公式不完整");
     const svg = rendered.slice(svgStart, svgEnd + "</svg>".length);
     await sharp(Buffer.from(svg), { density: display ? 192 : 160 }).png().toFile(outputPath);
-    const { stdout } = await runCommand("lark-cli", [
-      "im", "images", "create", "--as", "bot", "--file", `image=${outputPath}`,
-      "--data", JSON.stringify({ image_type: "message" }),
-    ], { timeoutMs: 120_000 });
+    const upload = latexImageUploadSpec(outputPath);
+    const { stdout } = await runCommand("lark-cli", upload.args, {
+      cwd: upload.cwd,
+      timeoutMs: 120_000,
+    });
     const response = JSON.parse(stdout);
     const imageKey = response.data?.image_key || response.image_key;
     if (!imageKey) throw new Error("飞书图片上传未返回 image_key");
