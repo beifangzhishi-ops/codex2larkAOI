@@ -160,7 +160,7 @@ test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
   assert.equal(upload.args.includes(imagePath), false);
 });
 
-test("latexCanvasLayout keeps a stable canvas width and only shrinks long formulas", () => {
+test("latexCanvasLayout renders display formulas at a fixed canvas width", () => {
   assert.deepEqual(latexCanvasLayout(400, 80), {
     canvasWidth: 1200,
     canvasHeight: 136,
@@ -176,6 +176,25 @@ test("latexCanvasLayout keeps a stable canvas width and only shrinks long formul
     height: 100,
     left: 60,
     top: 28,
+  });
+});
+
+test("latexCanvasLayout renders inline formulas at a fixed canvas height", () => {
+  assert.deepEqual(latexCanvasLayout(400, 80, { display: false }), {
+    canvasWidth: 352,
+    canvasHeight: 80,
+    width: 320,
+    height: 64,
+    left: 16,
+    top: 8,
+  });
+  assert.deepEqual(latexCanvasLayout(120, 120, { display: false }), {
+    canvasWidth: 96,
+    canvasHeight: 80,
+    width: 64,
+    height: 64,
+    left: 16,
+    top: 8,
   });
 });
 

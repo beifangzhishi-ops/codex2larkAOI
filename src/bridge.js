@@ -24,6 +24,9 @@ const MARKDOWN_FOLDER_NAME = "codex";
 const LATEX_CANVAS_WIDTH = 1200;
 const LATEX_CANVAS_PADDING_X = 60;
 const LATEX_CANVAS_PADDING_Y = 28;
+const LATEX_INLINE_CANVAS_HEIGHT = 80;
+const LATEX_INLINE_PADDING_X = 16;
+const LATEX_INLINE_PADDING_Y = 8;
 const LATEX_RENDER_DENSITY = 320;
 const latexAdaptor = liteAdaptor();
 RegisterHTMLHandler(latexAdaptor);
@@ -270,12 +273,28 @@ export function latexImageUploadSpec(path) {
 }
 
 export function latexCanvasLayout(sourceWidth, sourceHeight, {
+  display = true,
   canvasWidth = LATEX_CANVAS_WIDTH,
   paddingX = LATEX_CANVAS_PADDING_X,
   paddingY = LATEX_CANVAS_PADDING_Y,
+  inlineCanvasHeight = LATEX_INLINE_CANVAS_HEIGHT,
+  inlinePaddingX = LATEX_INLINE_PADDING_X,
+  inlinePaddingY = LATEX_INLINE_PADDING_Y,
 } = {}) {
   const safeWidth = Math.max(1, Number(sourceWidth) || 1);
   const safeHeight = Math.max(1, Number(sourceHeight) || 1);
+  if (!display) {
+    const height = Math.max(1, inlineCanvasHeight - (inlinePaddingY * 2));
+    const width = Math.max(1, Math.round(safeWidth * (height / safeHeight)));
+    return {
+      canvasWidth: width + (inlinePaddingX * 2),
+      canvasHeight: inlineCanvasHeight,
+      width,
+      height,
+      left: inlinePaddingX,
+      top: inlinePaddingY,
+    };
+  }
   const contentWidth = Math.max(1, canvasWidth - (paddingX * 2));
   const scale = Math.min(1, contentWidth / safeWidth);
   const width = Math.max(1, Math.round(safeWidth * scale));
@@ -303,7 +322,7 @@ async function renderLatexImage(formula, display = false) {
     const svg = rendered.slice(svgStart, svgEnd + "</svg>".length);
     const source = sharp(Buffer.from(svg), { density: LATEX_RENDER_DENSITY });
     const metadata = await source.metadata();
-    const layout = latexCanvasLayout(metadata.width, metadata.height);
+    const layout = latexCanvasLayout(metadata.width, metadata.height, { display });
     const renderedFormula = await source
       .resize({ width: layout.width, height: layout.height, fit: "fill" })
       .negate({ alpha: false })
