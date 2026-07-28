@@ -21,6 +21,42 @@ Stop only the selected project's bridge process and its `event consume` child. P
 3. Confirm the PID recorded in `.state\bridge.pid` is absent. Treat a missing PID file as already stopped.
 4. Report which project and PID stopped. State explicitly that no shared event bus was stopped.
 
+## Restart an AOI instance
+
+Use this sequence when restarting the development AOI bridge. Do not replace it with
+`lark-cli event stop --all` or a direct event-consumer command.
+
+1. Run the project-scoped stop wrapper with the absolute AOI path:
+
+   ```powershell
+   & ".\.agents\skills\stop-codex2lark-service\scripts\stop-service.cmd" `
+     "C:\Users\noha\Documents\AAAVitalFile\codex2larkAOI"
+   ```
+
+2. Confirm the PID from `.state\bridge.pid` has exited and that the PID file is
+   absent. If shutdown takes more than 10 seconds, inspect
+   `.state\bridge.err.log` and `.state\bridge.out.log` before taking further action.
+
+3. Start the AOI project through its own launcher:
+
+   ```powershell
+   & ".\start.cmd" "--no-pause-on-error"
+   ```
+
+   The launcher must resolve a non-AppX PowerShell 7 executable. In a Codex
+   workspace sandbox, the child PowerShell probe can return `EPERM`; in that case,
+   rerun the same `start.cmd` command with the approved sandbox escalation. Do not
+   bypass the PowerShell check or edit service code for this environment issue.
+
+4. Verify `.state\bridge.pid` contains a running process. Then check
+   `.state\bridge.err.log` for both event consumers reporting `[event] ready` and
+   the Feishu WebSocket reaching `connected`.
+
+5. For AOI, confirm `.env` keeps
+   `LARKSUITE_CLI_CONFIG_DIR=C:\Users\noha\.lark-cli-codex2lark-dev`.
+   Report the old and new bridge PIDs and state explicitly that the shared event bus
+   was not stopped.
+
 ## Safety rules
 
 - Never use `lark-cli event stop --all` for normal project shutdown.
