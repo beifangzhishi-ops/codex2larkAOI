@@ -181,20 +181,20 @@ test("latexCanvasLayout renders display formulas at a fixed canvas width", () =>
 
 test("latexCanvasLayout renders inline formulas at a fixed canvas height", () => {
   assert.deepEqual(latexCanvasLayout(400, 80, { display: false }), {
-    canvasWidth: 64,
-    canvasHeight: 14,
-    width: 60,
-    height: 12,
-    left: 2,
-    top: 1,
+    canvasWidth: 120,
+    canvasHeight: 28,
+    width: 110,
+    height: 22,
+    left: 5,
+    top: 3,
   });
   assert.deepEqual(latexCanvasLayout(120, 120, { display: false }), {
-    canvasWidth: 16,
-    canvasHeight: 14,
-    width: 12,
-    height: 12,
-    left: 2,
-    top: 1,
+    canvasWidth: 32,
+    canvasHeight: 28,
+    width: 22,
+    height: 22,
+    left: 5,
+    top: 3,
   });
 });
 
