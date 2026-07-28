@@ -43,10 +43,15 @@ Use this sequence when restarting the development AOI bridge. Do not replace it 
    & ".\start.cmd" "--no-pause-on-error"
    ```
 
-   The launcher must resolve a non-AppX PowerShell 7 executable. In a Codex
-   workspace sandbox, the child PowerShell probe can return `EPERM`; in that case,
-   rerun the same `start.cmd` command with the approved sandbox escalation. Do not
-   bypass the PowerShell check or edit service code for this environment issue.
+   The launcher must resolve a non-AppX PowerShell 7 executable. When Codex runs
+   this command from a workspace sandbox, request `require_escalated` on the first
+   invocation instead of trying it in the sandbox first. Use a justification that
+   says the AOI launcher needs to probe PowerShell 7 and start its background
+   bridge and event consumers, and scope any reusable approval to this exact
+   `start.cmd --no-pause-on-error` command. The restricted sandbox token is known
+   to make the child PowerShell probe fail even when the installation is valid.
+   Do not bypass the PowerShell check or edit service code for this environment
+   issue.
 
 4. Verify `.state\bridge.pid` contains a running process. Then check
    `.state\bridge.err.log` for both event consumers reporting `[event] ready` and
