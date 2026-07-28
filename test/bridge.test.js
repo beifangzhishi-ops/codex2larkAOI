@@ -27,11 +27,19 @@ import {
   formatLatestTurnReplay,
   formatThreadItem,
   idempotencyKey,
+  initializeMarkdownDelivery,
+  isMarkdownAttachment,
   isMarkdownValidationError,
   latexCanvasLayout,
   latexImageUploadSpec,
   loadResumeThreadStatuses,
   mergeProjectEnv,
+  markdownDeliveryReply,
+  markdownDocumentCreateSpec,
+  markdownDocumentFromCreateOutput,
+  markdownFolderFromCreateOutput,
+  markdownFolderFromListOutput,
+  markdownFolderGrantArgs,
   normalizeModelCatalog,
   normalizePersistedState,
   normalizeEvent,
@@ -204,6 +212,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   });
   assert.deepEqual(legacy.modelSettings, {});
   assert.deepEqual(legacy.pendingTitleJobs, {});
+  assert.deepEqual(legacy.markdownDelivery, { folderToken: "", folderUrl: "", grantedOpenIds: [] });
   assert.equal("activeThreads" in legacy, false);
   assert.equal("threadQueues" in legacy, false);
   assert.equal(legacy.sessions.chat, "thr_1");
@@ -211,9 +220,15 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   const current = normalizePersistedState({
     modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
     pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
+    markdownDelivery: {
+      folderToken: "fld_codex",
+      folderUrl: "https://example.feishu.cn/drive/folder/fld_codex",
+      grantedOpenIds: ["ou_a", "bad", "ou_a", "ou_b"],
+    },
   });
   assert.equal(current.modelSettings.chat.modelId, "sol");
   assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
+  assert.deepEqual(current.markdownDelivery.grantedOpenIds, ["ou_a", "ou_b"]);
 });
 
 test("consumer startup waits for both event consumers", async () => {
@@ -976,6 +991,107 @@ test("extractFileDirectives recognizes links to real local files", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Markdown delivery recognizes only FILE directives with an md extension", () => {
+  assert.equal(isMarkdownAttachment({ kind: "FILE", path: "C:\\work\\report.MD" }), true);
+  assert.equal(isMarkdownAttachment({ kind: "MEDIA", path: "C:\\work\\report.md" }), false);
+  assert.equal(isMarkdownAttachment({ kind: "FILE", path: "C:\\work\\report.pdf" }), false);
+});
+
+test("Markdown folder parsers select one exact codex folder and parse creation output", () => {
+  const listed = JSON.stringify({
+    ok: true,
+    data: {
+      files: [
+        { name: "Codex", type: "folder", token: "fld_wrong" },
+        { name: "codex", type: "docx", token: "doc_wrong" },
+        { name: "codex", type: "folder", token: "fld_codex", url: "https://example/folder/fld_codex" },
+      ],
+    },
+  });
+  assert.deepEqual(markdownFolderFromListOutput(listed), {
+    folderToken: "fld_codex",
+    folderUrl: "https://example/folder/fld_codex",
+  });
+  assert.equal(markdownFolderFromListOutput(JSON.stringify({ ok: true, data: { files: [] } })), null);
+  assert.throws(() => markdownFolderFromListOutput(JSON.stringify({
+    ok: true,
+    data: { files: [
+      { name: "codex", type: "folder", token: "fld_1" },
+      { name: "codex", type: "folder", token: "fld_2" },
+    ] },
+  })), /多个名为 codex/);
+  assert.deepEqual(markdownFolderFromCreateOutput(JSON.stringify({
+    ok: true,
+    data: { folder_token: "fld_new", url: "https://example/folder/fld_new" },
+  })), { folderToken: "fld_new", folderUrl: "https://example/folder/fld_new" });
+});
+
+test("Markdown folder grants edit access to a batch of allowed users", () => {
+  assert.deepEqual(markdownFolderGrantArgs("fld_codex", ["ou_a", "ou_b"]), [
+    "drive", "+member-add", "--as", "bot", "--token", "fld_codex", "--type", "folder",
+    "--member-id", "ou_a,ou_b", "--member-type", "openid", "--perm", "edit", "--yes",
+  ]);
+});
+
+test("Markdown delivery initialization creates, shares, and persists the public folder", async () => {
+  const state = normalizePersistedState();
+  const allowedIds = Array.from({ length: 11 }, (_value, index) => `ou_${index}`);
+  const config = { allowedIds: new Set(allowedIds) };
+  const calls = [];
+  const persisted = [];
+  const execute = async (command, args) => {
+    calls.push({ command, args });
+    if (args[0] === "drive" && args[1] === "files") {
+      return { stdout: JSON.stringify({ ok: true, data: { files: [] } }) };
+    }
+    if (args[0] === "drive" && args[1] === "+create-folder") {
+      return { stdout: JSON.stringify({
+        ok: true,
+        data: { folder_token: "fld_codex", url: "https://example/folder/fld_codex" },
+      }) };
+    }
+    return { stdout: JSON.stringify({ ok: true, data: { partial: false } }) };
+  };
+  const result = await initializeMarkdownDelivery(
+    state,
+    config,
+    execute,
+    (value) => persisted.push(structuredClone(value.markdownDelivery)),
+  );
+  assert.deepEqual(result, {
+    folderToken: "fld_codex",
+    folderUrl: "https://example/folder/fld_codex",
+  });
+  assert.equal(calls.length, 4);
+  assert.equal(calls[2].args[calls[2].args.indexOf("--member-id") + 1], allowedIds.slice(0, 10).join(","));
+  assert.equal(calls[3].args[calls[3].args.indexOf("--member-id") + 1], allowedIds[10]);
+  assert.deepEqual(state.markdownDelivery.grantedOpenIds, allowedIds);
+  assert.equal(persisted.length, 3);
+});
+
+test("Markdown document creation uses stdin and removes a duplicate filename title", () => {
+  const path = join("C:\\work", "report.md");
+  const spec = markdownDocumentCreateSpec(path, "fld_codex", "# report\r\n\r\n正文\r\n");
+  assert.equal(spec.title, "report");
+  assert.equal(spec.cwd, dirname(path));
+  assert.equal(spec.input, "正文\n");
+  assert.deepEqual(spec.args, [
+    "docs", "+create", "--as", "bot", "--doc-format", "markdown",
+    "--parent-token", "fld_codex", "--title", "report", "--content", "-", "--format", "json",
+  ]);
+  assert.deepEqual(markdownDocumentFromCreateOutput(JSON.stringify({
+    ok: true,
+    data: { document: { document_id: "docx_1", url: "https://example/docx/docx_1" } },
+  })), { documentId: "docx_1", documentUrl: "https://example/docx/docx_1" });
+});
+
+test("Markdown delivery reply links both the document and shared folder", () => {
+  assert.equal(markdownDeliveryReply("report[1]", "https://example/doc", "https://example/folder"), [
+    "Markdown 已上传为云文档：[report\\[1\\]](https://example/doc)",
+    "[打开 codex 文件夹](https://example/folder)",
+  ].join("\n\n"));
 });
 
 test("formatThreadItem renders readable progress but suppresses tool calls", () => {

@@ -19,7 +19,7 @@
 
 ## 配置
 
-当前机器需安装 `codex` 与 `lark-cli >= 1.0.58`，并完成独立测试机器人的配置。`1.0.58` 是 `card.action.trigger` 的最低支持版本：
+当前机器需安装 `codex` 与 `lark-cli >= 1.0.74`，并完成独立测试机器人的配置。`1.0.74` 已包含本项目使用的 Markdown 原生云文档创建能力；`card.action.trigger` 的最低支持版本仍是 `1.0.58`：
 
 ```powershell
 lark-cli config init --new
@@ -29,7 +29,7 @@ lark-cli auth status
 
 Windows 主机还必须安装非 AppX 形式的 PowerShell 7，例如用户便携版 `%LOCALAPPDATA%\\Programs\\PowerShell\\7\\pwsh.exe` 或 MSI 版 `%ProgramFiles%\\PowerShell\\7\\pwsh.exe`。服务启动时会自动查找并试运行该程序，把其目录放到后台子进程 `Path` 的最前面。AOI 明确排除用户目录中的 App Execution Alias 和 `%ProgramFiles%\\WindowsApps` 下的 Store/AppX 程序；它们可能在普通用户会话中运行，但无法由 Codex 的 `unelevated` Windows 沙箱受限令牌启动。如果没有合适的 PowerShell，AOI 会在启动阶段明确报错，不会通过管理员常驻、沙箱外自动重试或关闭 Codex 沙箱绕过问题。
 
-在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件和添加/删除消息表情所需权限。要使用审批卡片，还必须在“应用 -> 事件与回调 -> 回调配置”中启用回调并订阅 `card.action.trigger`，同时授予 `im:message:readonly`；长连接模式不需要配置回调 URL。
+在飞书开放平台启用机器人、订阅 `im.message.receive_v1`，并授予收取单聊消息、回复消息、上传文件、创建及管理云空间文件夹、创建云文档、管理云文档协作者和添加/删除消息表情所需权限。要使用审批卡片，还必须在“应用 -> 事件与回调 -> 回调配置”中启用回调并订阅 `card.action.trigger`，同时授予 `im:message:readonly`；长连接模式不需要配置回调 URL。
 
 复制模板并填写配置：
 
@@ -41,7 +41,7 @@ notepad .env
 关键配置：
 
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/cd` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
-- `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；
+- `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
@@ -123,7 +123,9 @@ FILE:C:\absolute\path\report.pdf
 MEDIA:C:\absolute\path\plot.png
 ```
 
-桥接会验证文件非空，从文件父目录调用 `lark-cli`，并把文件或图片原生回复到当前飞书消息。用户也可直接发送上述指令。为兼容 Codex 的常规最终答复，指向真实本地文件的 Markdown 链接也会被识别为附件。指令行和本地文件链接不会显示在最终文字中，Codex 不直接接触飞书凭证。
+桥接会验证文件非空，从文件父目录调用 `lark-cli`。图片和非 Markdown 文件作为原生附件回复；扩展名为 `.md`（大小写不敏感）的文件使用 `docs +create --doc-format markdown` 转为飞书原生云文档，存入机器人根目录的公共 `codex` 文件夹，并回复单篇文档链接和文件夹入口。成功转换后不再重复发送原始 `.md`；目录初始化、权限授予或文档创建失败时，会说明原因并回退发送原始文件。
+
+服务首次启动时会查找或创建 `codex` 文件夹，并把 `FEISHU_ALLOWED_OPEN_IDS` 中的用户批量设为可编辑协作者；后续云文档继承文件夹权限。用户可在飞书手机端通过机器人回复链接直接打开文档，也可从共享文件夹或搜索进入 `codex` 集中浏览。用户也可直接发送上述交付指令。为兼容 Codex 的常规最终答复，指向真实本地文件的 Markdown 链接也会被识别为附件。指令行和本地文件链接不会显示在最终文字中，Codex 不直接接触飞书凭证。
 
 ## 状态
 
@@ -137,6 +139,7 @@ MEDIA:C:\absolute\path\plot.png
 - `approvalModes`：聊天到审批模式；
 - `modelSettings`：聊天到后续轮次的模型和思考强度策略；
 - `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、重试次数和最近错误；
+- `markdownDelivery`：机器人 `codex` 文件夹的 token、链接和已授予编辑权限的允许用户；
 - `events`：事件去重窗口。
 
 `chatRouteQueues`、`threadQueues`、活跃 turn、恢复候选和审批请求只存在于内存，不写入状态文件。服务重启后会恢复聊天绑定、目录、模型、审批模式和未完成标题任务，但不会把旧运行态误判为仍在执行。

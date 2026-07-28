@@ -20,6 +20,7 @@ const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
 const LATEX_DIR = resolve(STATE_DIR, "latex");
+const MARKDOWN_FOLDER_NAME = "codex";
 const LATEX_CANVAS_WIDTH = 1200;
 const LATEX_CANVAS_PADDING_X = 60;
 const LATEX_CANVAS_PADDING_Y = 28;
@@ -33,7 +34,7 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
+  "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。桥接会把 .md 文件转换为机器人 codex 文件夹中的飞书云文档，其他文件保持原生附件。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
   "桥接负责 /cd、/new、/resume、/model、/screen、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
@@ -969,6 +970,8 @@ export function runCommand(command, args, { input, cwd = ROOT, timeoutMs = 60_00
 }
 
 export function normalizePersistedState(value = {}) {
+  const markdownDelivery = value.markdownDelivery && typeof value.markdownDelivery === "object"
+    ? value.markdownDelivery : {};
   return {
     sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
     workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
@@ -977,6 +980,12 @@ export function normalizePersistedState(value = {}) {
     pendingTitleJobs: value.pendingTitleJobs && typeof value.pendingTitleJobs === "object" ? value.pendingTitleJobs : {},
     pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
     events: Array.isArray(value.events) ? value.events : [],
+    markdownDelivery: {
+      folderToken: String(markdownDelivery.folderToken || ""),
+      folderUrl: String(markdownDelivery.folderUrl || ""),
+      grantedOpenIds: Array.isArray(markdownDelivery.grantedOpenIds)
+        ? [...new Set(markdownDelivery.grantedOpenIds.map(String).filter((id) => id.startsWith("ou_")))] : [],
+    },
   };
 }
 
@@ -1047,6 +1056,120 @@ async function preflight(config) {
   const { stdout } = await runCommand("lark-cli", ["auth", "status"]);
   const status = JSON.parse(stdout);
   if (!status.identities?.bot?.available) throw new Error("lark-cli bot 身份尚未就绪。");
+}
+
+function larkCliData(text, action) {
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    throw new Error(`${action}返回了无效 JSON。`);
+  }
+  if (!result?.ok) throw new Error(`${action}失败：${result?.error?.message || "未知错误"}`);
+  return result.data || {};
+}
+
+export function markdownFolderFromListOutput(text) {
+  const files = larkCliData(text, "查询 Markdown 目录").files;
+  if (!Array.isArray(files)) throw new Error("查询 Markdown 目录的结果缺少 files。");
+  const matches = files.filter((file) => file?.type === "folder" && file?.name === MARKDOWN_FOLDER_NAME);
+  if (matches.length > 1) throw new Error(`机器人根目录存在多个名为 ${MARKDOWN_FOLDER_NAME} 的文件夹。`);
+  if (!matches.length) return null;
+  return { folderToken: String(matches[0].token || ""), folderUrl: String(matches[0].url || "") };
+}
+
+export function markdownFolderFromCreateOutput(text) {
+  const data = larkCliData(text, "创建 Markdown 目录");
+  const folderToken = String(data.folder_token || data.token || "");
+  if (!folderToken) throw new Error("创建 Markdown 目录的结果缺少 folder token。");
+  return { folderToken, folderUrl: String(data.url || "") };
+}
+
+export function markdownFolderGrantArgs(folderToken, openIds) {
+  return [
+    "drive", "+member-add", "--as", "bot", "--token", folderToken, "--type", "folder",
+    "--member-id", openIds.join(","), "--member-type", "openid", "--perm", "edit", "--yes",
+  ];
+}
+
+function isExistingCollaboratorError(error) {
+  return /1061045|already[^\n]*(?:member|collaborator)|(?:member|collaborator)[^\n]*already|协作者[^\n]*已存在/i
+    .test(String(error?.message || error));
+}
+
+export async function initializeMarkdownDelivery(state, config, execute = runCommand, persist = saveState) {
+  let folderToken = state.markdownDelivery.folderToken;
+  let folderUrl = state.markdownDelivery.folderUrl;
+  if (!folderToken) {
+    const listed = await execute("lark-cli", ["drive", "files", "list", "--as", "bot", "--format", "json"]);
+    let folder = markdownFolderFromListOutput(listed.stdout);
+    if (!folder) {
+      const created = await execute("lark-cli", [
+        "drive", "+create-folder", "--as", "bot", "--name", MARKDOWN_FOLDER_NAME, "--format", "json",
+      ]);
+      folder = markdownFolderFromCreateOutput(created.stdout);
+    }
+    folderToken = folder.folderToken;
+    folderUrl = folder.folderUrl;
+    state.markdownDelivery = { folderToken, folderUrl, grantedOpenIds: [] };
+    persist(state);
+  }
+
+  const granted = new Set(state.markdownDelivery.grantedOpenIds);
+  const missing = [...config.allowedIds].filter((openId) => !granted.has(openId));
+  for (let index = 0; index < missing.length; index += 10) {
+    const batch = missing.slice(index, index + 10);
+    try {
+      await execute("lark-cli", markdownFolderGrantArgs(folderToken, batch), { timeoutMs: 120_000 });
+    } catch (error) {
+      if (!isExistingCollaboratorError(error)) throw error;
+    }
+    for (const openId of batch) granted.add(openId);
+    state.markdownDelivery.grantedOpenIds = [...granted];
+    persist(state);
+  }
+  config.markdownDelivery = { folderToken, folderUrl };
+  return config.markdownDelivery;
+}
+
+function stripDuplicateMarkdownTitle(content, title) {
+  const lines = String(content).replace(/^\uFEFF/, "").split(/\r?\n/);
+  const firstContent = lines.findIndex((line) => line.trim());
+  if (firstContent < 0 || lines[firstContent].trim() !== `# ${title}`) return String(content);
+  lines.splice(firstContent, 1);
+  if (lines[firstContent]?.trim() === "") lines.splice(firstContent, 1);
+  return lines.join("\n");
+}
+
+export function markdownDocumentCreateSpec(path, folderToken, content) {
+  const extension = extname(path);
+  const title = basename(path, extension);
+  return {
+    title,
+    cwd: dirname(path),
+    input: stripDuplicateMarkdownTitle(content, title),
+    args: [
+      "docs", "+create", "--as", "bot", "--doc-format", "markdown",
+      "--parent-token", folderToken, "--title", title, "--content", "-", "--format", "json",
+    ],
+  };
+}
+
+export function markdownDocumentFromCreateOutput(text) {
+  const document = larkCliData(text, "创建 Markdown 云文档").document;
+  const documentUrl = String(document?.url || "");
+  if (!documentUrl) throw new Error("创建 Markdown 云文档的结果缺少文档链接。");
+  return { documentId: String(document.document_id || ""), documentUrl };
+}
+
+function markdownLinkLabel(value) {
+  return String(value).replace(/([\\\[\]])/g, "\\$1");
+}
+
+export function markdownDeliveryReply(title, documentUrl, folderUrl = "") {
+  const lines = [`Markdown 已上传为云文档：[${markdownLinkLabel(title)}](${documentUrl})`];
+  if (folderUrl) lines.push(`[打开 ${MARKDOWN_FOLDER_NAME} 文件夹](${folderUrl})`);
+  return lines.join("\n\n");
 }
 
 export function idempotencyKey(...values) {
@@ -1448,15 +1571,50 @@ async function finishProcessingReaction(messageId, reactionId, succeeded, config
   }
 }
 
-async function sendAttachment(event, directive, config, index) {
+function attachmentPath(directive) {
   const path = resolve(directive.path);
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`文件不存在：${path}`);
   if (statSync(path).size < 1) throw new Error(`文件为空：${path}`);
+  return path;
+}
+
+export function isMarkdownAttachment(directive) {
+  return directive?.kind === "FILE" && extname(String(directive.path || "")).toLowerCase() === ".md";
+}
+
+async function sendNativeAttachment(event, directive, index) {
+  const path = attachmentPath(directive);
   const mediaFlag = directive.kind === "MEDIA" ? "--image" : "--file";
   await runCommand("lark-cli", [
     "im", "+messages-reply", "--as", "bot", "--message-id", event.messageId,
     mediaFlag, `.\\${basename(path)}`, "--idempotency-key", idempotencyKey(event.eventId, "file", index, path),
   ], { cwd: dirname(path), timeoutMs: 120_000 });
+}
+
+let markdownCreationQueue = Promise.resolve();
+
+function queueMarkdownCreation(task) {
+  const queued = markdownCreationQueue.then(task, task);
+  markdownCreationQueue = queued.catch(() => {});
+  return queued;
+}
+
+async function sendAttachment(event, directive, config, index) {
+  if (!isMarkdownAttachment(directive)) {
+    await sendNativeAttachment(event, directive, index);
+    return null;
+  }
+  const path = attachmentPath(directive);
+  const folder = config.markdownDelivery;
+  if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
+  return queueMarkdownCreation(async () => {
+    const content = readFileSync(path, "utf8");
+    const spec = markdownDocumentCreateSpec(path, folder.folderToken, content);
+    const { stdout } = await runCommand("lark-cli", spec.args, {
+      cwd: spec.cwd, input: spec.input, timeoutMs: 120_000,
+    });
+    return { ...markdownDocumentFromCreateOutput(stdout), title: spec.title, folderUrl: folder.folderUrl };
+  });
 }
 
 export function buildScreenshotPowerShellCommand(outputPath) {
@@ -2198,8 +2356,25 @@ class BridgeRuntime {
     for (let index = 0; index < files.length; index += 1) {
       if (threadId && !shouldDeliverThreadOutput(this.state, event.chatId, threadId)) break;
       try {
-        await sendAttachment(event, files[index], this.config, index);
+        const cloudDocument = await sendAttachment(event, files[index], this.config, index);
+        if (cloudDocument) {
+          await sendReply(event.messageId, `${event.eventId}-markdown-${index}`,
+            markdownDeliveryReply(cloudDocument.title, cloudDocument.documentUrl, cloudDocument.folderUrl),
+            this.config);
+        }
       } catch (error) {
+        if (isMarkdownAttachment(files[index])) {
+          console.warn(`[bridge] Markdown cloud delivery failed; sending native file: ${error.message}`);
+          try {
+            await sendNativeAttachment(event, files[index], index);
+            await sendReply(event.messageId, `${event.eventId}-markdown-fallback-${index}`,
+              `Markdown 转为云文档失败，已改为发送原始文件。\n\n原因：${String(error.message || error).slice(0, 1200)}`,
+              this.config);
+            continue;
+          } catch (fallbackError) {
+            error = new Error(`${error.message}；原始文件发送也失败：${fallbackError.message}`);
+          }
+        }
         await sendReply(event.messageId, `${event.eventId}-file-error-${index}`,
           `文件发送失败：${String(error.message || error).slice(0, 1500)}`, this.config);
       }
@@ -2700,6 +2875,13 @@ export async function main() {
   const config = buildConfig(env);
   await preflight(config);
   const state = loadState();
+  try {
+    const folder = await initializeMarkdownDelivery(state, config);
+    console.log(`[bridge] markdown_folder=${folder.folderToken} shared_users=${config.allowedIds.size}`);
+  } catch (error) {
+    config.markdownDelivery = null;
+    console.warn(`[bridge] Markdown cloud delivery unavailable; native fallback enabled: ${error.message}`);
+  }
   const runtime = new BridgeRuntime(state, config);
   await runtime.start();
   console.log(`[bridge] root=${config.rootDir}`);
