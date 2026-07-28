@@ -127,6 +127,8 @@ MEDIA:C:\absolute\path\plot.png
 
 ## 状态
 
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。
+
 状态保存在 `.state/sessions.json`：
 
 - `sessions`：聊天到 Codex thread；
