@@ -730,6 +730,12 @@ export async function loadResumeThreadStatuses(client, threads, onError = () => 
   }));
 }
 
+export function mergeRuntimeThreadStatuses(threads, activeThreadIds = new Set()) {
+  return threads.map((thread) => activeThreadIds.has(thread.id)
+    ? { ...thread, status: { type: "active" }, resumeTurnStatus: "inProgress" }
+    : thread);
+}
+
 function historicalInputText(input) {
   if (!input || typeof input !== "object") return "[非文本输入]";
   if (input.type === "text") return String(input.text || "").trim();
@@ -2128,7 +2134,12 @@ class BridgeRuntime {
 
   async #loadResumePage(candidates, pageStart, pageSize) {
     const page = candidates.threads.slice(pageStart, pageStart + pageSize);
-    const loaded = await loadResumeThreadStatuses(this.client, page, (error, thread) => {
+    const runtimeThreadIds = new Set([
+      ...this.activeThreads.keys(),
+      ...this.attachedThreads.keys(),
+    ]);
+    const loaded = await loadResumeThreadStatuses(this.client,
+      mergeRuntimeThreadStatuses(page, runtimeThreadIds), (error, thread) => {
       console.warn(`[codex] cannot read resume status for ${thread.id}: ${error.message}`);
     });
     candidates.threads.splice(pageStart, loaded.length, ...loaded);
