@@ -710,6 +710,9 @@ test("help card exposes common conversation controls and the opposite approval m
   assert.match(manualButtons[2].text.content, /替我审批/);
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
+  assert.match(card.elements[0].content, /\/plan/);
+  assert.match(card.elements[0].content, /\/default/);
+  assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
   assert.match(card.elements[0].content, /\/screen/);
 });
 

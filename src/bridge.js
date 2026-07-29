@@ -1383,6 +1383,9 @@ export function buildHelpCard(approvalMode = "auto") {
         "`/cd 项目名或路径` 切换目录 · `/new` 新建对话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
+        "`/plan` 进入计划模式 · `/default` 切回默认执行模式",
+        "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
+        "`/goal pause|resume|clear` 暂停、恢复或清除 Goal",
         "`/screen` 截取桥接主机屏幕",
         "`/approval auto|manual` 切换审批 · `/status` 查看状态",
       ].join("\n") },
@@ -2059,7 +2062,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
       }
       return;
     }
