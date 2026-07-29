@@ -35,6 +35,7 @@ import {
   latexCanvasLayout,
   latexImageUploadSpec,
   loadResumeThreadStatuses,
+  mergeRuntimeThreadStatuses,
   mergeProjectEnv,
   markdownDeliveryReply,
   markdownDocumentCreateSpec,
@@ -806,6 +807,14 @@ test("resume status preserves live thread state over an older interrupted turn a
   assert.equal(resumeThreadStatusLabel(thread), "Goal 进行中");
   assert.match(formatRunningThreadReplay(thread), /当前 Goal 正在运行/);
   assert.match(formatRunningThreadReplay(thread), /持续检查服务状态/);
+});
+
+test("resume status uses the bridge runtime before persisted turn history", () => {
+  const [thread] = mergeRuntimeThreadStatuses([
+    { id: "running", status: { type: "notLoaded" }, resumeTurnStatus: "interrupted" },
+  ], new Set(["running"]));
+  assert.equal(thread.status.type, "active");
+  assert.equal(resumeThreadStatusLabel(thread), "进行中");
 });
 
 test("resume status loader degrades one failed history read without blocking the card", async () => {
