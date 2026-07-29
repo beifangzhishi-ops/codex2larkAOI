@@ -418,6 +418,8 @@ export function parseControlCommand(text) {
   const value = text.trim();
   const lower = value.toLowerCase();
   if (lower === "/stop") return { type: "stop" };
+  if (lower === "/plan") return { type: "plan" };
+  if (lower === "/default") return { type: "defaultMode" };
   if (/^\/approval\s+auto$/i.test(value)) return { type: "approvalMode", mode: "auto" };
   if (/^\/approval\s+manual$/i.test(value)) return { type: "approvalMode", mode: "manual" };
   if (/^\/approve(?:\s+session)?$/i.test(value)) {
@@ -457,7 +459,7 @@ function threadTimestamp(thread) {
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
 const CONTROL_CARD_ACTIONS = new Set([
   "new", "resume", "resumePage", "approvalMode", "status", "stop", "help", "screen",
-  "model", "modelPage", "modelPick", "modelEffort", "modelDefault",
+  "model", "modelPage", "modelPick", "modelEffort", "modelDefault", "planReject", "planAccept",
 ]);
 
 function parseCardActionValue(value) {
@@ -500,6 +502,8 @@ export function parseControlCardAction(value) {
       (typeof actionValue.modelId !== "string" || !actionValue.modelId)) return null;
   if (actionValue.action === "modelEffort" &&
       (typeof actionValue.effort !== "string" || !actionValue.effort)) return null;
+  if (["planReject", "planAccept"].includes(actionValue.action) &&
+      (typeof actionValue.planItemId !== "string" || !actionValue.planItemId)) return null;
   return {
     type: "control",
     eventId: String(value.event_id || ""),
@@ -513,6 +517,7 @@ export function parseControlCardAction(value) {
     ...(actionValue.pageStart !== undefined ? { pageStart: actionValue.pageStart } : {}),
     ...(actionValue.modelId !== undefined ? { modelId: actionValue.modelId } : {}),
     ...(actionValue.effort !== undefined ? { effort: actionValue.effort } : {}),
+    ...(actionValue.planItemId !== undefined ? { planItemId: actionValue.planItemId } : {}),
   };
 }
 
@@ -1024,6 +1029,9 @@ export function normalizePersistedState(value = {}) {
     sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
     workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
     approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
+    threadModes: value.threadModes && typeof value.threadModes === "object" ? value.threadModes : {},
+    pendingChatModes: value.pendingChatModes && typeof value.pendingChatModes === "object" ? value.pendingChatModes : {},
+    planReviews: value.planReviews && typeof value.planReviews === "object" ? value.planReviews : {},
     modelSettings: value.modelSettings && typeof value.modelSettings === "object" ? value.modelSettings : {},
     pendingTitleJobs: value.pendingTitleJobs && typeof value.pendingTitleJobs === "object" ? value.pendingTitleJobs : {},
     pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
@@ -1619,6 +1627,24 @@ async function finishProcessingReaction(messageId, reactionId, succeeded, config
   }
 }
 
+export function buildPlanReviewCard(plan, planItemId, status = "pending") {
+  const processed = status !== "pending";
+  const statusText = status === "accepted" ? "已接受，正在切换到默认执行模式。"
+    : status === "rejected" ? "已否决，保持计划模式，等待修改意见。"
+      : "请确认是否执行此计划。";
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: processed ? "grey" : "blue", title: { tag: "plain_text", content: "计划确认" } },
+    elements: [
+      { tag: "markdown", content: `${String(plan || "").trim()}\n\n${statusText}` },
+      ...(processed ? [] : [{ tag: "action", actions: [
+        controlButton("否决，继续修改", "default", "planReject", { planItemId }),
+        controlButton("接受并执行", "primary", "planAccept", { planItemId }),
+      ] }]),
+    ],
+  };
+}
+
 function attachmentPath(directive) {
   const path = resolve(directive.path);
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`文件不存在：${path}`);
@@ -1838,6 +1864,34 @@ class BridgeRuntime {
     return this.state.approvalModes[chatId] || this.config.defaultApprovalMode;
   }
 
+  collaborationModeFor(chatId, threadId = this.state.sessions[chatId]) {
+    return this.state.threadModes[threadId] || this.state.pendingChatModes[chatId] || "default";
+  }
+
+  async #setCollaborationMode(chatId, mode, threadId = this.state.sessions[chatId]) {
+    if (!threadId) {
+      this.state.pendingChatModes[chatId] = mode;
+      saveState(this.state);
+      return { pending: true };
+    }
+    const { selection } = await this.#selectionFor(chatId);
+    await this.client.request("thread/settings/update", {
+      threadId,
+      collaborationMode: {
+        mode,
+        settings: {
+          model: selection.entry.model,
+          reasoning_effort: selection.effort,
+          developer_instructions: null,
+        },
+      },
+    });
+    this.state.threadModes[threadId] = mode;
+    delete this.state.pendingChatModes[chatId];
+    saveState(this.state);
+    return { pending: false };
+  }
+
   cwdFor(chatId) {
     const stored = this.state.workdirs[chatId];
     if (!stored) return this.config.rootDir;
@@ -1934,6 +1988,23 @@ class BridgeRuntime {
   async #processRoute(event, command) {
     if (["stop", "approvalMode", "approve", "deny"].includes(command?.type)) {
       await this.#handleImmediate(event, command);
+      return;
+    }
+    if (command?.type === "plan" || command?.type === "defaultMode") {
+      const mode = command.type === "plan" ? "plan" : "default";
+      try {
+        const result = await this.#setCollaborationMode(event.chatId, mode);
+        await sendReply(event.messageId, `${event.eventId}-${mode}-mode`,
+          result.pending ? `已设为${mode === "plan" ? "计划" : "默认"}模式；新建会话后自动应用。`
+            : `已切换为${mode === "plan" ? "计划" : "默认"}模式，后续轮次将保持该模式。`, this.config);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-${mode}-mode-error`,
+          `切换协作模式失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
+    if (command?.type === "planReview") {
+      await this.#handlePlanReview(event, command);
       return;
     }
     if (command?.type === "approvalCard") {
@@ -2255,10 +2326,42 @@ class BridgeRuntime {
     await sendInteractiveCard(event.messageId, `${event.eventId}-model-result`, buildModelResultCard(resolved));
   }
 
+  async #handlePlanReview(event, command) {
+    const review = this.state.planReviews[command.planItemId];
+    if (!review || review.chatId !== event.chatId || review.threadId !== this.state.sessions[event.chatId]) {
+      await sendReply(event.messageId, `${event.eventId}-plan-review-expired`, "该计划卡片已过期或不属于当前会话。", this.config);
+      return;
+    }
+    if (review.status !== "pending") {
+      await sendReply(event.messageId, `${event.eventId}-plan-review-processed`, "该计划卡片已处理，请勿重复点击。", this.config);
+      return;
+    }
+    review.status = command.action === "planAccept" ? "accepted" : "rejected";
+    review.updatedAt = Date.now();
+    saveState(this.state);
+    try {
+      await updateInteractiveCard(event, buildPlanReviewCard(review.plan, command.planItemId, review.status));
+    } catch (error) {
+      console.warn(`[bridge] cannot update plan review card: ${error.message}`);
+    }
+    if (review.status === "rejected") {
+      await this.#setCollaborationMode(event.chatId, "plan", review.threadId);
+      await sendReply(event.messageId, `${event.eventId}-plan-rejected`, "已保持计划模式，请直接发送修改意见。", this.config);
+      return;
+    }
+    await this.#setCollaborationMode(event.chatId, "default", review.threadId);
+    await sendReply(event.messageId, `${event.eventId}-plan-accepted`, "已接受计划，正在进入默认执行模式。", this.config);
+    await this.#processRoute({ ...event, content: "执行刚刚确认的计划" }, null);
+  }
+
   handleCardAction(event) {
     if (event.type === "control") {
       if (["model", "modelPage", "modelPick", "modelEffort", "modelDefault"].includes(event.action)) {
         this.route(event, { ...event, type: "modelCard" });
+        return;
+      }
+      if (["planReject", "planAccept"].includes(event.action)) {
+        this.route(event, { type: "planReview", action: event.action, planItemId: event.planItemId });
         return;
       }
       const command = event.action === "approvalMode"
@@ -2463,6 +2566,8 @@ class BridgeRuntime {
         state: "awaitingFirstTurn",
       };
       this.loadedThreads.add(threadId);
+      const collaborationMode = this.state.pendingChatModes[chatId] || "default";
+      await this.#setCollaborationMode(chatId, collaborationMode, threadId);
       saveState(this.state);
       isNew = true;
     }
@@ -2487,6 +2592,8 @@ class BridgeRuntime {
       state: "awaitingFirstTurn",
     };
     this.loadedThreads.add(threadId);
+    const collaborationMode = this.state.pendingChatModes[chatId] || "default";
+    await this.#setCollaborationMode(chatId, collaborationMode, threadId);
     return threadId;
   }
 
@@ -2696,6 +2803,27 @@ class BridgeRuntime {
     });
   }
 
+  #queuePlanReview(active, item) {
+    const planItemId = String(item?.id || "");
+    const plan = String(item?.text || "").trim();
+    if (!planItemId || !plan || this.state.planReviews[planItemId]) return;
+    this.state.planReviews[planItemId] = {
+      chatId: active.chatId,
+      threadId: active.threadId,
+      plan,
+      status: "pending",
+      createdAt: Date.now(),
+    };
+    saveState(this.state);
+    active.sendQueue = active.sendQueue.then(async () => {
+      if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
+      const cardPlan = plan.length > this.config.replyChars ? "计划正文已另行发送。" : plan;
+      if (cardPlan !== plan) await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
+      await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
+        buildPlanReviewCard(cardPlan, planItemId));
+    }).catch((error) => console.error(`[bridge] plan review card failed: ${error.message}`));
+  }
+
   #queueApprovalCard(active, key, subject, approvalId) {
     if (active.progressKeys.has(key)) return;
     active.progressKeys.add(key);
@@ -2737,7 +2865,10 @@ class BridgeRuntime {
     }
     if (message.method === "item/completed") {
       const item = params.item;
-      if (item?.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim()) {
+      if (item?.type === "plan" && item.text?.trim() &&
+          this.collaborationModeFor(active.chatId, active.threadId) === "plan") {
+        this.#queuePlanReview(active, item);
+      } else if (item?.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim()) {
         if (active.external) {
           this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, item.text.trim());
         } else {

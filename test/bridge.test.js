@@ -14,6 +14,7 @@ import {
   buildHelpCard,
   buildModelCard,
   buildModelResultCard,
+  buildPlanReviewCard,
   buildResumeCard,
   buildResolvedApprovalCard,
   buildScreenshotPowerShellCommand,
@@ -232,6 +233,9 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   });
   assert.deepEqual(legacy.modelSettings, {});
   assert.deepEqual(legacy.pendingTitleJobs, {});
+  assert.deepEqual(legacy.threadModes, {});
+  assert.deepEqual(legacy.pendingChatModes, {});
+  assert.deepEqual(legacy.planReviews, {});
   assert.deepEqual(legacy.markdownDelivery, { folderToken: "", folderUrl: "", grantedOpenIds: [] });
   assert.equal("activeThreads" in legacy, false);
   assert.equal("threadQueues" in legacy, false);
@@ -240,6 +244,9 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   const current = normalizePersistedState({
     modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
     pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
+    threadModes: { thr_2: "plan" },
+    pendingChatModes: { chat: "default" },
+    planReviews: { plan_1: { status: "pending" } },
     markdownDelivery: {
       folderToken: "fld_codex",
       folderUrl: "https://example.feishu.cn/drive/folder/fld_codex",
@@ -248,6 +255,8 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   });
   assert.equal(current.modelSettings.chat.modelId, "sol");
   assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
+  assert.equal(current.threadModes.thr_2, "plan");
+  assert.equal(current.planReviews.plan_1.status, "pending");
   assert.deepEqual(current.markdownDelivery.grantedOpenIds, ["ou_a", "ou_b"]);
 });
 
@@ -580,6 +589,9 @@ test("service control reports a timeout without broadening the stop target", asy
 });
 
 test("parseControlCommand only recognizes complete slash commands", () => {
+  assert.deepEqual(parseControlCommand("/plan"), { type: "plan" });
+  assert.deepEqual(parseControlCommand("/default"), { type: "defaultMode" });
+  assert.equal(parseControlCommand("/plan 修改目录下 plan.md"), null);
   assert.deepEqual(parseControlCommand("/approval manual"), { type: "approvalMode", mode: "manual" });
   assert.deepEqual(parseControlCommand("/approval auto"), { type: "approvalMode", mode: "auto" });
   assert.deepEqual(parseControlCommand("/approve session"), { type: "approve", session: true });
@@ -605,6 +617,14 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.equal(parseControlCommand("同意执行"), null);
   assert.equal(parseControlCommand("切换到 Demo 项目"), null);
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
+});
+
+test("plan review cards carry one typed action pair and hide actions once processed", () => {
+  const pending = buildPlanReviewCard("1. 实现功能", "plan_1");
+  const buttons = pending.elements.find((item) => item.tag === "action").actions;
+  assert.deepEqual(buttons.map((button) => button.value.action), ["planReject", "planAccept"]);
+  assert.ok(buttons.every((button) => button.value.planItemId === "plan_1"));
+  assert.equal(buildPlanReviewCard("计划", "plan_1", "accepted").elements.some((item) => item.tag === "action"), false);
 });
 
 test("approval settings keep on-request policy and delegate only new turns", () => {
@@ -920,6 +940,13 @@ test("control card callbacks accept only the supported typed actions", () => {
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: -5 }),
   }), null);
+  assert.deepEqual(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "planAccept", planItemId: "plan_1" }),
+  }), {
+    type: "control", eventId: "evt_control", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", action: "planAccept", planItemId: "plan_1",
+  });
   assert.deepEqual(parseControlCardAction({
     ...raw,
     action_value: JSON.stringify({
