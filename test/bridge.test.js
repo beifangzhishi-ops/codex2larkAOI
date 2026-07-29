@@ -809,8 +809,16 @@ test("resume status preserves live thread state over an older interrupted turn a
   }, [{ id: "live", status: { type: "notLoaded" } }]);
   assert.equal(thread.status.type, "active");
   assert.equal(resumeThreadStatusLabel(thread), "Goal 进行中");
-  assert.match(formatRunningThreadReplay(thread), /当前 Goal 正在运行/);
-  assert.match(formatRunningThreadReplay(thread), /持续检查服务状态/);
+  const runningThread = {
+    ...thread,
+    turns: [{ startedAt: 2, items: [
+      { type: "agentMessage", phase: "commentary", text: "正在检查最新日志" },
+      { type: "reasoning", summary: ["确认下一步"] },
+    ] }],
+  };
+  assert.match(formatRunningThreadReplay(runningThread), /当前 Goal 正在运行/);
+  assert.match(formatRunningThreadReplay(runningThread), /持续检查服务状态/);
+  assert.match(formatRunningThreadReplay(runningThread), /最近过程：\n🧠 确认下一步/);
 });
 
 test("resume status uses the bridge runtime before persisted turn history", () => {

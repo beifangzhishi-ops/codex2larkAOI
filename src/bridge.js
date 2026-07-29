@@ -803,13 +803,23 @@ export function formatLatestTurnReplay(turns) {
   return `最近一轮对话\n\n用户：${userText}\n\nCodex：${finalText}`;
 }
 
+export function latestThreadProgress(turns) {
+  const items = selectLatestTurn(turns)?.items;
+  if (!Array.isArray(items)) return "";
+  return [...items].reverse()
+    .map((item) => formatThreadItem(item, "completed"))
+    .find(Boolean) || "";
+}
+
 export function formatRunningThreadReplay(thread) {
   const goal = thread?.resumeGoal;
+  const latestProgress = latestThreadProgress(thread?.turns);
+  const progressText = latestProgress ? `\n\n最近过程：\n${latestProgress}` : "";
   if (goal?.status === "active") {
     const objective = String(goal.objective || "").trim();
-    return `当前 Goal 正在运行${objective ? `\n\n目标：${objective}` : ""}\n\n已接入正在运行的 Goal，后续过程将实时转发。`;
+    return `当前 Goal 正在运行${objective ? `\n\n目标：${objective}` : ""}\n\n已接入正在运行的 Goal，后续过程将实时转发。${progressText}`;
   }
-  return "当前会话正在运行\n\n已接入正在运行的会话，后续过程将实时转发。";
+  return `当前会话正在运行\n\n已接入正在运行的会话，后续过程将实时转发。${progressText}`;
 }
 
 export function hasCompleteTurnHistory(thread) {
