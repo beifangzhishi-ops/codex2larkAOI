@@ -22,6 +22,7 @@ import {
   buildTitleTurnParams,
   cleanHistoricalFinalText,
   createPendingTitleJob,
+  createRunningThreadAttachment,
   createConsumerReadiness,
   extractFileDirectives,
   formatResumeThreads,
@@ -818,6 +819,14 @@ test("resume status uses the bridge runtime before persisted turn history", () =
   ], new Set(["running"]));
   assert.equal(thread.status.type, "active");
   assert.equal(resumeThreadStatusLabel(thread), "进行中");
+});
+
+test("Goal attachment is ready before its asynchronous turn starts", () => {
+  const attachment = createRunningThreadAttachment({ chatId: "oc_goal", eventId: "evt_goal", messageId: "om_goal" }, "thr_goal");
+  assert.equal(attachment.threadId, "thr_goal");
+  assert.equal(attachment.turnId, "");
+  assert.equal(attachment.external, true);
+  assert.equal(attachment.progressKeys.size, 0);
 });
 
 test("resume status loader degrades one failed history read without blocking the card", async () => {

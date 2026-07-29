@@ -747,6 +747,18 @@ export function mergeRuntimeThreadStatuses(threads, activeThreadIds = new Set())
     : thread);
 }
 
+export function createRunningThreadAttachment(event, threadId, thread = {}) {
+  return {
+    chatId: event.chatId,
+    threadId,
+    turnId: selectLatestTurn(thread.turns)?.id || "",
+    event,
+    external: true,
+    progressKeys: new Set(),
+    sendQueue: Promise.resolve(),
+  };
+}
+
 function historicalInputText(input) {
   if (!input || typeof input !== "object") return "[非文本输入]";
   if (input.type === "text") return String(input.text || "").trim();
@@ -2348,6 +2360,8 @@ class BridgeRuntime {
       if (command.objective.length > 4000) throw new Error("Goal 目标不能超过 4,000 个字符。");
       if (goal?.status === "active") await this.#pauseGoalAndInterrupt(threadId);
       await this.#setCollaborationMode(event.chatId, "default", threadId);
+      // Goal starts its own turn asynchronously, so register the Feishu reply anchor first.
+      this.#attachRunningThread(event, threadId, { turns: [] });
       await this.client.request("thread/goal/set", { threadId, objective: command.objective, status: "active" });
       await sendReply(event.messageId, `${event.eventId}-goal-set`, `已启动 Goal：${command.objective}`, this.config);
       return;
@@ -2361,6 +2375,7 @@ class BridgeRuntime {
     if (command.action === "resume") {
       if (goal?.status !== "paused") throw new Error("仅已暂停的 Goal 可以恢复。");
       await this.#setCollaborationMode(event.chatId, "default", threadId);
+      this.#attachRunningThread(event, threadId, { turns: [] });
       await this.client.request("thread/goal/set", { threadId, status: "active" });
       await sendReply(event.messageId, `${event.eventId}-goal-resume`, "Goal 已恢复。", this.config);
       return;
@@ -2905,15 +2920,7 @@ class BridgeRuntime {
 
   #attachRunningThread(event, threadId, thread) {
     if (this.activeThreads.has(threadId)) return;
-    this.attachedThreads.set(threadId, {
-      chatId: event.chatId,
-      threadId,
-      turnId: selectLatestTurn(thread?.turns)?.id || "",
-      event,
-      external: true,
-      progressKeys: new Set(),
-      sendQueue: Promise.resolve(),
-    });
+    this.attachedThreads.set(threadId, createRunningThreadAttachment(event, threadId, thread));
   }
 
   #queuePlanReview(active, item) {
