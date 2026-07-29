@@ -650,6 +650,12 @@ export function formatResumeThreads(threads, currentThreadId = "", hasMore = fal
 
 export function resumeThreadStatusLabel(thread) {
   const type = thread?.status?.type;
+  const goalStatus = thread?.resumeGoal?.status;
+  if (goalStatus === "active") return "Goal 进行中";
+  if (goalStatus === "paused") return "Goal 已暂停";
+  if (goalStatus === "complete") return "Goal 已完成";
+  if (goalStatus === "blocked") return "Goal 已阻塞";
+  if (goalStatus === "usageLimited" || goalStatus === "budgetLimited") return "Goal 已达限额";
   if (type === "active") return "进行中";
   if (type === "idle") return "空闲";
   if (type === "systemError") return "异常";
@@ -698,14 +704,28 @@ export function selectLatestTurn(turns) {
 
 export async function loadResumeThreadStatuses(client, threads, onError = () => {}) {
   return Promise.all(threads.map(async (thread) => {
-    if (thread?.status?.type !== "notLoaded" || thread.resumeTurnStatus) return thread;
+    let loaded = thread;
+    if (thread?.status?.type === "notLoaded" && !thread.resumeTurnStatus) {
+      try {
+        const result = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+        const loadedThread = result?.thread;
+        const latestTurn = selectLatestTurn(loadedThread?.turns);
+        loaded = {
+          ...thread,
+          ...(loadedThread?.status ? { status: loadedThread.status } : {}),
+          resumeTurnStatus: latestTurn?.status || "empty",
+        };
+      } catch (error) {
+        onError(error, thread);
+        loaded = { ...thread, resumeTurnStatus: "unavailable" };
+      }
+    }
     try {
-      const result = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
-      const latestTurn = selectLatestTurn(result?.thread?.turns);
-      return { ...thread, resumeTurnStatus: latestTurn?.status || "empty" };
-    } catch (error) {
-      onError(error, thread);
-      return { ...thread, resumeTurnStatus: "unavailable" };
+      const goalResult = await client.request("thread/goal/get", { threadId: thread.id });
+      return goalResult?.goal ? { ...loaded, resumeGoal: goalResult.goal } : loaded;
+    } catch {
+      // Goal is optional for historic threads and older servers.
+      return loaded;
     }
   }));
 }
@@ -752,6 +772,15 @@ export function formatLatestTurnReplay(turns) {
   const userText = userParts.join("\n").trim() || "（该轮没有可回放的用户输入）";
   const finalText = finalParts.join("\n\n").trim() || "（该轮没有最终答复）";
   return `最近一轮对话\n\n用户：${userText}\n\nCodex：${finalText}`;
+}
+
+export function formatRunningThreadReplay(thread) {
+  const goal = thread?.resumeGoal;
+  if (goal?.status === "active") {
+    const objective = String(goal.objective || "").trim();
+    return `当前 Goal 正在运行${objective ? `\n\n目标：${objective}` : ""}\n\n已接入正在运行的 Goal，后续过程将实时转发。`;
+  }
+  return "当前会话正在运行\n\n已接入正在运行的会话，后续过程将实时转发。";
 }
 
 export function hasCompleteTurnHistory(thread) {
@@ -1780,6 +1809,7 @@ class BridgeRuntime {
     this.client = new CodexAppServer({ cwd: ROOT, command: config.codexCommand });
     this.loadedThreads = new Set();
     this.activeThreads = new Map();
+    this.attachedThreads = new Map();
     this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
     this.resumeCandidates = new Map();
@@ -2311,19 +2341,12 @@ class BridgeRuntime {
     }
     const threadId = selected.thread.id;
     let historyThread;
+    const ownActive = this.activeThreads.has(threadId);
     if (threadId === this.state.sessions[event.chatId]) {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
         `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
     } else {
       const selectedCwd = availableThreadCwd(selected.thread);
-      if (!this.loadedThreads.has(threadId)) {
-        const resumed = await this.client.request("thread/resume", {
-          threadId,
-          ...this.#threadOptions(event.chatId, selectedCwd || this.cwdFor(event.chatId)),
-        });
-        if (hasCompleteTurnHistory(resumed?.thread)) historyThread = resumed.thread;
-        this.loadedThreads.add(threadId);
-      }
       this.state.sessions[event.chatId] = threadId;
       this.#cancelDetachedApprovals(event.chatId, threadId);
       if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
@@ -2333,12 +2356,30 @@ class BridgeRuntime {
         `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
     }
     try {
+      if (!ownActive) {
+        // A minimal resume rejoins a running thread and subscribes this bridge to its live events.
+        const resumed = await this.client.request("thread/resume", { threadId });
+        if (resumed?.thread) historyThread = resumed.thread;
+        this.loadedThreads.add(threadId);
+      }
       if (!historyThread) {
         const read = await this.client.request("thread/read", { threadId, includeTurns: true });
         historyThread = read?.thread;
       }
+      try {
+        const goal = await this.client.request("thread/goal/get", { threadId });
+        if (goal?.goal) historyThread = { ...historyThread, resumeGoal: goal.goal };
+      } catch {
+        // A goal is optional and unavailable on older App Server versions.
+      }
+      const running = historyThread?.status?.type === "active" || historyThread?.resumeGoal?.status === "active";
+      if (running) {
+        this.#attachRunningThread(event, threadId, historyThread);
+      }
       await sendReply(event.messageId, `${event.eventId}-resume-replay`,
-        formatLatestTurnReplay(historyThread?.turns), this.config);
+        running
+          ? formatRunningThreadReplay(historyThread)
+          : formatLatestTurnReplay(historyThread?.turns), this.config);
     } catch (error) {
       await sendReply(event.messageId, `${event.eventId}-resume-replay-error`,
         `最近一轮读取失败：${String(error.message || error).slice(0, 1500)}`, this.config);
@@ -2642,6 +2683,19 @@ class BridgeRuntime {
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
   }
 
+  #attachRunningThread(event, threadId, thread) {
+    if (this.activeThreads.has(threadId)) return;
+    this.attachedThreads.set(threadId, {
+      chatId: event.chatId,
+      threadId,
+      turnId: selectLatestTurn(thread?.turns)?.id || "",
+      event,
+      external: true,
+      progressKeys: new Set(),
+      sendQueue: Promise.resolve(),
+    });
+  }
+
   #queueApprovalCard(active, key, subject, approvalId) {
     if (active.progressKeys.has(key)) return;
     active.progressKeys.add(key);
@@ -2674,24 +2728,34 @@ class BridgeRuntime {
       if (message.method === "error") titleRun.rejectDone(new Error(params.error?.message || "标题生成失败。"));
       return;
     }
-    const active = this.activeThreads.get(eventThreadId);
+    const active = this.activeThreads.get(eventThreadId) || this.attachedThreads.get(eventThreadId);
     if (!active) return;
     if (message.method === "turn/started" && params.turn?.id) active.turnId = params.turn.id;
     if (message.method === "item/started") {
       const text = formatThreadItem(params.item, "started");
-      this.#queueProgress(active, `item-start-${params.item?.id}`, text);
+      this.#queueProgress(active, `item-start-${active.turnId}-${params.item?.id}`, text);
     }
     if (message.method === "item/completed") {
       const item = params.item;
       if (item?.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim()) {
-        active.finalMessages.push(item.text.trim());
+        if (active.external) {
+          this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, item.text.trim());
+        } else {
+          active.finalMessages.push(item.text.trim());
+        }
       } else {
         const text = formatThreadItem(item, "completed");
-        this.#queueProgress(active, `item-complete-${item?.id}`, text);
+        this.#queueProgress(active, `item-complete-${active.turnId}-${item?.id}`, text);
       }
     }
-    if (message.method === "turn/completed") active.resolveDone(params.turn || { status: "completed" });
-    if (message.method === "error") active.rejectDone(new Error(params.error?.message || "Codex app-server error"));
+    if (message.method === "turn/completed" && !active.external) active.resolveDone(params.turn || { status: "completed" });
+    if (message.method === "error") {
+      if (active.external) {
+        this.#queueProgress(active, `error-${active.turnId}`, `运行中的会话出错：${params.error?.message || "Codex app-server error"}`);
+      } else {
+        active.rejectDone(new Error(params.error?.message || "Codex app-server error"));
+      }
+    }
   }
 
   #onServerRequest(message) {
@@ -2777,6 +2841,7 @@ class BridgeRuntime {
 
   #onClientClosed(error) {
     this.loadedThreads.clear();
+    this.attachedThreads.clear();
     for (const active of this.activeThreads.values()) active.rejectDone(error);
     for (const titleRun of this.titleRuns.values()) titleRun.rejectDone(error);
   }

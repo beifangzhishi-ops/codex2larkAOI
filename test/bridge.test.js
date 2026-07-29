@@ -25,6 +25,7 @@ import {
   extractFileDirectives,
   formatResumeThreads,
   formatLatestTurnReplay,
+  formatRunningThreadReplay,
   formatThreadItem,
   idempotencyKey,
   initializeMarkdownDelivery,
@@ -752,6 +753,7 @@ test("resume status loader resolves not-loaded threads from their latest persist
   const client = {
     async request(method, params) {
       requests.push([method, params]);
+      if (method === "thread/goal/get") return {};
       return { thread: { turns: statuses[params.threadId] } };
     },
   };
@@ -760,11 +762,27 @@ test("resume status loader resolves not-loaded threads from their latest persist
     ...Object.keys(statuses).map((id) => ({ id, status: { type: "notLoaded" } })),
   ];
   const loaded = await loadResumeThreadStatuses(client, threads);
-  assert.equal(requests.length, 4);
-  assert.ok(requests.every(([method, params]) => method === "thread/read" && params.includeTurns === true));
+  assert.equal(requests.length, 9);
+  assert.equal(requests.filter(([method]) => method === "thread/read").length, 4);
+  assert.equal(requests.filter(([method]) => method === "thread/goal/get").length, 5);
   assert.deepEqual(loaded.map((thread) => resumeThreadStatusLabel(thread)), [
     "进行中", "已完成", "已中断", "失败", "无记录",
   ]);
+});
+
+test("resume status preserves live thread state over an older interrupted turn and shows Goal state", async () => {
+  const [thread] = await loadResumeThreadStatuses({
+    async request(method) {
+      if (method === "thread/read") {
+        return { thread: { status: { type: "active" }, turns: [{ startedAt: 1, status: "interrupted" }] } };
+      }
+      return { goal: { status: "active", objective: "持续检查服务状态" } };
+    },
+  }, [{ id: "live", status: { type: "notLoaded" } }]);
+  assert.equal(thread.status.type, "active");
+  assert.equal(resumeThreadStatusLabel(thread), "Goal 进行中");
+  assert.match(formatRunningThreadReplay(thread), /当前 Goal 正在运行/);
+  assert.match(formatRunningThreadReplay(thread), /持续检查服务状态/);
 });
 
 test("resume status loader degrades one failed history read without blocking the card", async () => {
