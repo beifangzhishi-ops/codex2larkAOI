@@ -592,6 +592,9 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/plan"), { type: "plan" });
   assert.deepEqual(parseControlCommand("/default"), { type: "defaultMode" });
   assert.equal(parseControlCommand("/plan 修改目录下 plan.md"), null);
+  assert.deepEqual(parseControlCommand("/goal 完成发布检查"), { type: "goal", objective: "完成发布检查" });
+  assert.deepEqual(parseControlCommand("/goal pause"), { type: "goal", action: "pause" });
+  assert.deepEqual(parseControlCommand("/goal"), { type: "goal", objective: "" });
   assert.deepEqual(parseControlCommand("/approval manual"), { type: "approvalMode", mode: "manual" });
   assert.deepEqual(parseControlCommand("/approval auto"), { type: "approvalMode", mode: "auto" });
   assert.deepEqual(parseControlCommand("/approve session"), { type: "approve", session: true });

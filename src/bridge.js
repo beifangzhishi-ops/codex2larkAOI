@@ -420,6 +420,12 @@ export function parseControlCommand(text) {
   if (lower === "/stop") return { type: "stop" };
   if (lower === "/plan") return { type: "plan" };
   if (lower === "/default") return { type: "defaultMode" };
+  const goal = value.match(/^\/goal(?:\s+(.+))?$/i);
+  if (goal) {
+    const argument = (goal[1] || "").trim();
+    if (["pause", "resume", "clear"].includes(argument.toLowerCase())) return { type: "goal", action: argument.toLowerCase() };
+    return { type: "goal", objective: argument };
+  }
   if (/^\/approval\s+auto$/i.test(value)) return { type: "approvalMode", mode: "auto" };
   if (/^\/approval\s+manual$/i.test(value)) return { type: "approvalMode", mode: "manual" };
   if (/^\/approve(?:\s+session)?$/i.test(value)) {
@@ -1948,6 +1954,12 @@ class BridgeRuntime {
         "当前未选择会话；未中断后台任务，也没有清除排队消息。", this.config);
       return;
     }
+    const goal = await this.#getGoal(threadId);
+    if (goal?.status === "active") {
+      await this.#pauseGoalAndInterrupt(threadId);
+      await sendReply(event.messageId, `${event.eventId}-stop`, "Goal 已先暂停，再中断当前轮次。", this.config);
+      return;
+    }
     this.threadQueues.pause(threadId);
     const cleared = this.threadQueues.clearPending(threadId);
     const current = this.threadQueues.current(threadId);
@@ -1993,6 +2005,8 @@ class BridgeRuntime {
     if (command?.type === "plan" || command?.type === "defaultMode") {
       const mode = command.type === "plan" ? "plan" : "default";
       try {
+        const activeGoal = await this.#getGoal(this.state.sessions[event.chatId]);
+        if (mode === "plan" && activeGoal?.status === "active") await this.#pauseGoalAndInterrupt(this.state.sessions[event.chatId]);
         const result = await this.#setCollaborationMode(event.chatId, mode);
         await sendReply(event.messageId, `${event.eventId}-${mode}-mode`,
           result.pending ? `已设为${mode === "plan" ? "计划" : "默认"}模式；新建会话后自动应用。`
@@ -2005,6 +2019,10 @@ class BridgeRuntime {
     }
     if (command?.type === "planReview") {
       await this.#handlePlanReview(event, command);
+      return;
+    }
+    if (command?.type === "goal") {
+      await this.#handleGoal(event, command);
       return;
     }
     if (command?.type === "approvalCard") {
@@ -2126,6 +2144,18 @@ class BridgeRuntime {
     const { threadId } = await this.#ensureThread(
       event.chatId, selection.entry.model, cwd, approvalMode,
     );
+    const goal = await this.#getGoal(threadId);
+    if (goal?.status === "active") {
+      const attached = this.attachedThreads.get(threadId);
+      const turnId = this.activeThreads.get(threadId)?.turnId || attached?.turnId;
+      if (turnId) {
+        await this.client.request("turn/steer", {
+          threadId, expectedTurnId: turnId, input: [{ type: "text", text: event.content }],
+        });
+        await sendReply(event.messageId, `${event.eventId}-goal-steer`, "已将消息注入正在运行的 Goal。", this.config);
+        return;
+      }
+    }
     const snapshot = snapshotTurnSettings({
       threadId,
       cwd,
@@ -2250,6 +2280,13 @@ class BridgeRuntime {
     } catch (error) {
       modelLines = `下一轮模型：无法读取（${String(error.message || error).slice(0, 160)}）\n下一轮思考强度：无法读取\n设置来源：未知`;
     }
+    const goal = await this.#getGoal(threadId);
+    const goalLines = goal ? [
+      "Goal：",
+      `目标：${goal.objective || "未提供"}`,
+      `状态：${resumeThreadStatusLabel({ resumeGoal: goal })}`,
+      ...(goal.tokenBudget ? [`Token：${goal.tokensUsed || 0}/${goal.tokenBudget}`] : [`已用 Token：${goal.tokensUsed || 0}`]),
+    ] : [];
     return [
       "桥接服务正常。",
       "",
@@ -2258,8 +2295,70 @@ class BridgeRuntime {
       `当前会话 ID：${threadId || "尚未创建"}`,
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
       modelLines,
+      ...goalLines,
       "权限：全盘读取、当前项目目录写入",
     ].join("\n");
+  }
+
+  async #getGoal(threadId) {
+    if (!threadId) return null;
+    try {
+      return (await this.client.request("thread/goal/get", { threadId }))?.goal || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #pauseGoalAndInterrupt(threadId) {
+    await this.client.request("thread/goal/set", { threadId, status: "paused" });
+    let turnId = this.activeThreads.get(threadId)?.turnId || this.attachedThreads.get(threadId)?.turnId;
+    if (!turnId) {
+      const read = await this.client.request("thread/read", { threadId, includeTurns: true });
+      turnId = selectLatestTurn(read?.thread?.turns)?.id || "";
+    }
+    if (turnId) {
+      try {
+        await this.client.request("turn/interrupt", { threadId, turnId });
+      } catch {
+        const read = await this.client.request("thread/read", { threadId, includeTurns: true });
+        const retryTurnId = selectLatestTurn(read?.thread?.turns)?.id || "";
+        if (retryTurnId && retryTurnId !== turnId) await this.client.request("turn/interrupt", { threadId, turnId: retryTurnId });
+      }
+    }
+  }
+
+  async #handleGoal(event, command) {
+    const { threadId } = await this.#ensureThread(event.chatId);
+    const goal = await this.#getGoal(threadId);
+    if (command.objective !== undefined && command.objective !== "") {
+      if (command.objective.length > 4000) throw new Error("Goal 目标不能超过 4,000 个字符。");
+      if (goal?.status === "active") await this.#pauseGoalAndInterrupt(threadId);
+      await this.#setCollaborationMode(event.chatId, "default", threadId);
+      await this.client.request("thread/goal/set", { threadId, objective: command.objective, status: "active" });
+      await sendReply(event.messageId, `${event.eventId}-goal-set`, `已启动 Goal：${command.objective}`, this.config);
+      return;
+    }
+    if (command.action === "pause") {
+      if (goal?.status !== "active") throw new Error("当前没有进行中的 Goal 可暂停。");
+      await this.#pauseGoalAndInterrupt(threadId);
+      await sendReply(event.messageId, `${event.eventId}-goal-pause`, "Goal 已暂停。", this.config);
+      return;
+    }
+    if (command.action === "resume") {
+      if (goal?.status !== "paused") throw new Error("仅已暂停的 Goal 可以恢复。");
+      await this.#setCollaborationMode(event.chatId, "default", threadId);
+      await this.client.request("thread/goal/set", { threadId, status: "active" });
+      await sendReply(event.messageId, `${event.eventId}-goal-resume`, "Goal 已恢复。", this.config);
+      return;
+    }
+    if (command.action === "clear") {
+      if (goal?.status === "active") await this.#pauseGoalAndInterrupt(threadId);
+      await this.client.request("thread/goal/clear", { threadId });
+      await sendReply(event.messageId, `${event.eventId}-goal-clear`, "Goal 已清除。", this.config);
+      return;
+    }
+    const goalText = goal ? `目标：${goal.objective || "未提供"}\n状态：${resumeThreadStatusLabel({ resumeGoal: goal })}` : "当前会话没有 Goal。";
+    await sendReply(event.messageId, `${event.eventId}-goal`, goalText, this.config);
   }
 
   async #handleModelCommand(event, command) {
