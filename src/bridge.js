@@ -1437,7 +1437,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
           controlButton("继续对话", "default", "resume"),
           controlButton("模型设置", "default", "model"),
           controlButton(`改为${nextApprovalMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextApprovalMode }),
-          controlButton(`改为${nextInterjectionMode === "guide" ? "引导" : "排队"}插话`, "default", "interjectionMode", { mode: nextInterjectionMode }),
+          controlButton(`改为后续指令${nextInterjectionMode === "guide" ? "引导" : "排队"}`, "default", "interjectionMode", { mode: nextInterjectionMode }),
         ],
       },
       {

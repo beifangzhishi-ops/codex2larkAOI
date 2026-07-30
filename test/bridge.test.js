@@ -709,7 +709,7 @@ test("help card exposes common conversation controls and the opposite mode for b
   const buttons = card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.deepEqual(buttons.map((button) => button.text.content), [
-    "继续对话", "模型设置", "改为人工审批", "改为排队插话", "查看状态", "停止当前操作",
+    "继续对话", "模型设置", "改为人工审批", "改为后续指令排队", "查看状态", "停止当前操作",
   ]);
   assert.deepEqual(buttons.map((button) => button.value.action), [
     "resume", "model", "approvalMode", "interjectionMode", "status", "stop",
@@ -719,7 +719,7 @@ test("help card exposes common conversation controls and the opposite mode for b
   const manualButtons = buildHelpCard("manual", "queue").elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.match(manualButtons[2].text.content, /替我审批/);
-  assert.match(manualButtons[3].text.content, /引导插话/);
+  assert.match(manualButtons[3].text.content, /后续指令引导/);
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/rename/);
