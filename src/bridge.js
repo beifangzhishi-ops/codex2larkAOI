@@ -428,6 +428,8 @@ export function parseControlCommand(text) {
   }
   if (/^\/approval\s+auto$/i.test(value)) return { type: "approvalMode", mode: "auto" };
   if (/^\/approval\s+manual$/i.test(value)) return { type: "approvalMode", mode: "manual" };
+  if (/^\/interject\s+guide$/i.test(value)) return { type: "interjectionMode", mode: "guide" };
+  if (/^\/interject\s+queue$/i.test(value)) return { type: "interjectionMode", mode: "queue" };
   if (/^\/approve(?:\s+session)?$/i.test(value)) {
     return { type: "approve", session: /session|always/i.test(value) };
   }
@@ -466,7 +468,7 @@ function threadTimestamp(thread) {
 
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
 const CONTROL_CARD_ACTIONS = new Set([
-  "new", "resume", "resumePage", "approvalMode", "status", "stop", "help", "screen",
+  "new", "resume", "resumePage", "approvalMode", "interjectionMode", "status", "stop", "help", "screen",
   "model", "modelPage", "modelPick", "modelEffort", "modelDefault", "planReject", "planAccept",
 ]);
 
@@ -500,6 +502,7 @@ export function parseControlCardAction(value) {
   if (value?.action_tag !== "button" || actionValue?.kind !== "codex2lark_control" ||
       !CONTROL_CARD_ACTIONS.has(actionValue.action)) return null;
   if (actionValue.action === "approvalMode" && !["auto", "manual"].includes(actionValue.mode)) return null;
+  if (actionValue.action === "interjectionMode" && !["guide", "queue"].includes(actionValue.mode)) return null;
   if (actionValue.action === "resume" && actionValue.threadId !== undefined &&
       typeof actionValue.threadId !== "string") return null;
   if (actionValue.action === "resumePage" &&
@@ -1073,6 +1076,7 @@ export function normalizePersistedState(value = {}) {
     sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
     workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
     approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
+    interjectionModes: value.interjectionModes && typeof value.interjectionModes === "object" ? value.interjectionModes : {},
     threadModes: value.threadModes && typeof value.threadModes === "object" ? value.threadModes : {},
     pendingChatModes: value.pendingChatModes && typeof value.pendingChatModes === "object" ? value.pendingChatModes : {},
     planReviews: value.planReviews && typeof value.planReviews === "object" ? value.planReviews : {},
@@ -1133,6 +1137,8 @@ export function buildConfig(env) {
   if (!existsSync(rootDir)) throw new Error(`CODEX_WORKDIR 不存在: ${rootDir}`);
   const defaultApprovalMode = String(env.CODEX_APPROVAL_MODE || "auto").toLowerCase();
   if (!["auto", "manual"].includes(defaultApprovalMode)) throw new Error("CODEX_APPROVAL_MODE 只能是 auto 或 manual。");
+  const defaultInterjectionMode = String(env.CODEX_INTERJECTION_MODE || "guide").toLowerCase();
+  if (!["guide", "queue"].includes(defaultInterjectionMode)) throw new Error("CODEX_INTERJECTION_MODE 只能是 guide 或 queue。");
   return {
     allowedIds,
     rootDir,
@@ -1143,6 +1149,7 @@ export function buildConfig(env) {
     titleModel: env.CODEX_TITLE_MODEL?.trim() || "gpt-5.6-luna",
     titleEffort: env.CODEX_TITLE_EFFORT?.trim() || "low",
     defaultApprovalMode,
+    defaultInterjectionMode,
     timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 1_800_000,
     replyChars: Math.min(Math.max(Number(env.FEISHU_REPLY_CHARS) || 3500, 500), 8000),
     eventCacheSize: Math.min(Math.max(Number(env.EVENT_CACHE_SIZE) || 1000, 100), 10_000),
@@ -1401,8 +1408,9 @@ export function buildResolvedApprovalCard(decision, operatorId) {
   };
 }
 
-export function buildHelpCard(approvalMode = "auto") {
-  const nextMode = approvalMode === "auto" ? "manual" : "auto";
+export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide") {
+  const nextApprovalMode = approvalMode === "auto" ? "manual" : "auto";
+  const nextInterjectionMode = interjectionMode === "guide" ? "queue" : "guide";
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -1420,14 +1428,16 @@ export function buildHelpCard(approvalMode = "auto") {
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
         "`/goal pause|resume|clear` 暂停、恢复或清除 Goal",
         "`/screen` 截取桥接主机屏幕",
-        "`/approval auto|manual` 切换审批 · `/status` 查看状态",
+        "`/approval auto|manual` 切换审批 · `/interject guide|queue` 切换插话",
+        "`/status` 查看状态",
       ].join("\n") },
       {
         tag: "action",
         actions: [
           controlButton("继续对话", "default", "resume"),
           controlButton("模型设置", "default", "model"),
-          controlButton(`改为${nextMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextMode }),
+          controlButton(`改为${nextApprovalMode === "auto" ? "替我" : "人工"}审批`, "default", "approvalMode", { mode: nextApprovalMode }),
+          controlButton(`改为${nextInterjectionMode === "guide" ? "引导" : "排队"}插话`, "default", "interjectionMode", { mode: nextInterjectionMode }),
         ],
       },
       {
@@ -1912,6 +1922,10 @@ class BridgeRuntime {
     return this.state.approvalModes[chatId] || this.config.defaultApprovalMode;
   }
 
+  interjectionModeFor(chatId) {
+    return this.state.interjectionModes[chatId] || this.config.defaultInterjectionMode;
+  }
+
   collaborationModeFor(chatId, threadId = this.state.sessions[chatId]) {
     return this.state.threadModes[threadId] || this.state.pendingChatModes[chatId] || "default";
   }
@@ -1977,8 +1991,17 @@ class BridgeRuntime {
     if (command.type === "approvalMode") {
       this.state.approvalModes[event.chatId] = command.mode;
       saveState(this.state);
+      if (await this.#refreshHelpCard(event)) return;
       await sendReply(event.messageId, `${event.eventId}-mode`,
         `已切换为${command.mode === "auto" ? "替我审批" : "人工审批"}。该设置仅影响后续轮次；已发出的审批请求仍需由原审批者处理。`, this.config);
+      return;
+    }
+    if (command.type === "interjectionMode") {
+      this.state.interjectionModes[event.chatId] = command.mode;
+      saveState(this.state);
+      if (await this.#refreshHelpCard(event)) return;
+      await sendReply(event.messageId, `${event.eventId}-interjection-mode`,
+        `已切换为${command.mode === "guide" ? "引导" : "排队"}插话模式。`, this.config);
       return;
     }
     if (command.type === "approve" || command.type === "deny") {
@@ -2040,7 +2063,7 @@ class BridgeRuntime {
   }
 
   async #processRoute(event, command) {
-    if (["stop", "approvalMode", "approve", "deny"].includes(command?.type)) {
+    if (["stop", "approvalMode", "interjectionMode", "approve", "deny"].includes(command?.type)) {
       await this.#handleImmediate(event, command);
       return;
     }
@@ -2113,11 +2136,13 @@ class BridgeRuntime {
     }
     if (command?.type === "help") {
       try {
-        await sendInteractiveCard(event.messageId, `${event.eventId}-help`, buildHelpCard(this.modeFor(event.chatId)));
+        await sendInteractiveCard(event.messageId, `${event.eventId}-help`, buildHelpCard(
+          this.modeFor(event.chatId), this.interjectionModeFor(event.chatId),
+        ));
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -2209,14 +2234,15 @@ class BridgeRuntime {
       event.chatId, selection.entry.model, cwd, approvalMode,
     );
     const goal = await this.#getGoal(threadId);
-    if (goal?.status === "active") {
+    if (this.interjectionModeFor(event.chatId) === "guide" && (goal?.status === "active" || this.activeThreads.has(threadId))) {
       const attached = this.attachedThreads.get(threadId);
       const turnId = this.activeThreads.get(threadId)?.turnId || attached?.turnId;
       if (turnId) {
         await this.client.request("turn/steer", {
           threadId, expectedTurnId: turnId, input: [{ type: "text", text: event.content }],
         });
-        await sendReply(event.messageId, `${event.eventId}-goal-steer`, "已将消息注入正在运行的 Goal。", this.config);
+        await sendReply(event.messageId, `${event.eventId}-steer`,
+          goal?.status === "active" ? "已将消息注入正在运行的 Goal。" : "已将消息引导至正在运行的任务。", this.config);
         return;
       }
     }
@@ -2363,6 +2389,7 @@ class BridgeRuntime {
       `当前会话名：${threadNameValue}`,
       `当前会话 ID：${threadId || "尚未创建"}`,
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
+      `插话：${this.interjectionModeFor(chatId) === "guide" ? "引导（注入运行中的任务）" : "排队（等待当前任务结束）"}`,
       modelLines,
       ...goalLines,
       "权限：全盘读取、当前项目目录写入",
@@ -2535,8 +2562,8 @@ class BridgeRuntime {
         this.route(event, { type: "planReview", action: event.action, planItemId: event.planItemId });
         return;
       }
-      const command = event.action === "approvalMode"
-        ? { type: "approvalMode", mode: event.mode }
+      const command = event.action === "approvalMode" || event.action === "interjectionMode"
+        ? { type: event.action, mode: event.mode }
         : event.action === "resume"
           ? { type: "resume", query: event.threadId || "" }
           : event.action === "resumePage"
@@ -2965,6 +2992,19 @@ class BridgeRuntime {
   #attachRunningThread(event, threadId, thread) {
     if (this.activeThreads.has(threadId)) return;
     this.attachedThreads.set(threadId, createRunningThreadAttachment(event, threadId, thread));
+  }
+
+  async #refreshHelpCard(event) {
+    if (!event.token || !event.operatorId) return false;
+    try {
+      await updateInteractiveCard(event, buildHelpCard(
+        this.modeFor(event.chatId), this.interjectionModeFor(event.chatId),
+      ));
+      return true;
+    } catch (error) {
+      console.warn(`[bridge] help card update failed: ${error.message}`);
+      return false;
+    }
   }
 
   #queuePlanReview(active, item) {

@@ -6,7 +6,7 @@
 飞书消息 -> lark-cli event consume -> Codex App Server -> 飞书回复/文件
 ```
 
-使用 App Server 而非一次性的 `codex exec`，因此支持运行中过程消息、工具调用、人工审批和中断。每个聊天独立保存 Codex thread、当前项目目录、审批模式以及模型设置。
+使用 App Server 而非一次性的 `codex exec`，因此支持运行中过程消息、工具调用、人工审批和中断。每个聊天独立保存 Codex thread、当前项目目录、审批模式、插话模式以及模型设置。
 
 ## 权限边界
 
@@ -47,6 +47,7 @@ notepad .env
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：仅用于异步生成会话标题，默认分别为 `gpt-5.6-luna` 和 `low`，不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
+- `CODEX_INTERJECTION_MODE=guide|queue`：新聊天的默认插话模式；`guide` 会将消息注入正在运行的同一会话，`queue` 则等待当前任务结束；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
 - `FEISHU_REACTIONS=true`：执行普通 Codex 任务时显示消息表情状态。
 
@@ -94,11 +95,13 @@ npm run check
 - `/stop`：中断当前选中 thread 的活跃 turn，并清除该 thread 尚未开始的任务；不停止桥接服务或已经切换离开的后台 thread；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
 - `/approval manual`：把审批请求作为飞书交互卡片发出，可点击“允许一次”“本会话允许”“拒绝”；按钮不可用时仍可使用下列文字命令；
+- `/interject guide`：将同一会话在运行中的普通任务或 Goal 的后续消息通过引导方式注入；
+- `/interject queue`：将后续消息依次排队，等待当前任务结束后执行；
 - `/approve`：允许一个待审批操作；
 - `/approve session`：允许当前 session 范围内的同类操作；
 - `/deny`：拒绝一个待审批操作；
-- `/status`：查看当前目录、会话名和 ID、审批方式、下一轮模型、思考强度、设置来源及权限；
-- `/help`：显示带有继续对话、模型设置、切换审批模式、查看状态和停止操作按钮的交互卡片；`/new` 与 `/screen` 保留为卡片中的文字命令，不提供按钮。
+- `/status`：查看当前目录、会话名和 ID、审批方式、插话方式、下一轮模型、思考强度、设置来源及权限；
+- `/help`：显示带有继续对话、模型设置、切换审批模式、切换插话模式、查看状态和停止操作按钮的交互卡片；两个模式按钮均会在原卡片内刷新为可切换的另一种模式；`/new` 与 `/screen` 保留为卡片中的文字命令，不提供按钮。
 
 桥接只识别以上完整斜杠命令。自然语言中的“停止执行”“切换项目”“改为自动审批”等内容始终作为普通 Codex 任务处理。
 
@@ -148,12 +151,13 @@ MEDIA:C:\absolute\path\plot.png
 - `workdirs`：聊天到当前项目目录；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
+- `interjectionModes`：聊天到插话模式；
 - `modelSettings`：聊天到后续轮次的模型和思考强度策略；
 - `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、重试次数和最近错误；
 - `markdownDelivery`：机器人 `codex` 文件夹的 token、链接和已授予编辑权限的允许用户；
 - `events`：事件去重窗口。
 
-`chatRouteQueues`、`threadQueues`、活跃 turn、恢复候选和审批请求只存在于内存，不写入状态文件。服务重启后会恢复聊天绑定、目录、模型、审批模式和未完成标题任务，但不会把旧运行态误判为仍在执行。
+`chatRouteQueues`、`threadQueues`、活跃 turn、恢复候选和审批请求只存在于内存，不写入状态文件。服务重启后会恢复聊天绑定、目录、模型、审批模式、插话模式和未完成标题任务，但不会把旧运行态误判为仍在执行。
 
 每次更新后的推荐收尾顺序为：运行 `npm run check`，提交该阶段纯文本改动，执行 `stop.cmd --no-pause-on-error`，再执行 `start.cmd --no-pause-on-error`。确认新 PID 存在、两类事件消费者均输出 `[event] ready`，且 `.env` 中 `LARKSUITE_CLI_CONFIG_DIR` 仍指向 AOI 开发槽。不要使用 `lark-cli event stop --all`，否则可能影响其他项目实例。
 

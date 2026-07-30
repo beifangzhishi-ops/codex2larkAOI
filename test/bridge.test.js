@@ -235,6 +235,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
     threadQueues: { thr_1: ["task"] },
   });
   assert.deepEqual(legacy.modelSettings, {});
+  assert.deepEqual(legacy.interjectionModes, {});
   assert.deepEqual(legacy.pendingTitleJobs, {});
   assert.deepEqual(legacy.threadModes, {});
   assert.deepEqual(legacy.pendingChatModes, {});
@@ -245,6 +246,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   assert.equal(legacy.sessions.chat, "thr_1");
 
   const current = normalizePersistedState({
+    interjectionModes: { chat: "queue" },
     modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
     pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
     threadModes: { thr_2: "plan" },
@@ -257,6 +259,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
     },
   });
   assert.equal(current.modelSettings.chat.modelId, "sol");
+  assert.equal(current.interjectionModes.chat, "queue");
   assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
   assert.equal(current.threadModes.thr_2, "plan");
   assert.equal(current.planReviews.plan_1.status, "pending");
@@ -600,6 +603,8 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/goal"), { type: "goal", objective: "" });
   assert.deepEqual(parseControlCommand("/approval manual"), { type: "approvalMode", mode: "manual" });
   assert.deepEqual(parseControlCommand("/approval auto"), { type: "approvalMode", mode: "auto" });
+  assert.deepEqual(parseControlCommand("/interject guide"), { type: "interjectionMode", mode: "guide" });
+  assert.deepEqual(parseControlCommand("/interject queue"), { type: "interjectionMode", mode: "queue" });
   assert.deepEqual(parseControlCommand("/approve session"), { type: "approve", session: true });
   assert.deepEqual(parseControlCommand("/stop"), { type: "stop" });
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
@@ -612,6 +617,7 @@ test("parseControlCommand only recognizes complete slash commands", () => {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
   });
   assert.equal(parseControlCommand("/approval"), null);
+  assert.equal(parseControlCommand("/interject pause"), null);
   assert.equal(parseControlCommand("/screen now"), null);
   assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
   assert.equal(parseControlCommand("/rename"), null);
@@ -698,20 +704,22 @@ test("approval cards expose exactly three scoped decisions and parse callbacks",
   assert.deepEqual(JSON.parse(update.at(-1)), { token: "token_1", card: resolved });
 });
 
-test("help card exposes common conversation controls and the opposite approval mode", () => {
+test("help card exposes common conversation controls and the opposite mode for both settings", () => {
   const card = buildHelpCard("auto");
   const buttons = card.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.deepEqual(buttons.map((button) => button.text.content), [
-    "继续对话", "模型设置", "改为人工审批", "查看状态", "停止当前操作",
+    "继续对话", "模型设置", "改为人工审批", "改为排队插话", "查看状态", "停止当前操作",
   ]);
   assert.deepEqual(buttons.map((button) => button.value.action), [
-    "resume", "model", "approvalMode", "status", "stop",
+    "resume", "model", "approvalMode", "interjectionMode", "status", "stop",
   ]);
   assert.equal(buttons[2].value.mode, "manual");
-  const manualButtons = buildHelpCard("manual").elements.filter((element) => element.tag === "action")
+  assert.equal(buttons[3].value.mode, "queue");
+  const manualButtons = buildHelpCard("manual", "queue").elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.match(manualButtons[2].text.content, /替我审批/);
+  assert.match(manualButtons[3].text.content, /引导插话/);
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/rename/);
@@ -719,6 +727,7 @@ test("help card exposes common conversation controls and the opposite approval m
   assert.match(card.elements[0].content, /\/default/);
   assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
   assert.match(card.elements[0].content, /\/screen/);
+  assert.match(card.elements[0].content, /\/interject guide\|queue/);
 });
 
 test("resume replay selects the actual latest turn without falling back from failures", () => {
@@ -991,6 +1000,17 @@ test("control card callbacks accept only the supported typed actions", () => {
   });
   assert.deepEqual(parseControlCardAction({
     ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "interjectionMode", mode: "queue" }),
+  }), {
+    type: "control", eventId: "evt_control", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", action: "interjectionMode", mode: "queue",
+  });
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "interjectionMode", mode: "invalid" }),
+  }), null);
+  assert.deepEqual(parseControlCardAction({
+    ...raw,
     action_value: JSON.stringify({
       kind: "codex2lark_control", action: "modelEffort", modelId: "sol", effort: "high",
     }),
@@ -1235,6 +1255,7 @@ test("buildConfig validates and exposes approval defaults", () => {
     CODEX_APPROVAL_MODE: "manual",
   });
   assert.equal(config.defaultApprovalMode, "manual");
+  assert.equal(config.defaultInterjectionMode, "guide");
   assert.equal(config.rootDir, process.cwd());
   assert.equal(config.reactions, true);
   assert.equal(config.titleModel, "gpt-5.6-luna");
@@ -1254,4 +1275,5 @@ test("buildConfig validates and exposes approval defaults", () => {
   }).reactions, false);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "*" }), /不允许通配符/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_APPROVAL_MODE: "sometimes" }), /auto 或 manual/);
+  assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_INTERJECTION_MODE: "sometimes" }), /guide 或 queue/);
 });
