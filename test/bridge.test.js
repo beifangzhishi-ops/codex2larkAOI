@@ -45,6 +45,7 @@ import {
   markdownFolderFromListOutput,
   markdownFolderGrantArgs,
   normalizeModelCatalog,
+  normalizeManualThreadName,
   normalizePersistedState,
   normalizeEvent,
   parseControlCommand,
@@ -603,6 +604,7 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/stop"), { type: "stop" });
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
+  assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
   assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
   assert.deepEqual(parseControlCommand("/screen"), { type: "screen" });
   assert.deepEqual(parseControlCommand("/model"), { type: "model", modelId: "", effort: "" });
@@ -612,6 +614,7 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.equal(parseControlCommand("/approval"), null);
   assert.equal(parseControlCommand("/screen now"), null);
   assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
+  assert.equal(parseControlCommand("/rename"), null);
   assert.deepEqual(parseControlCommand("/model default high"), {
     type: "model", modelId: "default", effort: "high",
   });
@@ -711,6 +714,7 @@ test("help card exposes common conversation controls and the opposite approval m
   assert.match(manualButtons[2].text.content, /替我审批/);
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/model/);
+  assert.match(card.elements[0].content, /\/rename/);
   assert.match(card.elements[0].content, /\/plan/);
   assert.match(card.elements[0].content, /\/default/);
   assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
@@ -827,6 +831,12 @@ test("resume status uses the bridge runtime before persisted turn history", () =
   ], new Set(["running"]));
   assert.equal(thread.status.type, "active");
   assert.equal(resumeThreadStatusLabel(thread), "进行中");
+});
+
+test("manual thread names are normalized and bounded", () => {
+  assert.deepEqual(normalizeManualThreadName("  发布\n前检查  "), { name: "发布 前检查" });
+  assert.match(normalizeManualThreadName("").error, /请提供/);
+  assert.match(normalizeManualThreadName("名".repeat(81)).error, /80/);
 });
 
 test("Goal attachment is ready before its asynchronous turn starts", () => {

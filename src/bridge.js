@@ -433,6 +433,8 @@ export function parseControlCommand(text) {
   }
   if (lower === "/deny") return { type: "deny" };
   if (lower === "/new") return { type: "new" };
+  const rename = value.match(/^\/rename\s+(.+)$/i);
+  if (rename) return { type: "rename", name: rename[1].trim() };
   const resume = value.match(/^\/resume(?:\s+(.+))?$/i);
   if (resume) return { type: "resume", query: (resume[1] || "").trim() };
   if (lower === "/status") return { type: "status" };
@@ -578,6 +580,14 @@ export function sanitizeGeneratedTitle(value) {
   const chars = Array.from(title);
   const maxChars = /\p{Script=Han}/u.test(title) ? 30 : 60;
   return chars.length >= 2 && chars.length <= maxChars ? title : "";
+}
+
+export function normalizeManualThreadName(value) {
+  const name = String(value ?? "").replace(/\s+/g, " ").trim();
+  const length = Array.from(name).length;
+  if (length < 1) return { error: "请提供新的会话标题。" };
+  if (length > 80) return { error: "会话标题不能超过 80 个字符。" };
+  return { name };
 }
 
 export function parseGeneratedTitle(messages) {
@@ -1403,6 +1413,7 @@ export function buildHelpCard(approvalMode = "auto") {
       { tag: "markdown", content: [
         "直接发送任务即可。常用命令：",
         "`/cd 项目名或路径` 切换目录 · `/new` 新建对话",
+        "`/rename 标题` 重命名当前会话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
         "`/plan` 进入计划模式 · `/default` 切回默认执行模式",
@@ -2072,6 +2083,28 @@ class BridgeRuntime {
       this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-new`, "已新建 Codex 会话；当前项目目录保持不变。", this.config);
+      return;
+    }
+    if (command?.type === "rename") {
+      const threadId = this.state.sessions[event.chatId];
+      const result = normalizeManualThreadName(command.name);
+      if (!threadId) {
+        await sendReply(event.messageId, `${event.eventId}-rename`, "当前没有可重命名的会话；请先发送任务或使用 `/resume` 继续历史会话。", this.config);
+        return;
+      }
+      if (result.error) {
+        await sendReply(event.messageId, `${event.eventId}-rename`, result.error, this.config);
+        return;
+      }
+      try {
+        await this.client.request("thread/name/set", { threadId, name: result.name });
+        delete this.state.pendingTitleJobs[threadId];
+        saveState(this.state);
+        await sendReply(event.messageId, `${event.eventId}-rename`, `当前会话已重命名为：${result.name}`, this.config);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-rename-error`,
+          `重命名会话失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
       return;
     }
     if (command?.type === "status") {
@@ -2899,6 +2932,7 @@ class BridgeRuntime {
         job.title = title;
         saveState(this.state);
       }
+      if (this.state.pendingTitleJobs[threadId] !== job) return;
       await this.client.request("thread/name/set", { threadId, name: title });
       delete this.state.pendingTitleJobs[threadId];
       saveState(this.state);
