@@ -15,6 +15,8 @@ import {
   buildModelCard,
   buildModelResultCard,
   buildPlanReviewCard,
+  buildResolvedUserInputCard,
+  buildUserInputCard,
   buildResumeCard,
   buildResolvedApprovalCard,
   buildScreenshotPowerShellCommand,
@@ -52,6 +54,7 @@ import {
   parseApprovalCardAction,
   parseCardAction,
   parseControlCardAction,
+  parseUserInputCardAction,
   parseDotEnv,
   reactionArgs,
   reactionIdFromOutput,
@@ -831,7 +834,7 @@ test("resume status preserves live thread state over an older interrupted turn a
   };
   assert.match(formatRunningThreadReplay(runningThread), /当前 Goal 正在运行/);
   assert.match(formatRunningThreadReplay(runningThread), /持续检查服务状态/);
-  assert.match(formatRunningThreadReplay(runningThread), /最近过程：\n🧠 确认下一步/);
+  assert.match(formatRunningThreadReplay(runningThread), /最近过程：\n正在检查最新日志/);
 });
 
 test("resume status uses the bridge runtime before persisted turn history", () => {
@@ -1222,9 +1225,40 @@ test("Markdown delivery reply links both the document and shared folder", () => 
 
 test("formatThreadItem renders readable progress but suppresses tool calls", () => {
   assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "正在检查。" }), "正在检查。");
-  assert.equal(formatThreadItem({ type: "reasoning", summary: [{ text: "已确认根因。" }] }), "🧠 已确认根因。");
+  assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "Continuing the plan mode" }), "");
+  assert.equal(formatThreadItem({ type: "reasoning", summary: [{ text: "已确认根因。" }] }), "");
   assert.equal(formatThreadItem({ type: "commandExecution", command: "npm test" }, "started"), "");
   assert.equal(formatThreadItem({ type: "mcpToolCall", server: "docs", tool: "search" }, "started"), "");
+});
+
+test("user input cards expose options and parse a typed answer callback", () => {
+  const params = {
+    threadId: "thr_1", turnId: "turn_1", itemId: "item_1",
+    questions: [{
+      id: "q1", header: "交付方式", question: "请选择交付方式。", isOther: true,
+      options: [
+        { label: "发送文件", description: "保留原始格式" },
+        { label: "发送链接", description: "使用云文档" },
+        { label: "不交付", description: "只回复结论" },
+      ],
+    }],
+  };
+  const card = buildUserInputCard(params, "input_1");
+  const buttons = card.elements.filter((element) => element.tag === "action").flatMap((element) => element.actions);
+  assert.deepEqual(buttons.map((button) => button.value.answer), ["发送文件", "发送链接", "不交付"]);
+  assert.ok(buttons.every((button) => button.value.kind === "codex2lark_user_input"));
+  assert.equal(buildResolvedUserInputCard(params, { q1: { answers: ["发送文件"] } }).header.template, "green");
+  assert.deepEqual(parseUserInputCardAction({
+    event_id: "evt_input", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
+    token: "token_1", action_tag: "button", action_value: JSON.stringify(buttons[1].value),
+  }), {
+    type: "userInput", eventId: "evt_input", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", inputId: "input_1", questionId: "q1", answer: "发送链接",
+  });
+  assert.equal(parseCardAction({
+    event_id: "evt_input", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
+    token: "token_1", action_tag: "button", action_value: JSON.stringify(buttons[0].value),
+  }).type, "userInput");
 });
 
 test("markdown validation failures are eligible for plain-text fallback", () => {

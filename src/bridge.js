@@ -532,9 +532,30 @@ export function parseControlCardAction(value) {
   };
 }
 
+export function parseUserInputCardAction(value) {
+  const actionValue = parseCardActionValue(value);
+  if (value?.action_tag !== "button" || actionValue?.kind !== "codex2lark_user_input" ||
+      typeof actionValue.inputId !== "string" || !actionValue.inputId ||
+      typeof actionValue.questionId !== "string" || !actionValue.questionId ||
+      typeof actionValue.answer !== "string" || !actionValue.answer) return null;
+  return {
+    type: "userInput",
+    eventId: String(value.event_id || ""),
+    chatId: String(value.chat_id || ""),
+    messageId: String(value.message_id || ""),
+    operatorId: String(value.operator_id || ""),
+    token: String(value.token || ""),
+    inputId: actionValue.inputId,
+    questionId: actionValue.questionId,
+    answer: actionValue.answer,
+  };
+}
+
 export function parseCardAction(value) {
   const approval = parseApprovalCardAction(value);
-  return approval ? { type: "approval", ...approval } : parseControlCardAction(value);
+  if (approval) return { type: "approval", ...approval };
+  const userInput = parseUserInputCardAction(value);
+  return userInput || parseControlCardAction(value);
 }
 
 function threadCwd(thread) {
@@ -944,23 +965,17 @@ export function extractFileDirectives(text, { cwd = ROOT } = {}) {
   return { text: cleaned, files };
 }
 
-function summaryText(summary) {
-  if (typeof summary === "string") return summary.trim();
-  if (!Array.isArray(summary)) return "";
-  return summary.map((part) => typeof part === "string" ? part : part?.text || "").filter(Boolean).join("\n").trim();
-}
-
 function fenced(value) {
   return String(value ?? "").replace(/```/g, "` ` `");
 }
 
 export function formatThreadItem(item, stage = "completed") {
   if (!item) return "";
-  if (item.type === "agentMessage" && item.phase === "commentary" && stage === "completed") return item.text?.trim() || "";
-  if (item.type === "reasoning" && stage === "completed") {
-    const text = summaryText(item.summary);
-    return text ? `🧠 ${text}` : "";
+  if (item.type === "agentMessage" && item.phase === "commentary" && stage === "completed") {
+    const text = item.text?.trim() || "";
+    return /[\u3400-\u9fff]/u.test(text) ? text : "";
   }
+  if (item.type === "reasoning") return "";
   return "";
 }
 
@@ -1302,6 +1317,84 @@ function approvalButton(text, type, approvalId, decision) {
 
 function controlButton(text, type, action, details = {}) {
   return cardButton(text, type, { kind: "codex2lark_control", action, ...details });
+}
+
+function userInputButton(text, type, inputId, questionId, answer) {
+  return cardButton(text, type, {
+    kind: "codex2lark_user_input", inputId, questionId, answer,
+  });
+}
+
+function cardText(value, maxLength = 500) {
+  const text = String(value || "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function userInputAnswerValues(answers, questionId) {
+  const value = answers?.[questionId]?.answers;
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function userInputPromptText(params) {
+  const questions = Array.isArray(params?.questions) ? params.questions : [];
+  const lines = ["需要你回答 Codex 的问题："];
+  questions.forEach((question, index) => {
+    lines.push(`\n${index + 1}. ${question.header || "问题"}：${question.question || ""}`);
+    const options = Array.isArray(question.options) ? question.options : [];
+    options.forEach((option, optionIndex) => {
+      lines.push(`   ${optionIndex + 1}) ${option.label}${option.description ? `：${option.description}` : ""}`);
+    });
+  });
+  lines.push("\n请点击卡片中的选项；允许自定义时，也可以直接回复答案。", "");
+  return lines.join("\n").trim();
+}
+
+export function buildUserInputCard(params, inputId, answers = {}) {
+  const questions = Array.isArray(params?.questions) ? params.questions : [];
+  const elements = [{ tag: "markdown", content: "请回答 Codex 的问题。" }];
+  for (const question of questions) {
+    const questionId = String(question?.id || "");
+    if (!questionId) continue;
+    const selected = userInputAnswerValues(answers, questionId);
+    const title = `**${cardText(question.header || "问题", 100)}**\n${cardText(question.question || "", 1000)}`;
+    elements.push({ tag: "markdown", content: selected.length
+      ? `${title}\n\n已选择：${selected.map((value) => cardText(value, 200)).join("、")}`
+      : title });
+    if (selected.length) continue;
+    const options = Array.isArray(question.options) ? question.options : [];
+    if (options.length) {
+      for (let start = 0; start < options.length; start += 5) {
+        const actions = options.slice(start, start + 5).map((option) => userInputButton(
+          cardText(option.label, 30), "default", inputId, questionId, String(option.label || ""),
+        ));
+        elements.push({ tag: "action", actions });
+      }
+    }
+    if (question.isOther || !options.length) {
+      elements.push({ tag: "note", elements: [{
+        tag: "plain_text", content: "如需自定义答案，请直接回复文字。",
+      }] });
+    }
+  }
+  if (!questions.length) elements.push({ tag: "markdown", content: "请直接回复你的答案。" });
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "blue", title: { tag: "plain_text", content: "需要你的选择" } },
+    elements,
+  };
+}
+
+export function buildResolvedUserInputCard(params, answers) {
+  const questions = Array.isArray(params?.questions) ? params.questions : [];
+  const lines = questions.map((question) => {
+    const values = userInputAnswerValues(answers, String(question?.id || ""));
+    return `**${cardText(question?.header || "问题", 100)}**：${values.map((value) => cardText(value, 300)).join("、")}`;
+  });
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "green", title: { tag: "plain_text", content: "已提交回答" } },
+    elements: [{ tag: "markdown", content: lines.join("\n\n") || "回答已提交。" }],
+  };
 }
 
 export function normalizeModelCatalog(result) {
@@ -1896,6 +1989,7 @@ class BridgeRuntime {
     this.attachedThreads = new Map();
     this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
+    this.pendingUserInputs = new Map();
     this.resumeCandidates = new Map();
     this.chatRouteQueues = new Map();
     this.threadQueues = new ThreadTaskQueueManager(
@@ -2019,6 +2113,7 @@ class BridgeRuntime {
         "当前未选择会话；未中断后台任务，也没有清除排队消息。", this.config);
       return;
     }
+    this.#cancelDetachedUserInputs(event.chatId, threadId);
     const goal = await this.#getGoal(threadId);
     if (goal?.status === "active") {
       await this.#pauseGoalAndInterrupt(threadId);
@@ -2067,6 +2162,11 @@ class BridgeRuntime {
       await this.#handleImmediate(event, command);
       return;
     }
+    if (command?.type === "userInput") {
+      await this.#handleUserInputCard(event);
+      return;
+    }
+    if (!command && await this.#handleUserInputText(event)) return;
     if (command?.type === "plan" || command?.type === "defaultMode") {
       const mode = command.type === "plan" ? "plan" : "default";
       try {
@@ -2552,6 +2652,105 @@ class BridgeRuntime {
     await this.#processRoute({ ...event, content: "执行刚刚确认的计划" }, null);
   }
 
+  #pendingUserInput(chatId, inputId = "") {
+    const pending = this.pendingUserInputs.get(chatId) || [];
+    return inputId ? pending.find((entry) => entry.inputId === inputId) : pending[0];
+  }
+
+  #unansweredUserInputQuestion(entry) {
+    return (Array.isArray(entry.params?.questions) ? entry.params.questions : [])
+      .find((question) => !userInputAnswerValues(entry.answers, String(question?.id || "")).length);
+  }
+
+  async #renderUserInputCard(event, entry) {
+    const card = buildUserInputCard(entry.params, entry.inputId, entry.answers);
+    if (event.token && event.operatorId) {
+      await updateInteractiveCard(event, card);
+      return;
+    }
+    await sendInteractiveCard(event.messageId,
+      `${event.eventId}-user-input-${entry.inputId}-${this.#unansweredUserInputQuestion(entry)?.id || "next"}`,
+      card);
+  }
+
+  async #completeUserInput(event, entry) {
+    const pending = this.pendingUserInputs.get(entry.chatId) || [];
+    const index = pending.indexOf(entry);
+    if (index < 0) return false;
+    const answers = entry.answers;
+    this.client.respond(entry.requestId, { answers });
+    pending.splice(index, 1);
+    if (pending.length) this.pendingUserInputs.set(entry.chatId, pending);
+    else this.pendingUserInputs.delete(entry.chatId);
+    if (event.token && event.operatorId) {
+      try {
+        await updateInteractiveCard(event, buildResolvedUserInputCard(entry.params, answers));
+      } catch (error) {
+        console.warn(`[bridge] user input card update failed: ${error.message}`);
+      }
+    } else {
+      await sendReply(event.messageId, `${event.eventId}-user-input-complete`, "已提交回答，Codex 将继续执行。", this.config);
+    }
+    return true;
+  }
+
+  async #recordUserInputAnswer(event, entry, question, answer) {
+    const questionId = String(question?.id || "");
+    const options = Array.isArray(question?.options) ? question.options : [];
+    const option = options.find((candidate) => String(candidate?.label || "") === answer);
+    if (options.length && !option && !question.isOther) {
+      await sendReply(event.messageId, `${event.eventId}-user-input-invalid`,
+        "请选择卡片中的一个选项；如果该问题允许自定义答案，也可以直接回复文字。", this.config);
+      return true;
+    }
+    entry.answers[questionId] = { answers: [answer] };
+    if (!this.#unansweredUserInputQuestion(entry)) {
+      await this.#completeUserInput(event, entry);
+    } else {
+      try {
+        await this.#renderUserInputCard(event, entry);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-user-input-card-error`,
+          `已记录当前回答，但下一道问题卡片发送失败：${String(error.message || error).slice(0, 1200)}`, this.config);
+      }
+    }
+    return true;
+  }
+
+  async #handleUserInputCard(event) {
+    const entry = this.#pendingUserInput(event.chatId, event.inputId);
+    if (!entry) {
+      await sendReply(event.messageId, `${event.eventId}-user-input-expired`, "该问题已经处理或已过期。", this.config);
+      return;
+    }
+    const question = (Array.isArray(entry.params?.questions) ? entry.params.questions : [])
+      .find((candidate) => String(candidate?.id || "") === event.questionId);
+    if (!question) {
+      await sendReply(event.messageId, `${event.eventId}-user-input-invalid`, "该问题已经变化，请重新等待新的问题卡片。", this.config);
+      return;
+    }
+    await this.#recordUserInputAnswer(event, entry, question, event.answer);
+  }
+
+  async #handleUserInputText(event) {
+    const entry = this.#pendingUserInput(event.chatId);
+    if (!entry) return false;
+    const question = this.#unansweredUserInputQuestion(entry);
+    if (!question) return false;
+    const options = Array.isArray(question.options) ? question.options : [];
+    let answer = event.content.trim();
+    const numeric = answer.match(/^\d+$/);
+    if (numeric && options[Number(numeric[0]) - 1]) answer = String(options[Number(numeric[0]) - 1].label || "");
+    const option = options.find((candidate) => String(candidate?.label || "").toLocaleLowerCase() === answer.toLocaleLowerCase());
+    if (options.length && !option && !question.isOther) {
+      await sendReply(event.messageId, `${event.eventId}-user-input-help`,
+        `${userInputPromptText(entry.params)}\n\n也可以直接回复选项编号，例如 1。`, this.config);
+      return true;
+    }
+    await this.#recordUserInputAnswer(event, entry, question, answer);
+    return true;
+  }
+
   handleCardAction(event) {
     if (event.type === "control") {
       if (["model", "modelPage", "modelPick", "modelEffort", "modelDefault"].includes(event.action)) {
@@ -2570,6 +2769,10 @@ class BridgeRuntime {
             ? { type: "resumePage", pageStart: event.pageStart }
             : { type: event.action };
       this.route(event, command);
+      return;
+    }
+    if (event.type === "userInput") {
+      this.route(event, event);
       return;
     }
     this.route(event, { ...event, type: "approvalCard" });
@@ -3028,6 +3231,35 @@ class BridgeRuntime {
     }).catch((error) => console.error(`[bridge] plan review card failed: ${error.message}`));
   }
 
+  #queueUserInput(active, message) {
+    const params = message.params || {};
+    const questions = Array.isArray(params.questions) ? params.questions : [];
+    const inputId = randomUUID();
+    const entry = {
+      inputId,
+      chatId: active.chatId,
+      threadId: active.threadId,
+      turnId: String(params.turnId || active.turnId || ""),
+      requestId: message.id,
+      params: { ...params, questions },
+      answers: {},
+    };
+    const pending = this.pendingUserInputs.get(active.chatId) || [];
+    pending.push(entry);
+    this.pendingUserInputs.set(active.chatId, pending);
+    active.sendQueue = active.sendQueue.then(async () => {
+      if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
+      try {
+        await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-user-input-${inputId}`,
+          buildUserInputCard(entry.params, inputId));
+      } catch (error) {
+        console.warn(`[bridge] user input card failed; using text fallback: ${error.message}`);
+        await sendReply(active.event.messageId, `${active.event.eventId}-user-input-${inputId}-text`,
+          userInputPromptText(entry.params), this.config);
+      }
+    }).catch((error) => console.error(`[bridge] user input prompt failed: ${error.message}`));
+  }
+
   #queueApprovalCard(active, key, subject, approvalId) {
     if (active.progressKeys.has(key)) return;
     active.progressKeys.add(key);
@@ -3094,11 +3326,20 @@ class BridgeRuntime {
   }
 
   #onServerRequest(message) {
+    const params = message.params || {};
+    if (message.method === "item/tool/requestUserInput") {
+      const active = this.activeThreads.get(params.threadId) || this.attachedThreads.get(params.threadId);
+      if (!active || !shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) {
+        this.client.respond(message.id, { answers: {} });
+        return;
+      }
+      this.#queueUserInput(active, message);
+      return;
+    }
     if (!["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(message.method)) {
       this.client.respondError(message.id, -32601, `Unsupported server request: ${message.method}`);
       return;
     }
-    const params = message.params || {};
     const active = this.activeThreads.get(params.threadId);
     if (!active) {
       this.client.respond(message.id, { decision: "cancel" });
@@ -3150,6 +3391,21 @@ class BridgeRuntime {
     }
     if (remaining.length) this.pendingApprovals.set(chatId, remaining);
     else this.pendingApprovals.delete(chatId);
+    this.#cancelDetachedUserInputs(chatId, selectedThreadId);
+  }
+
+  #cancelDetachedUserInputs(chatId, selectedThreadId) {
+    const pending = this.pendingUserInputs.get(chatId) || [];
+    const remaining = [];
+    for (const entry of pending) {
+      if (selectedThreadId && entry.threadId === selectedThreadId) {
+        remaining.push(entry);
+        continue;
+      }
+      try { this.client.respond(entry.requestId, { answers: {} }); } catch { /* request already resolved */ }
+    }
+    if (remaining.length) this.pendingUserInputs.set(chatId, remaining);
+    else this.pendingUserInputs.delete(chatId);
   }
 
   async #resolvePending(chatId, decision, oneOnly = false) {
@@ -3172,6 +3428,16 @@ class BridgeRuntime {
     }
     if (remaining.length) this.pendingApprovals.set(chatId, remaining);
     else this.pendingApprovals.delete(chatId);
+    if (!turnId) return;
+    const pendingInputs = this.pendingUserInputs.get(chatId) || [];
+    const remainingInputs = [];
+    for (const entry of pendingInputs) {
+      if (entry.turnId === turnId) {
+        try { this.client.respond(entry.requestId, { answers: {} }); } catch { /* request already resolved */ }
+      } else remainingInputs.push(entry);
+    }
+    if (remainingInputs.length) this.pendingUserInputs.set(chatId, remainingInputs);
+    else this.pendingUserInputs.delete(chatId);
   }
 
   #onClientClosed(error) {
