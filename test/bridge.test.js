@@ -163,6 +163,45 @@ Fr=\frac{a_\eta}{(\beta-1)g_{\mathrm{eff}}}
   assert.match(segments.at(-1).value, /x=1/);
 });
 
+test("splitLatexMarkdown treats inline $$ references as plain text", () => {
+  assert.deepEqual(splitLatexMarkdown("改用 $$ 块级包裹，行内公式保持 \\(x\\)"), [
+    { type: "text", value: "改用 $$ 块级包裹，行内公式保持 " },
+    { type: "math", value: "x", display: false },
+  ]);
+});
+
+test("splitLatexMarkdown requires standalone lines for $$ blocks", () => {
+  assert.deepEqual(splitLatexMarkdown("$$x=y$$ 说明"), [
+    { type: "text", value: "$$x=y$$ 说明" },
+  ]);
+  assert.deepEqual(splitLatexMarkdown("价格 $$x=y$$ 元"), [
+    { type: "text", value: "价格 $$x=y$$ 元" },
+  ]);
+});
+
+test("splitLatexMarkdown keeps multi-line $$ blocks", () => {
+  assert.deepEqual(splitLatexMarkdown("$$\n\\dot{x}=1\n$$"), [
+    { type: "math", value: "\\dot{x}=1", display: true },
+  ]);
+});
+
+test("splitLatexMarkdown does not swallow text around inline $$ references", () => {
+  const text = String.raw`好的，独立公式改用 $$ 块级包裹，行内公式保持 \(...\)。重新发一遍：
+
+先回答概念问题：**"把 \(\boldsymbol{a}\) 看成输入"在形式上完全成立**——一阶线性常微分方程中，\(\boldsymbol{a}\) 无论来自流场还是路径，只要作为给定时间序列，频域关系就严格成立。失效的不是"输入视角"，而是"真实滑移由这个简化方程驱动"这个假设：真实轨迹同时被 \((\nabla\boldsymbol{u})\boldsymbol{s}\) 和路径变化影响，所以实测谱比偏离理论 \(H\)。
+
+**1. 完整滑移控制方程（简化前）**
+
+$$
+\dot{\boldsymbol{s}} + \frac{\boldsymbol{s}}{\tau_p} = (\beta-1)\boldsymbol{a} - (\nabla\boldsymbol{u})\boldsymbol{s}
+$$`;
+  const segments = splitLatexMarkdown(text);
+  const displayBlocks = segments.filter((segment) => segment.type === "math" && segment.display);
+  assert.equal(displayBlocks.length, 1);
+  assert.match(displayBlocks[0].value, /\\dot\{\\boldsymbol\{s\}\}/);
+  assert.ok(segments.some((segment) => segment.type === "text" && segment.value.includes("改用 $$ 块级包裹")));
+});
+
 test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
   const imagePath = resolve(".state", "latex", "formula.png");
   const upload = latexImageUploadSpec(imagePath);

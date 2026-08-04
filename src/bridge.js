@@ -105,6 +105,7 @@ function looksLikeBareFormula(value) {
   const candidate = String(value).trim();
   if (!candidate || candidate.length > 4_000 || /[\u3400-\u9fff]/u.test(candidate)) return false;
   if (/https?:\/\/|^[#/]|```|`/.test(candidate)) return false;
+  if (candidate.includes("$$")) return false;
   const hasOperand = /[A-Za-z0-9]|\\[A-Za-z]+/.test(candidate);
   const hasMathSyntax = /\\[A-Za-z]+|[_^]|[=<>]/.test(candidate);
   return hasOperand && hasMathSyntax;
@@ -209,8 +210,21 @@ export function splitLatexMarkdown(text) {
     let delimiter = "";
     let display = false;
     if (value.startsWith("$$", cursor)) {
-      delimiter = "$$";
-      display = true;
+      const lineStart = value.lastIndexOf("\n", cursor - 1) + 1;
+      const startInLine = value.slice(lineStart, cursor);
+      if (/^\s*$/.test(startInLine)) {
+        const end = value.indexOf("$$", cursor + 2);
+        const lineEnd = end < 0 ? -1 : value.indexOf("\n", end + 2);
+        const afterEnd = end < 0 ? "" : (lineEnd < 0 ? value.slice(end + 2) : value.slice(end + 2, lineEnd));
+        if (end >= 0 && /^\s*$/.test(afterEnd)) {
+          delimiter = "$$";
+          display = true;
+        }
+      }
+      if (!delimiter) {
+        cursor += 2;
+        continue;
+      }
     } else if (value.startsWith("\\[", cursor)) {
       delimiter = "\\]";
       display = true;
