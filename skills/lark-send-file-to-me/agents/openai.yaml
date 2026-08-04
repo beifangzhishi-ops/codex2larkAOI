@@ -1,4 +1,0 @@
-interface:
-  display_name: "飞书发文件给我"
-  short_description: "将指定的本地文件直接发送到用户本人的飞书单聊会话中"
-  default_prompt: "Use $lark-send-file-to-me to send the specified local file to my Feishu direct chat."
