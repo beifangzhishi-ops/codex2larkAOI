@@ -28,6 +28,7 @@ import {
   createRunningThreadAttachment,
   createConsumerReadiness,
   extractFileDirectives,
+  extractMathJaxSvg,
   formatResumeThreads,
   formatLatestTurnReplay,
   formatRunningThreadReplay,
@@ -246,6 +247,17 @@ test("latexCanvasLayout renders inline formulas at a fixed canvas height", () =>
     left: 5,
     top: 3,
   });
+});
+
+test("extractMathJaxSvg returns the top-level SVG even with nested svg elements", () => {
+  const nested = '<mjx-container><svg><g><svg><path></path></svg></g><g></g></svg></mjx-container>';
+  assert.equal(extractMathJaxSvg(nested), '<svg><g><svg><path></path></svg></g><g></g></svg>');
+});
+
+test("extractMathJaxSvg handles plain SVG and rejects malformed output", () => {
+  assert.equal(extractMathJaxSvg('<svg><g></g></svg>'), '<svg><g></g></svg>');
+  assert.throws(() => extractMathJaxSvg("no svg here"), /未生成 SVG 公式/);
+  assert.throws(() => extractMathJaxSvg("<svg><g></g>"), /公式不完整/);
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {

@@ -323,17 +323,21 @@ export function latexCanvasLayout(sourceWidth, sourceHeight, {
   };
 }
 
+export function extractMathJaxSvg(rendered) {
+  const svgStart = rendered.indexOf("<svg");
+  if (svgStart < 0) throw new Error("MathJax 未生成 SVG 公式");
+  const svgEnd = rendered.lastIndexOf("</svg>");
+  if (svgEnd < svgStart) throw new Error("MathJax SVG 公式不完整");
+  return rendered.slice(svgStart, svgEnd + "</svg>".length);
+}
+
 async function renderLatexImage(formula, display = false) {
   mkdirSync(LATEX_DIR, { recursive: true });
   const outputPath = resolve(LATEX_DIR, `${randomUUID()}.png`);
   try {
     const node = latexDocument.convert(formula, { display });
     const rendered = latexAdaptor.outerHTML(node);
-    const svgStart = rendered.indexOf("<svg");
-    if (svgStart < 0) throw new Error("MathJax 未生成 SVG 公式");
-    const svgEnd = rendered.indexOf("</svg>", svgStart);
-    if (svgEnd < 0) throw new Error("MathJax SVG 公式不完整");
-    const svg = rendered.slice(svgStart, svgEnd + "</svg>".length);
+    const svg = extractMathJaxSvg(rendered);
     const source = sharp(Buffer.from(svg), { density: LATEX_RENDER_DENSITY });
     const metadata = await source.metadata();
     const layout = latexCanvasLayout(metadata.width, metadata.height, { display });
