@@ -53,11 +53,11 @@
    - 新 thread 的第一轮任务成功完成后，异步调用模型，根据首轮用户请求和最终答复生成简短、可辨识的中文标题；标题生成不得阻塞首轮答复。
    - 标题生成使用独立的临时 App Server thread，并通过 `thread/start` 的 `ephemeral: true` 隔离，避免污染业务 thread 的历史、恢复列表和飞书消息。
    - 通过 `turn/start.outputSchema` 约束模型仅返回结构化标题。写入前仍需校验并清理换行、Markdown、引号和异常长度；标题建议为 4 至 30 个中文字符，非中文场景允许不超过 60 个字符。
-   - 标题任务默认使用 `CODEX_TITLE_MODEL=gpt-5.6-luna` 和 `CODEX_TITLE_EFFORT=low`，与普通任务的 `CODEX_MODEL` 及聊天级模型设置完全独立。
+   - `CODEX_TITLE_MODEL` 为空或为 `auto` 时进入自动模式，初始偏好 `gpt-5.6-luna`；自动模式保存最后一次可用标题模型，`CODEX_TITLE_EFFORT` 为空或为 `auto` 时取所选模型支持列表的最低档位。
    - 两项配置后续写入 AOI `.env`，修改并重启桥接后生效；实现时通过 `model/list` 校验模型 ID 和强度，不把不受支持的 `none` 静默转换为其他强度。
    - 不硬编码或声称复刻 Codex 桌面 App、IDE 扩展未公开的内部模型、提示词或生成流程。
    - 将首轮内容作为不可信数据处理；标题生成 thread 不执行工具、不访问文件和网络，也不发起审批。
-   - 生成成功后调用目标业务 thread 的 `thread/name/set`。模型调用或名称写入失败时记录有界重试任务，在后续成功轮次后重试；不得用简单截断首条消息的规则标题代替。
+   - 生成成功后调用目标业务 thread 的 `thread/name/set`。前三次标题尝试复用任务级模型和档位；第三次失败后刷新 `model/list`，缓存模型仍可用则将任务置为失败，缓存模型不可用且首个成功业务轮次模型可用则切换模型、更新缓存并重置次数；失败任务只在后续成功轮次后重试，不得用简单截断首条消息的规则标题代替。
    - 同一业务 thread 同时只允许一个标题任务。成功后清除待重试状态，重复完成通知不得重复生成或覆盖已设置标题。
    - 用户体验对齐 Codex 桌面 App/扩展的“由模型生成合适会话标题”，但验收只针对上述公开接口与可观察行为，不宣称内部实现完全一致。
 
@@ -210,6 +210,7 @@ Codex：...
 在现有 `.state/sessions.json` 兼容基础上增加或维护：
 
 - `modelSettings`：聊天级模型策略和思考强度；
+- `autoTitleModel`：自动标题模式下最后一次可用的标题模型；
 - `pendingTitleJobs`：待生成或待写入的 thread 标题任务，包含状态、有限输入摘要、重试次数和最近错误；
 - 原有 `sessions`、`workdirs`、`approvalModes`、`pendingWorkdirQueries` 和 `events` 需向后兼容读取。
 

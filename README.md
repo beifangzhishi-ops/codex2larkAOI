@@ -45,7 +45,7 @@ notepad .env
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
-- `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：仅用于异步生成会话标题，默认分别为 `gpt-5.6-luna` 和 `low`，不会跟随聊天的 `/model` 设置；
+- `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-luna`，三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `CODEX_INTERJECTION_MODE=guide|queue`：新聊天的默认插话模式；`guide` 会将消息注入正在运行的同一会话，`queue` 则等待当前任务结束；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；
@@ -91,7 +91,7 @@ npm run check
 - `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
-- 新建 Codex 会话首轮成功回复后，桥接通过独立的临时线程异步生成简短中文标题；失败任务会有限重试，且不会阻塞业务答复；
+- 新建 Codex 会话首轮成功回复后，桥接通过独立的临时线程异步生成简短中文标题；失败任务仅在后续成功业务轮次中有限重试，且不会阻塞业务答复；达到最终失败状态后不使用用户消息或截断文本替代标题；
 - `/stop`：中断当前选中 thread 的活跃 turn，并清除该 thread 尚未开始的任务；不停止桥接服务或已经切换离开的后台 thread；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
 - `/approval manual`：把审批请求作为飞书交互卡片发出，可点击“允许一次”“本会话允许”“拒绝”；按钮不可用时仍可使用下列文字命令；
@@ -153,7 +153,8 @@ MEDIA:C:\absolute\path\plot.png
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；
 - `modelSettings`：聊天到后续轮次的模型和思考强度策略；
-- `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、重试次数和最近错误；
+- `autoTitleModel`：自动标题模式下最后一次可用的标题模型；
+- `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、首个成功业务轮次模型、任务级标题模型/档位、重试次数和最近错误；
 - `markdownDelivery`：机器人 `codex` 文件夹的 token、链接和已授予编辑权限的允许用户；
 - `events`：事件去重窗口。
 
