@@ -30,6 +30,7 @@ import {
   createConsumerReadiness,
   extractFileDirectives,
   extractMathJaxSvg,
+  formatTemperatureReport,
   formatResumeThreads,
   formatLatestTurnReplay,
   formatRunningThreadReplay,
@@ -59,6 +60,7 @@ import {
   parseControlCardAction,
   parseUserInputCardAction,
   parseDotEnv,
+  queryTemperature,
   reactionArgs,
   reactionIdFromOutput,
   resumeThreadStatusLabel,
@@ -692,6 +694,7 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
   assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
   assert.deepEqual(parseControlCommand("/screen"), { type: "screen" });
+  assert.deepEqual(parseControlCommand("/temperature"), { type: "temperature" });
   assert.deepEqual(parseControlCommand("/model"), { type: "model", modelId: "", effort: "" });
   assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high"), {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
@@ -699,6 +702,8 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.equal(parseControlCommand("/approval"), null);
   assert.equal(parseControlCommand("/interject pause"), null);
   assert.equal(parseControlCommand("/screen now"), null);
+  assert.equal(parseControlCommand("/temperature now"), null);
+  assert.equal(parseControlCommand("/temp"), null);
   assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
   assert.equal(parseControlCommand("/rename"), null);
   assert.deepEqual(parseControlCommand("/model default high"), {
@@ -734,6 +739,66 @@ test("screenshot command captures physical pixels across the DPI-aware virtual d
   assert.match(command, /GetSystemMetrics\(79\)/);
   assert.match(command, /CopyFromScreen/);
   assert.match(command, /screen''s\.png/);
+});
+
+const mockLhmData = {
+  Children: [
+    {
+      Name: "AMD Ryzen 7 H 255",
+      Sensors: [{ Name: "Core (Tctl/Tdie)", Type: "Temperature", Value: 62.5, Min: 45.2, Max: 78.1 }],
+      Children: [],
+    },
+    {
+      Name: "Samsung SSD 990 PRO 2TB",
+      Sensors: [{ Name: "Temperature", Type: "Temperature", Value: 41.0, Min: 30.0, Max: 52.0 }],
+      Children: [],
+    },
+    {
+      Name: "AMD Radeon 780M Graphics",
+      Sensors: [{ Name: "GPU Core", Type: "Temperature", Value: 55.3, Min: 40.0, Max: 70.0 }],
+      Children: [],
+    },
+    {
+      Name: "ACPI",
+      Sensors: [
+        { Name: "CPU Fan", Type: "Fan", Value: 3200 },
+        { Name: "Case Fan", Type: "Fan", Value: 800 },
+      ],
+      Children: [],
+    },
+  ],
+};
+
+test("temperature report formats CPU, disk, GPU and fans from LibreHardwareMonitor data", () => {
+  const report = formatTemperatureReport(mockLhmData, new Date("2026-08-05T10:30:00+08:00"));
+  assert.match(report, /🌡 本机温度/);
+  assert.match(report, /CPU：62\.5 °C（最低 45\.2 \/ 最高 78\.1）/);
+  assert.match(report, /磁盘：Samsung SSD 990 PRO 2TB 41\.0 °C/);
+  assert.match(report, /GPU：55\.3 °C/);
+  assert.match(report, /风扇：CPU Fan 3200 RPM；Case Fan 800 RPM/);
+});
+
+test("temperature report tolerates numeric sensor types and empty data", () => {
+  const numericTypes = {
+    Children: [{
+      Name: "AMD Ryzen 7 H 255",
+      Sensors: [{ Name: "CPU Package", Type: 2, Value: 60.0 }],
+      Children: [],
+    }],
+  };
+  assert.match(formatTemperatureReport(numericTypes, new Date("2026-08-05T10:30:00+08:00")), /CPU：60\.0 °C/);
+  assert.equal(formatTemperatureReport(null, new Date("2026-08-05T10:30:00+08:00")),
+    "🌡 本机没有可用的温度或风扇传感器，请确认 LibreHardwareMonitor 已正确安装并识别本机硬件。");
+});
+
+test("queryTemperature fetches data and rejects on HTTP errors", async () => {
+  const data = { Children: [] };
+  const fakeFetch = async () => ({ ok: true, json: async () => data });
+  assert.equal(await queryTemperature("http://127.0.0.1:8085/data.json", { fetchImpl: fakeFetch }), data);
+  await assert.rejects(
+    () => queryTemperature("http://127.0.0.1:8085/data.json", { fetchImpl: async () => ({ ok: false, status: 503 }) }),
+    /HTTP 503/,
+  );
 });
 
 test("resume helpers format compact pages and select history without ambiguous title guesses", () => {
@@ -807,6 +872,7 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(card.elements[0].content, /\/default/);
   assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
   assert.match(card.elements[0].content, /\/screen/);
+  assert.match(card.elements[0].content, /\/temperature/);
   assert.match(card.elements[0].content, /\/interject guide\|queue/);
 });
 
@@ -1407,13 +1473,14 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(config.reactions, true);
   assert.equal(config.titleModel, "auto");
   assert.equal(config.titleEffort, "auto");
+  assert.equal(config.temperatureApiUrl, "http://127.0.0.1:8085/data.json");
   assert.equal("projectInstructions" in config, false);
   const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
   assert.equal(channelContext.kind, "application");
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
-  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/resume、\/model、\/screen/);
+  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/resume、\/model、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
@@ -1426,6 +1493,11 @@ test("buildConfig validates and exposes approval defaults", () => {
     CODEX_TITLE_MODEL: "gpt-title",
     CODEX_TITLE_EFFORT: "low",
   }).titleModel, "gpt-title");
+  assert.equal(buildConfig({
+    FEISHU_ALLOWED_OPEN_IDS: "ou_test",
+    CODEX_WORKDIR: process.cwd(),
+    TEMPERATURE_API_URL: "http://127.0.0.1:9000/data.json",
+  }).temperatureApiUrl, "http://127.0.0.1:9000/data.json");
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "*" }), /不允许通配符/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_APPROVAL_MODE: "sometimes" }), /auto 或 manual/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_INTERJECTION_MODE: "sometimes" }), /guide 或 queue/);

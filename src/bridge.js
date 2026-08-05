@@ -38,7 +38,7 @@ const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
   "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。桥接会把 .md 文件转换为机器人 codex 文件夹中的飞书云文档，其他文件保持原生附件。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
-  "桥接负责 /cd、/new、/resume、/model、/screen、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /cd、/new、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -460,11 +460,119 @@ export function parseControlCommand(text) {
   if (lower === "/status") return { type: "status" };
   if (lower === "/help") return { type: "help" };
   if (lower === "/screen") return { type: "screen" };
+  if (lower === "/temperature") return { type: "temperature" };
   const model = value.match(/^\/model(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
   if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
   const cd = value.match(/^\/cd(?:\s+(.+))?$/i);
   if (cd) return { type: "cd", query: (cd[1] || "").trim() };
   return null;
+}
+
+const TEMPERATURE_SENSOR_TYPE = new Set(["Temperature", 2]);
+const FAN_SENSOR_TYPE = new Set(["Fan", 4]);
+const CPU_TEMPERATURE_PRIORITY = [
+  "CPU Package",
+  "CPU (Tctl/Tdie)",
+  "Core (Tctl/Tdie)",
+  "Tctl/Tdie",
+  "Tdie",
+  "Tctl",
+  "CPU Core",
+  "Core",
+  "CPU",
+];
+const CPU_NAME_PATTERN = /cpu|ryzen|amd|core|tctl|tdie/i;
+const GPU_NAME_PATTERN = /gpu|radeon/i;
+const DISK_NAME_PATTERN = /nvme|ssd|hdd|samsung|wdc|western digital|sandisk|crucial|kingston|seagate|toshiba|kioxia|sabrent|st[0-9]|wd[0-9]/i;
+
+function collectSensors(data) {
+  const sensors = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    for (const sensor of Array.isArray(node.Sensors) ? node.Sensors : []) {
+      sensors.push({ ...sensor, nodeName: String(node.Name || "") });
+    }
+    for (const child of Array.isArray(node.Children) ? node.Children : []) walk(child);
+  };
+  walk(data);
+  return sensors;
+}
+
+function sensorLabel(sensor) {
+  const name = String(sensor.Name || "").trim();
+  const nodeName = String(sensor.nodeName || "").trim();
+  if (/^temperature$/i.test(name) && nodeName) return nodeName;
+  return name || nodeName || "未知传感器";
+}
+
+function formatTemperatureSensor(sensor) {
+  const value = Number(sensor.Value);
+  const min = Number(sensor.Min);
+  const max = Number(sensor.Max);
+  const base = `${Number.isFinite(value) ? value.toFixed(1) : "--"} °C`;
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return base;
+  return `${base}（最低 ${min.toFixed(1)} / 最高 ${max.toFixed(1)}）`;
+}
+
+function selectCpuTemperature(sensors) {
+  const candidates = sensors.filter((sensor) =>
+    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
+    CPU_NAME_PATTERN.test(`${sensor.nodeName} ${sensor.Name}`));
+  if (!candidates.length) return null;
+  for (const preferred of CPU_TEMPERATURE_PRIORITY) {
+    const match = candidates.find((sensor) =>
+      String(sensor.Name).toLowerCase().includes(preferred.toLowerCase()));
+    if (match) return match;
+  }
+  return candidates[0];
+}
+
+function selectGpuTemperature(sensors) {
+  return sensors.find((sensor) =>
+    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
+    GPU_NAME_PATTERN.test(`${sensor.nodeName} ${sensor.Name}`)) || null;
+}
+
+function selectDiskTemperature(sensors) {
+  return sensors.find((sensor) =>
+    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
+    DISK_NAME_PATTERN.test(sensor.nodeName) &&
+    /temperature/i.test(String(sensor.Name))) || null;
+}
+
+export function formatTemperatureReport(data, now = new Date()) {
+  const sensors = collectSensors(data);
+  const fans = sensors
+    .filter((sensor) => FAN_SENSOR_TYPE.has(sensor.Type) && Number.isFinite(Number(sensor.Value)) && Number(sensor.Value) > 0)
+    .sort((a, b) => Number(b.Value) - Number(a.Value))
+    .slice(0, 3);
+  const cpu = selectCpuTemperature(sensors);
+  const disk = selectDiskTemperature(sensors);
+  const gpu = selectGpuTemperature(sensors);
+  if (!cpu && !disk && !gpu && !fans.length) {
+    return "🌡 本机没有可用的温度或风扇传感器，请确认 LibreHardwareMonitor 已正确安装并识别本机硬件。";
+  }
+  const lines = [`🌡 本机温度（${now.toLocaleString("zh-CN", { hour12: false })}）`];
+  lines.push(`CPU：${cpu ? formatTemperatureSensor(cpu) : "未检测到温度传感器"}`);
+  if (disk) lines.push(`磁盘：${sensorLabel(disk)} ${formatTemperatureSensor(disk)}`);
+  if (gpu) lines.push(`GPU：${formatTemperatureSensor(gpu)}`);
+  if (fans.length) lines.push(`风扇：${fans.map((sensor) => `${sensorLabel(sensor)} ${Math.round(Number(sensor.Value))} RPM`).join("；")}`);
+  return lines.join("\n");
+}
+
+export async function queryTemperature(apiUrl, { timeoutMs = 3_000, fetchImpl = globalThis.fetch } = {}) {
+  if (typeof fetchImpl !== "function") throw new Error("当前 Node 环境缺少 fetch 支持。");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(apiUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error(`温度服务返回 HTTP ${response.status}。`);
+    const data = await response.json();
+    if (!data || typeof data !== "object") throw new Error("温度服务返回了无效数据。");
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function threadName(thread) {
@@ -1196,6 +1304,7 @@ export function buildConfig(env) {
     timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 1_800_000,
     replyChars: Math.min(Math.max(Number(env.FEISHU_REPLY_CHARS) || 3500, 500), 8000),
     eventCacheSize: Math.min(Math.max(Number(env.EVENT_CACHE_SIZE) || 1000, 100), 10_000),
+    temperatureApiUrl: String(env.TEMPERATURE_API_URL || "http://127.0.0.1:8085/data.json").trim() || "http://127.0.0.1:8085/data.json",
     turnAdditionalContext: AOI_FEISHU_TURN_CONTEXT,
   };
 }
@@ -1584,7 +1693,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
         "`/plan` 进入计划模式 · `/default` 切回默认执行模式",
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
         "`/goal pause|resume|clear` 暂停、恢复或清除 Goal",
-        "`/screen` 截取桥接主机屏幕",
+        "`/screen` 截取桥接主机屏幕 · `/temperature` 查询本机温度",
         "`/approval auto|manual` 切换审批 · `/interject guide|queue` 切换插话",
         "`/status` 查看状态",
       ].join("\n") },
@@ -2317,7 +2426,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -2332,6 +2441,17 @@ class BridgeRuntime {
       } finally {
         if (path && existsSync(path)) unlinkSync(path);
       }
+      return;
+    }
+    if (command?.type === "temperature") {
+      let report;
+      try {
+        report = formatTemperatureReport(await queryTemperature(this.config.temperatureApiUrl));
+      } catch (error) {
+        console.warn(`[bridge] temperature query failed: ${error.message}`);
+        report = "🌡 查询本机温度失败：无法连接温度服务（LibreHardwareMonitor）。请确认 LibreHardwareMonitor 已启动、以管理员权限运行，且其远程网络服务器监听 127.0.0.1:8085。";
+      }
+      await sendReply(event.messageId, `${event.eventId}-temperature`, report, this.config);
       return;
     }
     if (command?.type === "modelCard") {

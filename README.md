@@ -91,6 +91,7 @@ npm run check
 - `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
+- `/temperature`：查询桥接主机本机温度（CPU、磁盘、风扇、GPU），由桥接直接读取 LibreHardwareMonitor 的温度服务并回复，不占用 Codex 会话；
 - 新建 Codex 会话收到首轮用户消息后，桥接立即通过独立的临时线程异步生成简短中文标题，无需等待首轮业务回复成功；失败任务仅在后续业务轮次中有限重试，且不会阻塞业务答复；达到最终失败状态后不使用用户消息或截断文本替代标题；
 - `/stop`：中断当前选中 thread 的活跃 turn，并清除该 thread 尚未开始的任务；不停止桥接服务或已经切换离开的后台 thread；
 - `/approval auto`：使用 App Server Auto-review 处理后续轮次的审批，仍受工作区沙箱限制；
@@ -104,6 +105,17 @@ npm run check
 - `/help`：显示带有继续对话、模型设置、切换审批模式、切换插话模式、查看状态和停止操作按钮的交互卡片；两个模式按钮均会在原卡片内刷新为可切换的另一种模式；`/new` 与 `/screen` 保留为卡片中的文字命令，不提供按钮。
 
 桥接只识别以上完整斜杠命令。自然语言中的“停止执行”“切换项目”“改为自动审批”等内容始终作为普通 Codex 任务处理。
+
+## 查询本机温度
+
+`/temperature` 由桥接直接读取本机 LibreHardwareMonitor（LHM）的温度服务（默认 `http://127.0.0.1:8085/data.json`），返回 CPU、磁盘、风扇、GPU 温度。LHM 需要以管理员权限运行才能读取底层传感器，首次配置步骤：
+
+1. 以管理员身份运行 `scripts\install-lhm.cmd`：优先通过 winget 安装 LHM，并创建“登录时以最高权限运行”的计划任务 `LibreHardwareMonitor` 实现开机自启；
+2. 手动以管理员运行一次 LHM，在“选项 → 远程网络服务器（Remote web server）”中勾选“运行”；
+3. 用 `curl.exe http://127.0.0.1:8085/data.json` 确认能返回 JSON；
+4. 在飞书发送 `/temperature` 即可查询。
+
+LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。服务地址可用 `.env` 的 `TEMPERATURE_API_URL` 覆盖；桥接只读取本机回环地址，不提升自身权限，LHM 作为独立进程常驻后台。
 
 ## 过程消息
 
