@@ -482,46 +482,66 @@ const CPU_TEMPERATURE_PRIORITY = [
   "CPU",
 ];
 const CPU_NAME_PATTERN = /cpu|ryzen|amd|core|tctl|tdie/i;
-const GPU_NAME_PATTERN = /gpu|radeon/i;
+const GPU_NAME_PATTERN = /gpu|radeon|graphics|geforce|rtx|gtx|arc/i;
 const DISK_NAME_PATTERN = /nvme|ssd|hdd|samsung|wdc|western digital|sandisk|crucial|kingston|seagate|toshiba|kioxia|sabrent|st[0-9]|wd[0-9]/i;
+const MEMORY_NAME_PATTERN = /memory|dimm|ram/i;
 
 function collectSensors(data) {
   const sensors = [];
-  const walk = (node) => {
+  const walk = (node, ancestors = []) => {
     if (!node || typeof node !== "object") return;
-    for (const sensor of Array.isArray(node.Sensors) ? node.Sensors : []) {
-      sensors.push({ ...sensor, nodeName: String(node.Name || "") });
+    const type = node.Type;
+    const text = String(node.Text || "");
+    if (text && (typeof type === "string" || typeof type === "number")) {
+      const hardware = [...ancestors].reverse().find((item) => String(item.HardwareId || ""));
+      sensors.push({
+        name: text,
+        type,
+        value: node.Value,
+        min: node.Min,
+        max: node.Max,
+        nodeName: String(hardware?.Text || ""),
+        path: [...ancestors.map((item) => String(item.Text || "")), text].join(" / "),
+        hardwareId: String(node.HardwareId || hardware?.HardwareId || ""),
+      });
     }
-    for (const child of Array.isArray(node.Children) ? node.Children : []) walk(child);
+    for (const child of Array.isArray(node.Children) ? node.Children : []) {
+      walk(child, [...ancestors, node]);
+    }
   };
   walk(data);
   return sensors;
 }
 
+function parseSensorNumber(value) {
+  const parsed = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function sensorLabel(sensor) {
-  const name = String(sensor.Name || "").trim();
+  const name = String(sensor.name || "").trim();
   const nodeName = String(sensor.nodeName || "").trim();
-  if (/^temperature$/i.test(name) && nodeName) return nodeName;
+  if (/^(temperature|temperature #\d+|composite temperature)$/i.test(name) && nodeName) return nodeName;
   return name || nodeName || "未知传感器";
 }
 
 function formatTemperatureSensor(sensor) {
-  const value = Number(sensor.Value);
-  const min = Number(sensor.Min);
-  const max = Number(sensor.Max);
-  const base = `${Number.isFinite(value) ? value.toFixed(1) : "--"} °C`;
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return base;
+  const value = parseSensorNumber(sensor.value);
+  const min = parseSensorNumber(sensor.min);
+  const max = parseSensorNumber(sensor.max);
+  const base = `${value === null ? "--" : value.toFixed(1)} °C`;
+  if (min === null || max === null) return base;
   return `${base}（最低 ${min.toFixed(1)} / 最高 ${max.toFixed(1)}）`;
 }
 
 function selectCpuTemperature(sensors) {
   const candidates = sensors.filter((sensor) =>
-    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
-    CPU_NAME_PATTERN.test(`${sensor.nodeName} ${sensor.Name}`));
+    TEMPERATURE_SENSOR_TYPE.has(sensor.type) &&
+    (CPU_NAME_PATTERN.test(sensor.path) || CPU_NAME_PATTERN.test(sensor.name)));
   if (!candidates.length) return null;
   for (const preferred of CPU_TEMPERATURE_PRIORITY) {
     const match = candidates.find((sensor) =>
-      String(sensor.Name).toLowerCase().includes(preferred.toLowerCase()));
+      String(sensor.name).toLowerCase().includes(preferred.toLowerCase()));
     if (match) return match;
   }
   return candidates[0];
@@ -529,34 +549,45 @@ function selectCpuTemperature(sensors) {
 
 function selectGpuTemperature(sensors) {
   return sensors.find((sensor) =>
-    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
-    GPU_NAME_PATTERN.test(`${sensor.nodeName} ${sensor.Name}`)) || null;
+    TEMPERATURE_SENSOR_TYPE.has(sensor.type) &&
+    (GPU_NAME_PATTERN.test(sensor.path) || /\/gpu\//i.test(sensor.hardwareId)) &&
+    !/\/amdcpu\/|ryzen|intel\s*core|cpu/i.test(`${sensor.hardwareId} ${sensor.path}`)) || null;
 }
 
 function selectDiskTemperature(sensors) {
   return sensors.find((sensor) =>
-    TEMPERATURE_SENSOR_TYPE.has(sensor.Type) &&
-    DISK_NAME_PATTERN.test(sensor.nodeName) &&
-    /temperature/i.test(String(sensor.Name))) || null;
+    TEMPERATURE_SENSOR_TYPE.has(sensor.type) &&
+    (DISK_NAME_PATTERN.test(sensor.path) || /\/nvme\//i.test(sensor.hardwareId) || /\/hdd\//i.test(sensor.hardwareId)) &&
+    /temperature|composite/i.test(sensor.name)) || null;
+}
+
+function selectMemoryTemperature(sensors) {
+  return sensors.find((sensor) =>
+    TEMPERATURE_SENSOR_TYPE.has(sensor.type) &&
+    (MEMORY_NAME_PATTERN.test(sensor.path) || /\/memory\//i.test(sensor.hardwareId)) &&
+    /dimm|temperature/i.test(sensor.name)) || null;
 }
 
 export function formatTemperatureReport(data, now = new Date()) {
   const sensors = collectSensors(data);
   const fans = sensors
-    .filter((sensor) => FAN_SENSOR_TYPE.has(sensor.Type) && Number.isFinite(Number(sensor.Value)) && Number(sensor.Value) > 0)
-    .sort((a, b) => Number(b.Value) - Number(a.Value))
+    .map((sensor) => ({ ...sensor, numericValue: parseSensorNumber(sensor.value) }))
+    .filter((sensor) => FAN_SENSOR_TYPE.has(sensor.type) && sensor.numericValue !== null && sensor.numericValue > 0)
+    .sort((a, b) => b.numericValue - a.numericValue)
     .slice(0, 3);
   const cpu = selectCpuTemperature(sensors);
   const disk = selectDiskTemperature(sensors);
   const gpu = selectGpuTemperature(sensors);
-  if (!cpu && !disk && !gpu && !fans.length) {
+  const memory = selectMemoryTemperature(sensors);
+  if (!cpu && !disk && !gpu && !memory && !fans.length) {
     return "🌡 本机没有可用的温度或风扇传感器，请确认 LibreHardwareMonitor 已正确安装并识别本机硬件。";
   }
   const lines = [`🌡 本机温度（${now.toLocaleString("zh-CN", { hour12: false })}）`];
   lines.push(`CPU：${cpu ? formatTemperatureSensor(cpu) : "未检测到温度传感器"}`);
   if (disk) lines.push(`磁盘：${sensorLabel(disk)} ${formatTemperatureSensor(disk)}`);
   if (gpu) lines.push(`GPU：${formatTemperatureSensor(gpu)}`);
-  if (fans.length) lines.push(`风扇：${fans.map((sensor) => `${sensorLabel(sensor)} ${Math.round(Number(sensor.Value))} RPM`).join("；")}`);
+  if (memory) lines.push(`内存：${sensorLabel(memory)} ${formatTemperatureSensor(memory)}`);
+  if (fans.length) lines.push(`风扇：${fans.map((sensor) => `${sensorLabel(sensor)} ${Math.round(sensor.numericValue)} RPM`).join("；")}`);
   return lines.join("\n");
 }
 

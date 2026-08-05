@@ -742,48 +742,86 @@ test("screenshot command captures physical pixels across the DPI-aware virtual d
 });
 
 const mockLhmData = {
+  Text: "Sensor",
   Children: [
     {
-      Name: "AMD Ryzen 7 H 255",
-      Sensors: [{ Name: "Core (Tctl/Tdie)", Type: "Temperature", Value: 62.5, Min: 45.2, Max: 78.1 }],
-      Children: [],
-    },
-    {
-      Name: "Samsung SSD 990 PRO 2TB",
-      Sensors: [{ Name: "Temperature", Type: "Temperature", Value: 41.0, Min: 30.0, Max: 52.0 }],
-      Children: [],
-    },
-    {
-      Name: "AMD Radeon 780M Graphics",
-      Sensors: [{ Name: "GPU Core", Type: "Temperature", Value: 55.3, Min: 40.0, Max: 70.0 }],
-      Children: [],
-    },
-    {
-      Name: "ACPI",
-      Sensors: [
-        { Name: "CPU Fan", Type: "Fan", Value: 3200 },
-        { Name: "Case Fan", Type: "Fan", Value: 800 },
+      Text: "NOHA",
+      Children: [
+        {
+          Text: "AMD Ryzen 7 H 255 w/ Radeon 780M Graphics",
+          HardwareId: "/amdcpu/0",
+          Children: [{
+            Text: "Temperatures",
+            Children: [{
+              Text: "Core (Tctl/Tdie)", Type: "Temperature", Value: "62.5 °C", Min: "45.2 °C", Max: "78.1 °C",
+            }],
+          }],
+        },
+        {
+          Text: "Samsung SSD 990 PRO 2TB",
+          HardwareId: "/nvme/0",
+          Children: [{
+            Text: "Temperatures",
+            Children: [{
+              Text: "Composite Temperature", Type: "Temperature", Value: "41.0 °C", Min: "30.0 °C", Max: "52.0 °C",
+            }],
+          }],
+        },
+        {
+          Text: "Shenzhen Techwinsemi Technology DIMM",
+          HardwareId: "/memory/dimm/0",
+          Children: [{
+            Text: "Temperatures",
+            Children: [{
+              Text: "DIMM #0", Type: "Temperature", Value: "45.3 °C", Min: "43.8 °C", Max: "45.5 °C",
+            }],
+          }],
+        },
+        {
+          Text: "AMD Radeon 780M Graphics",
+          HardwareId: "/gpu/0",
+          Children: [{
+            Text: "Temperatures",
+            Children: [{
+              Text: "GPU Core", Type: "Temperature", Value: "55.3 °C", Min: "40.0 °C", Max: "70.0 °C",
+            }],
+          }],
+        },
+        {
+          Text: "ACPI",
+          Children: [{
+            Text: "Fans",
+            Children: [
+              { Text: "CPU Fan", Type: "Fan", Value: "3200 RPM" },
+              { Text: "Case Fan", Type: "Fan", Value: "800 RPM" },
+            ],
+          }],
+        },
       ],
-      Children: [],
     },
   ],
 };
 
-test("temperature report formats CPU, disk, GPU and fans from LibreHardwareMonitor data", () => {
+test("temperature report formats CPU, disk, memory, GPU and fans from LibreHardwareMonitor data", () => {
   const report = formatTemperatureReport(mockLhmData, new Date("2026-08-05T10:30:00+08:00"));
   assert.match(report, /🌡 本机温度/);
   assert.match(report, /CPU：62\.5 °C（最低 45\.2 \/ 最高 78\.1）/);
   assert.match(report, /磁盘：Samsung SSD 990 PRO 2TB 41\.0 °C/);
   assert.match(report, /GPU：55\.3 °C/);
+  assert.match(report, /内存：DIMM #0 45\.3 °C/);
   assert.match(report, /风扇：CPU Fan 3200 RPM；Case Fan 800 RPM/);
 });
 
 test("temperature report tolerates numeric sensor types and empty data", () => {
   const numericTypes = {
+    Text: "Sensor",
     Children: [{
-      Name: "AMD Ryzen 7 H 255",
-      Sensors: [{ Name: "CPU Package", Type: 2, Value: 60.0 }],
-      Children: [],
+      Text: "AMD Ryzen 7 H 255",
+      HardwareId: "/amdcpu/0",
+      Children: [{
+        Text: "Temperatures",
+        Children: [{ Text: "CPU Package", Type: 2, Value: "60.0 °C" }],
+      }],
     }],
   };
   assert.match(formatTemperatureReport(numericTypes, new Date("2026-08-05T10:30:00+08:00")), /CPU：60\.0 °C/);
