@@ -4,38 +4,40 @@ chcp 65001 >nul
 
 set "LHM_DIR=C:\Program Files\LibreHardwareMonitor"
 
-echo 正在检查管理员权限...
+echo Checking administrator privileges...
 net session >nul 2>&1
 if errorlevel 1 (
-    echo 需要以管理员身份运行本脚本：请在资源管理器中右键选择“以管理员身份运行”。
+    echo Please run this script as Administrator: right-click and select "Run as administrator".
     pause
     exit /b 1
 )
 
 where winget >nul 2>&1
 if errorlevel 1 (
-    echo 未找到 winget，请手动下载 LibreHardwareMonitor 便携版并解压到 %LHM_DIR%：
+    echo winget not found. Please download the LibreHardwareMonitor portable release manually:
     echo https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest
+    echo and extract it to %LHM_DIR%
 ) else (
-    echo 正在通过 winget 安装 LibreHardwareMonitor...
+    echo Installing LibreHardwareMonitor via winget...
     winget install --id LibreHardwareMonitor.LibreHardwareMonitor --accept-package-agreements --accept-source-agreements
-    if errorlevel 1 echo winget 安装未成功，请检查网络或手动安装。
+    if errorlevel 1 echo winget install failed. Please check the network or install manually.
 )
 
 if not exist "%LHM_DIR%\LibreHardwareMonitor.exe" (
-    echo 未找到 %LHM_DIR%\LibreHardwareMonitor.exe，请确认安装位置后重新运行本脚本。
+    echo %LHM_DIR%\LibreHardwareMonitor.exe not found. Please confirm the install location and run this script again.
     pause
     exit /b 1
 )
 
-echo 正在创建开机自启计划任务（登录时以最高权限运行）...
+echo Creating startup scheduled task (run with highest privileges at logon)...
 schtasks /Create /TN "LibreHardwareMonitor" /TR "\"%LHM_DIR%\LibreHardwareMonitor.exe\" --start-minimized" /SC ONLOGON /RL HIGHEST /F
 
 echo.
-echo 安装完成。首次使用请完成以下步骤：
-echo 1. 手动运行 %LHM_DIR%\LibreHardwareMonitor.exe（以管理员身份）；
-echo 2. 在“选项 - 远程网络服务器（Remote web server）”中勾选“运行”；
-echo 3. 用 curl.exe 访问 http://127.0.0.1:8085/data.json，确认返回 JSON。
-echo 之后即可在飞书向机器人发送 /temperature 查询本机温度。
+echo Done. First-time setup:
+echo 1. Run %LHM_DIR%\LibreHardwareMonitor.exe as administrator once.
+echo 2. In "Options - Remote web server", enable "Run".
+echo 3. Verify http://127.0.0.1:8085/data.json returns JSON:
+echo    curl.exe http://127.0.0.1:8085/data.json
+echo 4. Send /temperature to the bot in Feishu.
 pause
 exit /b 0
