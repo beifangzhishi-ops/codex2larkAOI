@@ -45,7 +45,7 @@ notepad .env
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
-- `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-luna`，三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
+- `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-terra`（经 CodexModelProxy 中转的 DeepSeek-V4-Flash），三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `CODEX_INTERJECTION_MODE=guide|queue`：新聊天的默认插话模式；`guide` 会将消息注入正在运行的同一会话，`queue` 则等待当前任务结束；
 - `FEISHU_ALLOW_GROUPS=false`：默认禁用群聊；

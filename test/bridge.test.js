@@ -988,6 +988,7 @@ test("model catalog and selection use only server-supported model efforts", () =
 });
 
 test("automatic title fallback validates the cached model after three failures", () => {
+  assert.equal(DEFAULT_TITLE_MODEL, "gpt-5.6-terra");
   const catalog = normalizeModelCatalog({ data: [
     {
       id: "session", model: "gpt-session", displayName: "会话模型",

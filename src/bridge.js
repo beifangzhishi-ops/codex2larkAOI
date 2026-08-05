@@ -602,7 +602,8 @@ const TITLE_OUTPUT_SCHEMA = {
   additionalProperties: false,
 };
 
-export const DEFAULT_TITLE_MODEL = "gpt-5.6-luna";
+// CodexModelProxy 中转入口 slug，经中转映射到 DeepSeek-V4-Flash（deepseek-v4-flash）。
+export const DEFAULT_TITLE_MODEL = "gpt-5.6-terra";
 const TITLE_MAX_ATTEMPTS = 3;
 
 const TITLE_BASE_INSTRUCTIONS = [
