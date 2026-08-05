@@ -690,7 +690,7 @@ export function buildTitleTurnParams(threadId, job, model, effort) {
     threadId,
     input: [{
       type: "text",
-      text: "根据 title-source 中的首轮请求和最终答复生成标题。优先使用 4 至 30 个中文字符；非中文场景不超过 60 个字符。不要复述答案。",
+      text: "根据 title-source 中的首轮请求生成标题；若同时提供最终答复，可参考最终答复修正。优先使用 4 至 30 个中文字符；非中文场景不超过 60 个字符。不要复述答案。",
     }],
     additionalContext: {
       "codex2lark.title-source": {
@@ -3145,6 +3145,14 @@ class BridgeRuntime {
         succeeded = true;
         return;
       }
+      const titleJob = this.state.pendingTitleJobs[snapshot.threadId];
+      if (titleJob?.state === "awaitingFirstTurn" && String(event.content || "").trim()) {
+        Object.assign(titleJob, createPendingTitleJob(
+          snapshot.threadId, snapshot.cwd, event.content, "", snapshot.model,
+        ));
+        saveState(this.state);
+      }
+      this.#retryPendingTitleJobs();
       const completed = await this.#runTurn(task);
       const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd });
       if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
@@ -3155,13 +3163,6 @@ class BridgeRuntime {
         console.log(`[bridge] suppressed detached thread output thread=${snapshot.threadId} chat=${event.chatId}`);
       }
       succeeded = true;
-      const titleJob = this.state.pendingTitleJobs[snapshot.threadId];
-      if (titleJob?.state === "awaitingFirstTurn") {
-        Object.assign(titleJob, createPendingTitleJob(
-          snapshot.threadId, snapshot.cwd, event.content, completed.answer, snapshot.model,
-        ));
-        saveState(this.state);
-      }
       this.#retryPendingTitleJobs();
     } catch (error) {
       console.error(error);
