@@ -10,6 +10,7 @@ import {
   approvalCardUpdateArgs,
   buildConfig,
   buildApprovalCard,
+  buildTurnCollaborationMode,
   buildEffortCard,
   buildHelpCard,
   buildModelCard,
@@ -414,6 +415,25 @@ test("turn settings are immutable routing-time snapshots", () => {
   assert.equal(snapshot.approvalMode, "manual");
   assert.equal(snapshot.model, "gpt-old");
   assert.equal(snapshot.effort, "high");
+});
+
+test("buildTurnCollaborationMode carries resolved plan/default mode settings", () => {
+  assert.deepEqual(buildTurnCollaborationMode("plan", "gpt-5.6-terra", "max"), {
+    mode: "plan",
+    settings: {
+      model: "gpt-5.6-terra",
+      reasoning_effort: "max",
+      developer_instructions: null,
+    },
+  });
+  assert.deepEqual(buildTurnCollaborationMode("", "gpt-sol", "high"), {
+    mode: "default",
+    settings: {
+      model: "gpt-sol",
+      reasoning_effort: "high",
+      developer_instructions: null,
+    },
+  });
 });
 
 test("thread output follows the chat's current selection instead of the original routing snapshot", () => {

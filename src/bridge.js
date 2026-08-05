@@ -1967,6 +1967,17 @@ export function snapshotTurnSettings({ threadId, cwd, approvalMode, model, effor
   });
 }
 
+export function buildTurnCollaborationMode(mode, model, effort) {
+  return {
+    mode: String(mode || "default"),
+    settings: {
+      model: String(model),
+      reasoning_effort: String(effort),
+      developer_instructions: null,
+    },
+  };
+}
+
 export function shouldDeliverThreadOutput(state, chatId, threadId) {
   return Boolean(threadId) && state?.sessions?.[chatId] === threadId;
 }
@@ -3201,6 +3212,9 @@ class BridgeRuntime {
         sandboxPolicy: turnSandbox(cwd),
         model,
         effort,
+        collaborationMode: buildTurnCollaborationMode(
+          this.collaborationModeFor(event.chatId, threadId), model, effort,
+        ),
       });
       active.turnId = result.turn.id;
       if (active.stopRequested && !active.interruptSent) {
