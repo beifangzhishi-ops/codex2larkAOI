@@ -11,7 +11,8 @@
 ## 权限边界
 
 - Codex 可读取本机文件；
-- Codex 只可写当前 `/cd` 选择的项目目录；
+- Codex 只可写当前 `/new 项目名或路径` 选择的项目目录；
+- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的系统临时目录，本机文件仍可只读访问；
 - `auto` 模式使用 App Server Auto-review 代为处理后续轮次的按需审批，不解除沙箱；
 - `manual` 模式把 Codex 的命令/文件审批转发到飞书；
 - 切换审批模式不处理已经发出的审批请求；
@@ -40,7 +41,7 @@ notepad .env
 
 关键配置：
 
-- `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/cd` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
+- `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
@@ -76,8 +77,8 @@ npm run check
 
 ## 飞书控制
 
-- `/cd 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
-- `/new`：清除当前聊天的 Codex thread，保留工作目录、审批模式和模型设置；下一条普通任务到达时再创建新 thread；
+- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常 `FILE:`/`MEDIA:` 交付；
+- `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；`/cd` 已合并进 `/new`，不再作为独立命令；
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
 - `/goal 目标`：切回默认模式并启动 Goal；`/goal` 查看当前 Goal；`/goal pause|resume|clear` 分别暂停、恢复或清除 Goal；
@@ -129,9 +130,9 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 终端、文件修改、MCP、网页搜索等工具调用事件不会转发到飞书，避免过程消息过多。
 
-所有已识别的斜杠命令和控制卡片都通过聊天级短路由队列处理，不等待正在运行的 Codex turn。普通任务在选路时固定 thread、目录、模型、思考强度和审批模式，再进入 thread 队列；同一 thread 严格串行，不同 thread 可并行。`/new`、`/cd` 或 `/resume` 切换选择后，旧 thread 的任务继续后台执行并保留历史，但不再向该飞书聊天推送进度、审批提示、最终答复、错误或附件；恢复一个仍在运行的 thread 后，桥接会重新加入该 thread 并接收此后的 commentary、推理摘要和最终答复。
+所有已识别的斜杠命令和控制卡片都通过聊天级短路由队列处理，不等待正在运行的 Codex turn。普通任务在选路时固定 thread、目录、模型、思考强度和审批模式，再进入 thread 队列；同一 thread 严格串行，不同 thread 可并行。`/new` 或 `/resume` 切换选择后，旧 thread 的任务继续后台执行并保留历史，但不再向该飞书聊天推送进度、审批提示、最终答复、错误或附件；恢复一个仍在运行的 thread 后，桥接会重新加入该 thread 并接收此后的 commentary、推理摘要和最终答复。
 
-`/stop` 只作用于发出命令时当前选中的 thread：它会请求中断该 thread 的活跃 turn，并清除该 thread 尚未开始的任务，同时报告清除数量。`/new` 后当前选择为空，`/stop` 不会误停已经切换离开的后台 thread。
+`/stop` 只作用于发出命令时当前选中的 thread：它会请求中断该 thread 的活跃 turn，并清除该 thread 尚未开始的任务，同时报告清除数量。`/new` 后当前选择指向新建的会话，`/stop` 不会误停已经切换离开的后台 thread。
 
 计划模式产生最终计划后，桥接会发送确认卡片。“否决，继续修改”会保持计划模式并等待修改意见；“接受并执行”会切换到默认执行模式，并自动发送“执行刚刚确认的计划”。每个计划项只能处理一次，处理状态会持久化，因此重复点击、旧卡片、跨会话点击或服务重启都不会重复执行。
 
@@ -161,6 +162,7 @@ MEDIA:C:\absolute\path\plot.png
 - `pendingChatModes`：尚未创建 thread 的聊天待应用模式；
 - `planReviews`：计划确认卡片及其处理状态；
 - `workdirs`：聊天到当前项目目录；
+- `standaloneChats`：标记处于无工作区独立对话模式的聊天；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；

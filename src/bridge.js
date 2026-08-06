@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mathjax } from "mathjax-full/js/mathjax.js";
@@ -38,7 +39,7 @@ const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
   "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。桥接会把 .md 文件转换为机器人 codex 文件夹中的飞书云文档，其他文件保持原生附件。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
-  "桥接负责 /cd、/new、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -452,7 +453,6 @@ export function parseControlCommand(text) {
     return { type: "approve", session: /session|always/i.test(value) };
   }
   if (lower === "/deny") return { type: "deny" };
-  if (lower === "/new") return { type: "new" };
   const rename = value.match(/^\/rename\s+(.+)$/i);
   if (rename) return { type: "rename", name: rename[1].trim() };
   const resume = value.match(/^\/resume(?:\s+(.+))?$/i);
@@ -463,8 +463,8 @@ export function parseControlCommand(text) {
   if (lower === "/temperature") return { type: "temperature" };
   const model = value.match(/^\/model(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
   if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
-  const cd = value.match(/^\/cd(?:\s+(.+))?$/i);
-  if (cd) return { type: "cd", query: (cd[1] || "").trim() };
+  const newCommand = value.match(/^\/new(?:\s+(.+))?$/i);
+  if (newCommand) return { type: "new", query: (newCommand[1] || "").trim() };
   return null;
 }
 
@@ -625,7 +625,7 @@ function threadTimestamp(thread) {
 
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
 const CONTROL_CARD_ACTIONS = new Set([
-  "new", "resume", "resumePage", "approvalMode", "interjectionMode", "status", "stop", "help", "screen",
+  "resume", "resumePage", "approvalMode", "interjectionMode", "status", "stop", "help", "screen",
   "model", "modelPage", "modelPick", "modelEffort", "modelDefault", "planReject", "planAccept",
 ]);
 
@@ -719,16 +719,43 @@ function threadCwd(thread) {
   return String(thread?.cwd || "目录未知").trim() || "目录未知";
 }
 
+export function standaloneRoot() {
+  return resolve(tmpdir(), "codex2larkAOI", "standalone");
+}
+
+export function isStandalonePath(cwd) {
+  const value = String(cwd || "").trim();
+  if (!value) return false;
+  const root = resolve(standaloneRoot()).toLocaleLowerCase();
+  const target = resolve(value).toLocaleLowerCase();
+  return target === root || target.startsWith(`${root}${sep}`);
+}
+
+export function createStandaloneCwd() {
+  const dir = resolve(standaloneRoot(), randomUUID());
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function ensureStandaloneCwd(cwd) {
+  const dir = resolve(cwd);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function threadCwdLabel(thread) {
   const cwd = threadCwd(thread);
-  return cwd === "目录未知" ? cwd : basename(cwd);
+  if (cwd === "目录未知") return cwd;
+  return isStandalonePath(cwd) ? "独立对话（无工作区）" : basename(cwd);
 }
 
 function availableThreadCwd(thread) {
   const cwd = threadCwd(thread);
   if (cwd === "目录未知") return "";
+  const resolved = resolve(cwd);
+  if (isStandalonePath(resolved)) return resolved;
   try {
-    return existsSync(cwd) && statSync(cwd).isDirectory() ? resolve(cwd) : "";
+    return existsSync(resolved) && statSync(resolved).isDirectory() ? resolved : "";
   } catch {
     return "";
   }
@@ -808,9 +835,9 @@ export function createPendingTitleJob(threadId, cwd, prompt, answer, sessionMode
   };
 }
 
-export function buildTitleThreadOptions(config, model) {
+export function buildTitleThreadOptions(config, model, cwd = config.rootDir) {
   return {
-    cwd: config.rootDir,
+    cwd: resolve(cwd),
     model,
     approvalPolicy: "never",
     approvalsReviewer: "user",
@@ -1255,6 +1282,7 @@ export function normalizePersistedState(value = {}) {
     autoTitleModel: String(value.autoTitleModel || DEFAULT_TITLE_MODEL).trim() || DEFAULT_TITLE_MODEL,
     sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
     workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
+    standaloneChats: value.standaloneChats && typeof value.standaloneChats === "object" ? value.standaloneChats : {},
     approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
     interjectionModes: value.interjectionModes && typeof value.interjectionModes === "object" ? value.interjectionModes : {},
     threadModes: value.threadModes && typeof value.threadModes === "object" ? value.threadModes : {},
@@ -1717,7 +1745,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
     elements: [
       { tag: "markdown", content: [
         "直接发送任务即可。常用命令：",
-        "`/cd 项目名或路径` 切换目录 · `/new` 新建对话",
+        "`/new` 进入无工作区对话 · `/new 项目名或路径` 切换目录",
         "`/rename 标题` 重命名当前会话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
@@ -2265,6 +2293,13 @@ class BridgeRuntime {
 
   cwdFor(chatId) {
     const stored = this.state.workdirs[chatId];
+    if (this.state.standaloneChats?.[chatId]) {
+      if (stored && isStandalonePath(stored)) return ensureStandaloneCwd(stored);
+      const dir = createStandaloneCwd();
+      this.state.workdirs[chatId] = dir;
+      saveState(this.state);
+      return dir;
+    }
     if (!stored) return this.config.rootDir;
     const candidate = resolve(stored);
     try {
@@ -2272,6 +2307,10 @@ class BridgeRuntime {
     } catch {
       return this.config.rootDir;
     }
+  }
+
+  cwdLabelFor(chatId) {
+    return this.state.standaloneChats?.[chatId] ? "独立对话（无工作区）" : this.cwdFor(chatId);
   }
 
   route(event, command) {
@@ -2410,17 +2449,56 @@ class BridgeRuntime {
       return;
     }
     if (command?.type === "new") {
-      const previousThreadId = this.state.sessions[event.chatId];
-      if (this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
-          !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId)) {
-        delete this.state.pendingTitleJobs[previousThreadId];
-      }
-      delete this.state.sessions[event.chatId];
-      this.#cancelDetachedApprovals(event.chatId, "");
       delete this.state.pendingWorkdirQueries[event.chatId];
       this.resumeCandidates.delete(event.chatId);
-      saveState(this.state);
-      await sendReply(event.messageId, `${event.eventId}-new`, "已新建 Codex 会话；当前项目目录保持不变。", this.config);
+      if (!command.query) {
+        const previousThreadId = this.state.sessions[event.chatId];
+        if (this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
+            !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId)) {
+          delete this.state.pendingTitleJobs[previousThreadId];
+        }
+        this.#cancelDetachedApprovals(event.chatId, "");
+        const previousCwd = this.state.workdirs[event.chatId];
+        const previousThread = this.state.sessions[event.chatId];
+        let threadId;
+        try {
+          threadId = await this.#startThread(event.chatId, "", { standalone: true });
+          saveState(this.state);
+        } catch (error) {
+          if (previousCwd) this.state.workdirs[event.chatId] = previousCwd;
+          else delete this.state.workdirs[event.chatId];
+          if (previousThread) this.state.sessions[event.chatId] = previousThread;
+          else delete this.state.sessions[event.chatId];
+          delete this.state.standaloneChats[event.chatId];
+          saveState(this.state);
+          throw error;
+        }
+        await sendReply(event.messageId, `${event.eventId}-new`,
+          `已进入无工作区对话（独立会话）。\n会话：${threadId}\n临时目录：${this.cwdFor(event.chatId)}`, this.config);
+        return;
+      }
+      const result = resolveWorkdirQuery(command.query, this.config.rootDir, this.cwdFor(event.chatId));
+      if (result.error) {
+        saveState(this.state);
+        await sendReply(event.messageId, `${event.eventId}-new`, result.error, this.config);
+        return;
+      }
+      const previousCwd = this.state.workdirs[event.chatId];
+      const previousThread = this.state.sessions[event.chatId];
+      let threadId;
+      try {
+        threadId = await this.#startThread(event.chatId, result.path);
+        saveState(this.state);
+      } catch (error) {
+        if (previousCwd) this.state.workdirs[event.chatId] = previousCwd;
+        else delete this.state.workdirs[event.chatId];
+        if (previousThread) this.state.sessions[event.chatId] = previousThread;
+        else delete this.state.sessions[event.chatId];
+        delete this.state.standaloneChats[event.chatId];
+        saveState(this.state);
+        throw error;
+      }
+      await sendReply(event.messageId, `${event.eventId}-new`, `已切换工作目录并创建新会话：${result.path}\n会话：${threadId}`, this.config);
       return;
     }
     if (command?.type === "rename") {
@@ -2457,7 +2535,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/cd 项目名或路径` 切换工作目录\n`/new` 新建对话\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -2516,33 +2594,6 @@ class BridgeRuntime {
       }
       return;
     }
-    if (command?.type === "cd") {
-      delete this.state.pendingWorkdirQueries[event.chatId];
-      const result = resolveWorkdirQuery(command.query, this.config.rootDir, this.cwdFor(event.chatId));
-      if (result.error) {
-        saveState(this.state);
-        await sendReply(event.messageId, `${event.eventId}-cd`, result.error, this.config);
-        return;
-      }
-      const previousCwd = this.state.workdirs[event.chatId];
-      const previousThread = this.state.sessions[event.chatId];
-      let threadId;
-      try {
-        threadId = await this.#startThread(event.chatId, result.path);
-        this.resumeCandidates.delete(event.chatId);
-        saveState(this.state);
-      } catch (error) {
-        if (previousCwd) this.state.workdirs[event.chatId] = previousCwd;
-        else delete this.state.workdirs[event.chatId];
-        if (previousThread) this.state.sessions[event.chatId] = previousThread;
-        else delete this.state.sessions[event.chatId];
-        saveState(this.state);
-        throw error;
-      }
-      await sendReply(event.messageId, `${event.eventId}-cd`, `已切换工作目录并创建新会话：${result.path}\n会话：${threadId}`, this.config);
-      return;
-    }
-
     const directFiles = extractFileDirectives(event.content, { cwd: this.cwdFor(event.chatId) });
     if (directFiles.files.length && !directFiles.text) {
       void this.#deliverFiles(event, directFiles.files);
@@ -2758,17 +2809,18 @@ class BridgeRuntime {
       `状态：${resumeThreadStatusLabel({ resumeGoal: goal })}`,
       ...(goal.tokenBudget ? [`Token：${goal.tokensUsed || 0}/${goal.tokenBudget}`] : [`已用 Token：${goal.tokensUsed || 0}`]),
     ] : [];
+    const standalone = Boolean(this.state.standaloneChats?.[chatId]);
     return [
       "桥接服务正常。",
       "",
-      `工作目录：${this.cwdFor(chatId)}`,
+      `工作目录：${standalone ? "独立对话（无工作区）" : this.cwdFor(chatId)}`,
       `当前会话名：${threadNameValue}`,
       `当前会话 ID：${threadId || "尚未创建"}`,
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
       `插话：${this.interjectionModeFor(chatId) === "guide" ? "引导（注入运行中的任务）" : "排队（等待当前任务结束）"}`,
       modelLines,
       ...goalLines,
-      "权限：全盘读取、当前项目目录写入",
+      standalone ? "权限：全盘读取、仅本会话临时目录可写" : "权限：全盘读取、当前项目目录写入",
     ].join("\n");
   }
 
@@ -3124,16 +3176,24 @@ class BridgeRuntime {
     const ownActive = this.activeThreads.has(threadId);
     if (threadId === this.state.sessions[event.chatId]) {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
-        `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
+        `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdLabelFor(event.chatId)}`, this.config);
     } else {
       const selectedCwd = availableThreadCwd(selected.thread);
       this.state.sessions[event.chatId] = threadId;
       this.#cancelDetachedApprovals(event.chatId, threadId);
-      if (selectedCwd) this.state.workdirs[event.chatId] = selectedCwd;
+      if (selectedCwd) {
+        if (isStandalonePath(selectedCwd)) {
+          ensureStandaloneCwd(selectedCwd);
+          this.state.standaloneChats[event.chatId] = true;
+        } else {
+          delete this.state.standaloneChats[event.chatId];
+        }
+        this.state.workdirs[event.chatId] = selectedCwd;
+      }
       this.resumeCandidates.delete(event.chatId);
       saveState(this.state);
       await sendReply(event.messageId, `${event.eventId}-resume-done`,
-        `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdFor(event.chatId)}`, this.config);
+        `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdLabelFor(event.chatId)}`, this.config);
     }
     try {
       if (!ownActive) {
@@ -3251,21 +3311,24 @@ class BridgeRuntime {
     return { threadId, isNew };
   }
 
-  async #startThread(chatId, cwd) {
+  async #startThread(chatId, cwd, { standalone = false } = {}) {
     const previousThreadId = this.state.sessions[chatId];
     const discardPreviousTitle = this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
       !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId);
+    const workdir = standalone ? createStandaloneCwd() : resolve(cwd);
     const result = await this.client.request("thread/start", {
-      ...this.#threadOptions(chatId, cwd),
+      ...this.#threadOptions(chatId, workdir),
       serviceName: "codex2lark",
     });
     const threadId = result.thread.id;
     if (discardPreviousTitle) delete this.state.pendingTitleJobs[previousThreadId];
     this.state.sessions[chatId] = threadId;
     this.#cancelDetachedApprovals(chatId, threadId);
-    this.state.workdirs[chatId] = resolve(cwd);
+    this.state.workdirs[chatId] = workdir;
+    if (standalone) this.state.standaloneChats[chatId] = true;
+    else delete this.state.standaloneChats[chatId];
     this.state.pendingTitleJobs[threadId] = {
-      ...createPendingTitleJob(threadId, cwd, "", ""),
+      ...createPendingTitleJob(threadId, workdir, "", ""),
       state: "awaitingFirstTurn",
     };
     this.loadedThreads.add(threadId);
@@ -3416,7 +3479,7 @@ class BridgeRuntime {
       let title = sanitizeGeneratedTitle(job.title);
       if (!title) {
         const selection = await this.#titleSelection(job);
-        const started = await this.client.request("thread/start", buildTitleThreadOptions(this.config, selection.model));
+        const started = await this.client.request("thread/start", buildTitleThreadOptions(this.config, selection.model, job.cwd));
         titleThreadId = started.thread.id;
         let resolveDone;
         let rejectDone;

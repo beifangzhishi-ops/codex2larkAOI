@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   approvalPolicy,
   approvalsReviewer,
@@ -28,6 +28,8 @@ import {
   DEFAULT_TITLE_MODEL,
   createRunningThreadAttachment,
   createConsumerReadiness,
+  createStandaloneCwd,
+  ensureStandaloneCwd,
   extractFileDirectives,
   extractMathJaxSvg,
   formatTemperatureReport,
@@ -39,6 +41,7 @@ import {
   initializeMarkdownDelivery,
   isMarkdownAttachment,
   isMarkdownValidationError,
+  isStandalonePath,
   latexCanvasLayout,
   latexImageUploadSpec,
   loadResumeThreadStatuses,
@@ -74,6 +77,7 @@ import {
   runCommand,
   selectLatestTurn,
   selectResumeThread,
+  standaloneRoot,
   shouldDeliverThreadOutput,
   splitReply,
   snapshotTurnSettings,
@@ -297,6 +301,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   assert.deepEqual(legacy.modelSettings, {});
   assert.equal(legacy.autoTitleModel, DEFAULT_TITLE_MODEL);
   assert.deepEqual(legacy.interjectionModes, {});
+  assert.deepEqual(legacy.standaloneChats, {});
   assert.deepEqual(legacy.pendingTitleJobs, {});
   assert.deepEqual(legacy.threadModes, {});
   assert.deepEqual(legacy.pendingChatModes, {});
@@ -310,6 +315,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
     autoTitleModel: "gpt-new-title",
     interjectionModes: { chat: "queue" },
     modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
+    standaloneChats: { chat: true },
     pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
     threadModes: { thr_2: "plan" },
     pendingChatModes: { chat: "default" },
@@ -323,6 +329,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   assert.equal(current.modelSettings.chat.modelId, "sol");
   assert.equal(current.autoTitleModel, "gpt-new-title");
   assert.equal(current.interjectionModes.chat, "queue");
+  assert.equal(current.standaloneChats.chat, true);
   assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
   assert.equal(current.threadModes.thr_2, "plan");
   assert.equal(current.planReviews.plan_1.status, "pending");
@@ -692,7 +699,10 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
   assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
-  assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
+  assert.deepEqual(parseControlCommand("/new"), { type: "new", query: "" });
+  assert.deepEqual(parseControlCommand("/new Demo"), { type: "new", query: "Demo" });
+  assert.equal(parseControlCommand("/cd"), null);
+  assert.equal(parseControlCommand("/cd Demo"), null);
   assert.deepEqual(parseControlCommand("/screen"), { type: "screen" });
   assert.deepEqual(parseControlCommand("/temperature"), { type: "temperature" });
   assert.deepEqual(parseControlCommand("/model"), { type: "model", modelId: "", effort: "" });
@@ -844,12 +854,14 @@ test("resume helpers format compact pages and select history without ambiguous t
     { id: "thr_1", name: "Fix tests", cwd: "C:\\work\\one", updatedAt: 1_750_000_000 },
     { id: "thr_2", preview: "Review API tests", cwd: "C:\\work\\two", createdAt: 1_740_000_000 },
     { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", updatedAt: 1_730_000_000 },
+    { id: "thr_4", name: "临时问题", cwd: join(standaloneRoot(), "00000000-0000-0000-0000-000000000000"), updatedAt: 1_720_000_000 },
   ];
   const output = formatResumeThreads(threads, "thr_1", true);
   assert.match(output, /1\. Fix tests \[当前\]/);
   assert.doesNotMatch(output, /thr_2/);
   assert.match(output, /\| two/);
   assert.doesNotMatch(output, /C:\\work\\two/);
+  assert.match(output, /独立对话（无工作区）/);
   assert.match(output, /\/resume next/);
   assert.doesNotMatch(formatResumeThreads(threads, ""), /\/resume next/);
   assert.deepEqual(selectResumeThread(threads, "2").thread, threads[1]);
@@ -858,6 +870,26 @@ test("resume helpers format compact pages and select history without ambiguous t
   assert.match(selectResumeThread(threads, "Fix").error, /多个会话/);
   assert.match(selectResumeThread(threads, "9").error, /超出范围/);
   assert.match(formatResumeThreads([], ""), /没有可恢复/);
+});
+
+test("standalone cwd helpers isolate workspace-less chats under the system temp root", () => {
+  const root = resolve(standaloneRoot());
+  const dir = createStandaloneCwd();
+  const nested = join(root, "nested", "work");
+  try {
+    assert.ok(existsSync(dir));
+    assert.ok(resolve(dir).startsWith(`${root}${sep}`));
+    assert.equal(isStandalonePath(dir), true);
+    assert.equal(isStandalonePath(nested), true);
+    assert.equal(isStandalonePath(join(root)), true);
+    assert.equal(isStandalonePath("C:\\work\\project"), false);
+    assert.equal(isStandalonePath(""), false);
+    ensureStandaloneCwd(nested);
+    assert.ok(existsSync(nested));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(join(root, "nested"), { recursive: true, force: true });
+  }
 });
 
 test("approval cards expose exactly three scoped decisions and parse callbacks", () => {
@@ -904,6 +936,8 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(manualButtons[2].text.content, /替我审批/);
   assert.match(manualButtons[3].text.content, /后续指令引导/);
   assert.match(card.elements[0].content, /\/new/);
+  assert.match(card.elements[0].content, /\/new 项目名或路径/);
+  assert.doesNotMatch(card.elements[0].content, /\/cd/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/rename/);
   assert.match(card.elements[0].content, /\/plan/);
@@ -1207,6 +1241,10 @@ test("control card callbacks accept only the supported typed actions", () => {
   assert.equal(parseCardAction({
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: -5 }),
+  }), null);
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "new" }),
   }), null);
   assert.deepEqual(parseControlCardAction({
     ...raw,
@@ -1518,7 +1556,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
-  assert.match(channelContext.value, /桥接负责 \/cd、\/new、\/resume、\/model、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/resume、\/model、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
