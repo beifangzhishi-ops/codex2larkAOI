@@ -703,8 +703,8 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
   assert.deepEqual(parseControlCommand("/new"), { type: "new", query: "" });
   assert.deepEqual(parseControlCommand("/new Demo"), { type: "new", query: "Demo" });
-  assert.equal(parseControlCommand("/cd"), null);
-  assert.equal(parseControlCommand("/cd Demo"), null);
+  assert.deepEqual(parseControlCommand("/cd"), { type: "cd", query: "" });
+  assert.deepEqual(parseControlCommand("/cd Demo"), { type: "cd", query: "Demo" });
   assert.deepEqual(parseControlCommand("/screen"), { type: "screen" });
   assert.deepEqual(parseControlCommand("/temperature"), { type: "temperature" });
   assert.deepEqual(parseControlCommand("/model"), { type: "model", modelId: "", effort: "" });
@@ -939,7 +939,7 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(manualButtons[3].text.content, /后续指令引导/);
   assert.match(card.elements[0].content, /\/new/);
   assert.match(card.elements[0].content, /\/new 项目名或路径/);
-  assert.doesNotMatch(card.elements[0].content, /\/cd/);
+  assert.match(card.elements[0].content, /\/cd 项目名或路径/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/rename/);
   assert.match(card.elements[0].content, /\/plan/);
@@ -1606,7 +1606,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/resume、\/model、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",

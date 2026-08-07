@@ -39,7 +39,7 @@ const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
   "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。桥接会把 .md 文件转换为机器人 codex 文件夹中的飞书云文档，其他文件保持原生附件。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
-  "桥接负责 /new、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/cd、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -466,6 +466,8 @@ export function parseControlCommand(text) {
   if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
   const newCommand = value.match(/^\/new(?:\s+(.+))?$/i);
   if (newCommand) return { type: "new", query: (newCommand[1] || "").trim() };
+  const cdCommand = value.match(/^\/cd(?:\s+(.+))?$/i);
+  if (cdCommand) return { type: "cd", query: (cdCommand[1] || "").trim() };
   return null;
 }
 
@@ -1754,7 +1756,8 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
     elements: [
       { tag: "markdown", content: [
         "直接发送任务即可。常用命令：",
-        "`/new` 进入无工作区对话 · `/new 项目名或路径` 切换目录",
+        "`/new` 进入无工作区对话 · `/new 项目名或路径` 新建会话切换目录",
+        "`/cd 项目名或路径` 切换当前会话目录 · `/cd` 查看当前目录",
         "`/rename 标题` 重命名当前会话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
@@ -2548,6 +2551,29 @@ class BridgeRuntime {
         throw error;
       }
       await sendReply(event.messageId, `${event.eventId}-new`, `已切换工作目录并创建新会话：${result.path}\n会话：${threadId}`, this.config);
+      return;
+    }
+    if (command?.type === "cd") {
+      const currentCwd = this.cwdFor(event.chatId);
+      if (!command.query) {
+        const label = this.state.standaloneChats?.[event.chatId]
+          ? `当前为无工作区独立会话\n临时目录：${currentCwd}`
+          : `当前工作目录：${currentCwd}`;
+        await sendReply(event.messageId, `${event.eventId}-cd`, label, this.config);
+        return;
+      }
+      const result = resolveWorkdirQuery(command.query, this.config.rootDir, currentCwd);
+      if (result.error) {
+        await sendReply(event.messageId, `${event.eventId}-cd-error`, result.error, this.config);
+        return;
+      }
+      this.state.workdirs[event.chatId] = result.path;
+      delete this.state.standaloneChats[event.chatId];
+      saveState(this.state);
+      const threadId = this.state.sessions[event.chatId];
+      await sendReply(event.messageId, `${event.eventId}-cd-done`, threadId
+        ? `已切换当前会话工作目录：${result.path}\n会话：${threadId}`
+        : `已设置工作目录：${result.path}\n发送任务后将在此目录创建会话。`, this.config);
       return;
     }
     if (command?.type === "rename") {
