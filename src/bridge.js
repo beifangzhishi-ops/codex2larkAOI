@@ -627,7 +627,9 @@ const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
 const CONTROL_CARD_ACTIONS = new Set([
   "resume", "resumePage", "approvalMode", "interjectionMode", "status", "stop", "help", "screen",
   "model", "modelPage", "modelPick", "modelEffort", "modelDefault", "planReject", "planAccept",
+  "statusCopy",
 ]);
+const STATUS_COPY_TARGETS = new Set(["id", "name", "cwd", "deepLink", "md"]);
 
 function parseCardActionValue(value) {
   try {
@@ -660,6 +662,7 @@ export function parseControlCardAction(value) {
       !CONTROL_CARD_ACTIONS.has(actionValue.action)) return null;
   if (actionValue.action === "approvalMode" && !["auto", "manual"].includes(actionValue.mode)) return null;
   if (actionValue.action === "interjectionMode" && !["guide", "queue"].includes(actionValue.mode)) return null;
+  if (actionValue.action === "statusCopy" && !STATUS_COPY_TARGETS.has(actionValue.target)) return null;
   if (actionValue.action === "resume" && actionValue.threadId !== undefined &&
       typeof actionValue.threadId !== "string") return null;
   if (actionValue.action === "resumePage" &&
@@ -681,6 +684,7 @@ export function parseControlCardAction(value) {
     token: String(value.token || ""),
     action: actionValue.action,
     ...(actionValue.mode ? { mode: actionValue.mode } : {}),
+    ...(actionValue.target !== undefined ? { target: actionValue.target } : {}),
     ...(actionValue.threadId !== undefined ? { threadId: actionValue.threadId } : {}),
     ...(actionValue.pageStart !== undefined ? { pageStart: actionValue.pageStart } : {}),
     ...(actionValue.modelId !== undefined ? { modelId: actionValue.modelId } : {}),
@@ -717,6 +721,10 @@ export function parseCardAction(value) {
 
 function threadCwd(thread) {
   return String(thread?.cwd || "目录未知").trim() || "目录未知";
+}
+
+export function statusDeepLink(threadId) {
+  return `codex://threads/${String(threadId || "")}`;
 }
 
 export function standaloneRoot() {
@@ -1887,6 +1895,36 @@ export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, to
   };
 }
 
+export function buildStatusCard(statusText) {
+  const content = String(statusText || "");
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: "会话状态" },
+    },
+    elements: [
+      { tag: "markdown", content },
+      {
+        tag: "action",
+        actions: [
+          controlButton("复制会话 ID", "default", "statusCopy", { target: "id" }),
+          controlButton("复制会话名", "default", "statusCopy", { target: "name" }),
+          controlButton("复制工作目录", "default", "statusCopy", { target: "cwd" }),
+        ],
+      },
+      {
+        tag: "action",
+        actions: [
+          controlButton("复制为深度链接", "default", "statusCopy", { target: "deepLink" }),
+          controlButton("复制为 MD", "default", "statusCopy", { target: "md" }),
+        ],
+      },
+      { tag: "note", elements: [{ tag: "plain_text", content: "点击复制按钮后，对应内容会直接发送到对话中。" }] },
+    ],
+  };
+}
+
 export function approvalCardUpdateArgs(token, card) {
   return [
     "api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
@@ -1959,6 +1997,13 @@ export async function sendReply(messageId, eventKey, text, config) {
       await runCommand("lark-cli", [...common, "--text", chunks[index], "--idempotency-key", `${key}-text`]);
     }
   }
+}
+
+export async function sendPlainTextReply(messageId, eventKey, text, config) {
+  await runCommand("lark-cli", [
+    "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
+    "--text", String(text), "--idempotency-key", idempotencyKey(eventKey),
+  ]);
 }
 
 export function reactionArgs(action, messageId, value) {
@@ -2524,7 +2569,37 @@ class BridgeRuntime {
       return;
     }
     if (command?.type === "status") {
-      await sendReply(event.messageId, `${event.eventId}-status`, await this.#statusText(event.chatId), this.config);
+      try {
+        const snapshot = await this.#statusSnapshot(event.chatId);
+        await sendInteractiveCard(event.messageId, `${event.eventId}-status`, buildStatusCard(snapshot.statusText));
+      } catch (error) {
+        console.warn(`[bridge] status card failed; using text fallback: ${error.message}`);
+        await sendReply(event.messageId, `${event.eventId}-status-text`, await this.#statusText(event.chatId), this.config);
+      }
+      return;
+    }
+    if (command?.type === "statusCopy") {
+      const snapshot = await this.#statusSnapshot(event.chatId);
+      if (command.target === "md") {
+        try {
+          await this.#deliverStatusMarkdown(event, snapshot);
+        } catch (error) {
+          await sendReply(event.messageId, `${event.eventId}-statusCopy-md-error`,
+            `生成状态云文档失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+        }
+        return;
+      }
+      if (!snapshot.threadId) {
+        await sendReply(event.messageId, `${event.eventId}-statusCopy-none`, "当前尚未创建会话。", this.config);
+        return;
+      }
+      const value = command.target === "id" ? snapshot.threadId
+        : command.target === "name" ? snapshot.threadName
+          : command.target === "cwd" ? snapshot.cwdValue
+            : command.target === "deepLink" ? statusDeepLink(snapshot.threadId)
+              : "";
+      if (!value) return;
+      await sendPlainTextReply(event.messageId, `${event.eventId}-statusCopy-${command.target}`, value, this.config);
       return;
     }
     if (command?.type === "help") {
@@ -2783,7 +2858,7 @@ class BridgeRuntime {
     return true;
   }
 
-  async #statusText(chatId) {
+  async #statusSnapshot(chatId) {
     const threadId = this.state.sessions[chatId] || "";
     let threadNameValue = "尚未创建";
     if (threadId) {
@@ -2810,10 +2885,11 @@ class BridgeRuntime {
       ...(goal.tokenBudget ? [`Token：${goal.tokensUsed || 0}/${goal.tokenBudget}`] : [`已用 Token：${goal.tokensUsed || 0}`]),
     ] : [];
     const standalone = Boolean(this.state.standaloneChats?.[chatId]);
-    return [
+    const cwdValue = standalone ? "独立对话（无工作区）" : this.cwdFor(chatId);
+    const statusText = [
       "桥接服务正常。",
       "",
-      `工作目录：${standalone ? "独立对话（无工作区）" : this.cwdFor(chatId)}`,
+      `工作目录：${cwdValue}`,
       `当前会话名：${threadNameValue}`,
       `当前会话 ID：${threadId || "尚未创建"}`,
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
@@ -2822,6 +2898,29 @@ class BridgeRuntime {
       ...goalLines,
       standalone ? "权限：全盘读取、仅本会话临时目录可写" : "权限：全盘读取、当前项目目录写入",
     ].join("\n");
+    return { threadId, threadName: threadNameValue, cwdValue, statusText };
+  }
+
+  async #statusText(chatId) {
+    return (await this.#statusSnapshot(chatId)).statusText;
+  }
+
+  async #deliverStatusMarkdown(event, snapshot) {
+    const folder = this.config.markdownDelivery;
+    if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
+    const safeName = String(snapshot.threadName || "").replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 40) || "未命名";
+    const title = `Codex 状态 ${safeName}`;
+    const path = resolve(tmpdir(), `${title}.md`);
+    const content = `# ${title}\n\n${snapshot.statusText}`;
+    const created = await queueMarkdownCreation(async () => {
+      const spec = markdownDocumentCreateSpec(path, folder.folderToken, content);
+      const { stdout } = await runCommand("lark-cli", spec.args, {
+        cwd: spec.cwd, input: spec.input, timeoutMs: 120_000,
+      });
+      return { ...markdownDocumentFromCreateOutput(stdout), title: spec.title, folderUrl: folder.folderUrl };
+    });
+    await sendReply(event.messageId, `${event.eventId}-statusCopy-md`,
+      markdownDeliveryReply(created.title, created.documentUrl, created.folderUrl), this.config);
   }
 
   async #getGoal(threadId) {
@@ -3095,7 +3194,9 @@ class BridgeRuntime {
           ? { type: "resume", query: event.threadId || "" }
           : event.action === "resumePage"
             ? { type: "resumePage", pageStart: event.pageStart }
-            : { type: event.action };
+            : event.action === "statusCopy"
+              ? { type: "statusCopy", target: event.target }
+              : { type: event.action };
       this.route(event, command);
       return;
     }

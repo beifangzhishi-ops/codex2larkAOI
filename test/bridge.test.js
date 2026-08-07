@@ -20,6 +20,7 @@ import {
   buildUserInputCard,
   buildResumeCard,
   buildResolvedApprovalCard,
+  buildStatusCard,
   buildScreenshotPowerShellCommand,
   buildTitleThreadOptions,
   buildTitleTurnParams,
@@ -82,6 +83,7 @@ import {
   splitReply,
   snapshotTurnSettings,
   splitLatexMarkdown,
+  statusDeepLink,
   ThreadTaskQueueManager,
   watchForStopRequest,
   hasCompleteTurnHistory,
@@ -948,6 +950,27 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(card.elements[0].content, /\/interject guide\|queue/);
 });
 
+test("status card keeps status text and exposes five copy buttons", () => {
+  assert.equal(statusDeepLink("019f8312-81fc-7c62-ac73-52315db7b606"),
+    "codex://threads/019f8312-81fc-7c62-ac73-52315db7b606");
+  const card = buildStatusCard("桥接服务正常。\n\n工作目录：C:\\repo");
+  assert.equal(card.header.template, "blue");
+  assert.equal(card.header.title.content, "会话状态");
+  assert.match(card.elements[0].content, /工作目录/);
+  const buttons = card.elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  assert.deepEqual(buttons.map((button) => button.text.content), [
+    "复制会话 ID", "复制会话名", "复制工作目录", "复制为深度链接", "复制为 MD",
+  ]);
+  assert.deepEqual(buttons.map((button) => button.value.action), [
+    "statusCopy", "statusCopy", "statusCopy", "statusCopy", "statusCopy",
+  ]);
+  assert.deepEqual(buttons.map((button) => button.value.target), [
+    "id", "name", "cwd", "deepLink", "md",
+  ]);
+  assert.match(card.elements.at(-1).elements[0].content, /点击复制按钮/);
+});
+
 test("resume replay selects the actual latest turn without falling back from failures", () => {
   const turns = [
     {
@@ -1280,6 +1303,33 @@ test("control card callbacks accept only the supported typed actions", () => {
   assert.equal(parseCardAction({
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "deleteEverything" }),
+  }), null);
+});
+
+test("status copy card actions accept only the supported copy targets", () => {
+  const raw = {
+    event_id: "evt_copy", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
+    token: "token_1", action_tag: "button",
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "statusCopy", target: "deepLink" }),
+  };
+  assert.deepEqual(parseControlCardAction(raw), {
+    type: "control", eventId: "evt_copy", chatId: "oc_1", messageId: "om_1",
+    operatorId: "ou_1", token: "token_1", action: "statusCopy", target: "deepLink",
+  });
+  for (const target of ["id", "name", "cwd", "md"]) {
+    const parsed = parseControlCardAction({
+      ...raw,
+      action_value: JSON.stringify({ kind: "codex2lark_control", action: "statusCopy", target }),
+    });
+    assert.equal(parsed?.target, target);
+  }
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "statusCopy", target: "invalid" }),
+  }), null);
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "statusCopy" }),
   }), null);
 });
 
