@@ -80,6 +80,7 @@ npm run check
 - `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常 `FILE:`/`MEDIA:` 交付；
 - `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；`/cd` 已合并进 `/new`，不再作为独立命令；
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
+- `/plan 任务描述`：先进入计划模式，再把任务描述作为新一轮消息交给 Codex；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
 - `/goal 目标`：切回默认模式并启动 Goal；`/goal` 查看当前 Goal；`/goal pause|resume|clear` 分别暂停、恢复或清除 Goal；
 - `/resume`：用交互卡片按更新时间列出最近 5 个未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话）；恢复列表优先显示桥接当前运行态、App Server 当前运行状态和 Goal 状态，最后才使用最新历史轮次，因此不会把桥接正在执行的会话误显示为“已中断”；

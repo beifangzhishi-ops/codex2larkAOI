@@ -686,9 +686,9 @@ test("service control reports a timeout without broadening the stop target", asy
 });
 
 test("parseControlCommand only recognizes complete slash commands", () => {
-  assert.deepEqual(parseControlCommand("/plan"), { type: "plan" });
+  assert.deepEqual(parseControlCommand("/plan"), { type: "plan", query: "" });
+  assert.deepEqual(parseControlCommand("/plan 修改目录下 plan.md"), { type: "plan", query: "修改目录下 plan.md" });
   assert.deepEqual(parseControlCommand("/default"), { type: "defaultMode" });
-  assert.equal(parseControlCommand("/plan 修改目录下 plan.md"), null);
   assert.deepEqual(parseControlCommand("/goal 完成发布检查"), { type: "goal", objective: "完成发布检查" });
   assert.deepEqual(parseControlCommand("/goal pause"), { type: "goal", action: "pause" });
   assert.deepEqual(parseControlCommand("/goal"), { type: "goal", objective: "" });

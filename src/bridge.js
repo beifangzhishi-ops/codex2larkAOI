@@ -437,7 +437,8 @@ export function parseControlCommand(text) {
   const value = text.trim();
   const lower = value.toLowerCase();
   if (lower === "/stop") return { type: "stop" };
-  if (lower === "/plan") return { type: "plan" };
+  const plan = value.match(/^\/plan(?:\s+(.+))?$/i);
+  if (plan) return { type: "plan", query: (plan[1] || "").trim() };
   if (lower === "/default") return { type: "defaultMode" };
   const goal = value.match(/^\/goal(?:\s+(.+))?$/i);
   if (goal) {
@@ -1757,7 +1758,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
         "`/rename 标题` 重命名当前会话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
-        "`/plan` 进入计划模式 · `/default` 切回默认执行模式",
+        "`/plan [任务]` 进入计划模式并开始新一轮 · `/default` 切回默认执行模式",
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
         "`/goal pause|resume|clear` 暂停、恢复或清除 Goal",
         "`/screen` 截取桥接主机屏幕 · `/temperature` 查询本机温度",
@@ -2475,6 +2476,9 @@ class BridgeRuntime {
         await sendReply(event.messageId, `${event.eventId}-${mode}-mode`,
           result.pending ? `已设为${mode === "plan" ? "计划" : "默认"}模式；新建会话后自动应用。`
             : `已切换为${mode === "plan" ? "计划" : "默认"}模式，后续轮次将保持该模式。`, this.config);
+        if (command.query) {
+          await this.#processRoute({ ...event, content: command.query }, null);
+        }
       } catch (error) {
         await sendReply(event.messageId, `${event.eventId}-${mode}-mode-error`,
           `切换协作模式失败：${String(error.message || error).slice(0, 1500)}`, this.config);
@@ -2610,7 +2614,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan` 进入计划模式\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan [任务]` 进入计划模式并开始新一轮\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -2892,6 +2896,7 @@ class BridgeRuntime {
       `工作目录：${cwdValue}`,
       `当前会话名：${threadNameValue}`,
       `当前会话 ID：${threadId || "尚未创建"}`,
+      `协作模式：${this.collaborationModeFor(chatId, threadId) === "plan" ? "计划" : "默认执行"}`,
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
       `插话：${this.interjectionModeFor(chatId) === "guide" ? "引导（注入运行中的任务）" : "排队（等待当前任务结束）"}`,
       modelLines,
