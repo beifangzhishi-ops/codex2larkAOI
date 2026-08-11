@@ -44,7 +44,7 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 与 `/cd 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
-- `CODEX_COMMAND`：可选的 `codex.exe` 绝对路径；留空时自动从 PATH 或当前用户的 VS Code OpenAI 扩展中查找；
+- `CODEX_COMMAND`：仅用于启动预检的 `codex.exe` 绝对路径；留空时自动发现最新版 VS Code 扩展内置内核（与共享 app-server 一致）；实际连接走 `CODEX_APP_SERVER_WS_URL` 指定的共享 app-server，不要指向已删除的项目内旧版内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-terra`（经 CodexModelProxy 中转的 DeepSeek-V4-Flash），三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
@@ -78,6 +78,8 @@ npm run check
 ## 共享 Codex app-server
 
 共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
+
+AOI 桥接自身不再启动 codex 子进程：启动时通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server；项目内旧版 `.runtime` 内核已删除。
 
 - `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
 - `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
