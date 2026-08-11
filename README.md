@@ -196,4 +196,19 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
 
+## GitHub 同步与另一台电脑部署
+
+本仓库公开托管在 GitHub（仓库名 `codex2larkAOI`，以实际页面为准）。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
+
+另一台电脑首次部署：
+
+1. `git clone https://github.com/<你的GitHub用户名>/codex2larkAOI.git`
+2. `cd codex2larkAOI`
+3. `npm install`（需要 Node.js >= 20）
+4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS` 等配置
+5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
+6. 安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
+
+日常更新：本机提交后 `git push origin main`；另一台电脑执行 `git pull origin main`，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
