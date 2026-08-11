@@ -16,6 +16,7 @@ import {
   buildModelCard,
   buildModelResultCard,
   buildPlanReviewCard,
+  splitPlanCardImages,
   buildResolvedUserInputCard,
   buildUserInputCard,
   buildResumeCard,
@@ -766,6 +767,33 @@ test("plan review cards strip Markdown image syntax before rendering", () => {
   assert.match(content, /\[audio\]/);
   assert.match(content, /\[x\]/);
   assert.equal(sanitizePlanCardMarkdown(raw), "[audio]\n\n正文 `[x]`");
+});
+
+test("splitPlanCardImages extracts local images and keeps remote ones as alt text", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-plan-image-"));
+  const image = join(directory, "plot.png");
+  try {
+    writeFileSync(image, "image");
+    const split = splitPlanCardImages(
+      `计划正文\n\n![测试图](${image})\n\n![远程](https://example.com/x.png)\n\n![缺失](C:\\missing.png)`,
+      { cwd: directory },
+    );
+    assert.equal(split.text, "计划正文\n\n[远程]\n\n[缺失]");
+    assert.deepEqual(split.images, [{ alt: "测试图", path: image }]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("plan review cards embed uploaded images with image keys", () => {
+  const card = buildPlanReviewCard("计划正文", "plan_1", "pending", [
+    { alt: "测试图", imageKey: "img_v1_abc" },
+  ]);
+  const images = card.elements.filter((item) => item.tag === "img");
+  assert.equal(images.length, 1);
+  assert.equal(images[0].image_key, "img_v1_abc");
+  assert.equal(images[0].alt.content, "测试图");
+  assert.ok(card.elements.some((item) => item.tag === "action"));
 });
 
 test("approval settings keep on-request policy and delegate only new turns", () => {

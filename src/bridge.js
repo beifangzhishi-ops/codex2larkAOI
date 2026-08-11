@@ -2199,7 +2199,22 @@ export function sanitizePlanCardMarkdown(text) {
     .trim();
 }
 
-export function buildPlanReviewCard(plan, planItemId, status = "pending") {
+export function splitPlanCardImages(text, { cwd = ROOT } = {}) {
+  const images = [];
+  const cleaned = String(text ?? "").replace(
+    /!\[([^\]\r\n]*)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g,
+    (match, alt, target) => {
+      const path = localMarkdownPath(target, cwd);
+      const label = String(alt || "").trim() || "图片";
+      if (!path) return `[${label}]`;
+      images.push({ alt: label, path });
+      return "";
+    },
+  );
+  return { text: cleaned.replace(/\n{3,}/g, "\n\n").trim(), images };
+}
+
+export function buildPlanReviewCard(plan, planItemId, status = "pending", images = []) {
   const processed = status !== "pending";
   const statusText = status === "accepted" ? "已接受，正在切换到默认执行模式。"
     : status === "rejected" ? "已否决，保持计划模式，等待修改意见。"
@@ -2210,6 +2225,11 @@ export function buildPlanReviewCard(plan, planItemId, status = "pending") {
     header: { template: processed ? "grey" : "blue", title: { tag: "plain_text", content: "计划确认" } },
     elements: [
       { tag: "markdown", content: `${safePlan}\n\n${statusText}` },
+      ...images.map((image) => ({
+        tag: "img",
+        image_key: image.imageKey,
+        alt: { tag: "plain_text", content: String(image.alt || "图片") },
+      })),
       ...(processed ? [] : [{ tag: "action", actions: [
         controlButton("否决，继续修改", "default", "planReject", { planItemId }),
         controlButton("接受并执行", "primary", "planAccept", { planItemId }),
@@ -3241,7 +3261,12 @@ class BridgeRuntime {
     review.updatedAt = Date.now();
     saveState(this.state);
     try {
-      await updateInteractiveCard(event, buildPlanReviewCard(review.plan, command.planItemId, review.status));
+      await updateInteractiveCard(event, buildPlanReviewCard(
+        review.cardText || review.plan,
+        command.planItemId,
+        review.status,
+        review.images || [],
+      ));
     } catch (error) {
       console.warn(`[bridge] cannot update plan review card: ${error.message}`);
     }
@@ -3861,8 +3886,23 @@ class BridgeRuntime {
       if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
       const cardPlan = plan.length > this.config.replyChars ? "计划正文已另行发送。" : plan;
       if (cardPlan !== plan) await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
+      const split = splitPlanCardImages(cardPlan, { cwd: this.cwdFor(active.chatId) });
+      const uploadedImages = [];
+      for (const image of split.images) {
+        try {
+          uploadedImages.push({ alt: image.alt, imageKey: await uploadLocalImage(image.path) });
+        } catch (error) {
+          console.warn(`[bridge] plan card image upload failed: ${image.path}: ${error.message}`);
+        }
+      }
+      const entry = this.state.planReviews[planItemId];
+      if (entry) {
+        entry.cardText = split.text;
+        entry.images = uploadedImages;
+        saveState(this.state);
+      }
       await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
-        buildPlanReviewCard(cardPlan, planItemId));
+        buildPlanReviewCard(split.text, planItemId, "pending", uploadedImages));
     }).catch(async (error) => {
       console.error(`[bridge] plan review card failed: ${error.message}`);
       try {
