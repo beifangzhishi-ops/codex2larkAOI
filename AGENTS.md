@@ -5,6 +5,10 @@
 - 本仓库用于开发和维护 codex2lark，桥接服务是本项目包含的运行组件。
 - 飞书渠道特有的进度转发、文件交付和控制层约束由桥接在对应轮次中注入，不写入项目规则。
 
+## GitHub 同步
+
+- 本项目的所有更新提交后，都推送到 GitHub 远程仓库 `https://github.com/beifangzhishi-ops/codex2larkAOI.git` 的 `noha` 分支。
+
 ## AKA/AOI 双槽协作
 
 - 只允许修改 AOI，禁止修改 AKA。
