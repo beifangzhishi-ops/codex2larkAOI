@@ -34,6 +34,7 @@ import {
   ensureStandaloneCwd,
   extractFileDirectives,
   extractMathJaxSvg,
+  extractReplayMedia,
   formatTemperatureReport,
   formatResumeThreads,
   formatLatestTurnReplay,
@@ -1081,6 +1082,48 @@ test("resume replay accepts legacy finals, plan fallback, placeholders, and clea
     cleanHistoricalFinalText("![远程图](https://example.com/x.png)"),
     "![远程图](https://example.com/x.png)",
   );
+});
+
+test("resume replay extracts existing local images from user input and final answers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex2lark-replay-"));
+  try {
+    const photo = join(dir, "photo.jpg");
+    const plot = join(dir, "plot.png");
+    const report = join(dir, "note.pdf");
+    const missing = join(dir, "missing.png");
+    writeFileSync(photo, "jpg");
+    writeFileSync(plot, "png");
+    writeFileSync(report, "pdf");
+    const turns = [{ status: "completed", items: [
+      { type: "userMessage", content: [
+        { type: "text", text: "看看这些图" },
+        { type: "localImage", path: photo },
+        { type: "image", url: "data:image/png;base64,xx" },
+      ] },
+      { type: "agentMessage", phase: "final_answer", text: [
+        "完成。",
+        `![示意图](${plot})`,
+        `MEDIA:${photo}`,
+        `MEDIA:${missing}`,
+        `FILE:${report}`,
+        "[报告](https://example.com/report.pdf)",
+      ].join("\n") },
+    ] }];
+    const { files } = extractReplayMedia(turns, { cwd: dir });
+    assert.deepEqual(
+      files.map((file) => `${file.kind}:${resolve(file.path)}`),
+      [`MEDIA:${resolve(photo)}`, `MEDIA:${resolve(plot)}`],
+    );
+    assert.deepEqual(extractReplayMedia([], { cwd: dir }).files, []);
+    assert.deepEqual(
+      extractReplayMedia([{ items: [{ type: "userMessage", content: [
+        { type: "localImage", path: missing },
+      ] }] }], { cwd: dir }).files,
+      [],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("resume history completeness requires full turn items", () => {

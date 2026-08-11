@@ -1032,6 +1032,37 @@ export function formatLatestTurnReplay(turns) {
   return `最近一轮对话\n\n用户：${userText}\n\nCodex：${finalText}`;
 }
 
+export function extractReplayMedia(turns, { cwd = ROOT } = {}) {
+  const turn = selectLatestTurn(turns);
+  if (!turn) return { files: [] };
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  const files = [];
+  const seen = new Set();
+  const addMedia = (path, base = cwd) => {
+    const resolvedPath = isAbsolute(path) ? resolve(path) : resolve(base, path);
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) return;
+    const key = `MEDIA\0${resolvedPath}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    files.push({ kind: "MEDIA", path: resolvedPath });
+  };
+  for (const item of items) {
+    if (item?.type === "userMessage" && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (part?.type === "localImage" && part.path) addMedia(part.path);
+      }
+      continue;
+    }
+    if (item?.type !== "agentMessage" || item.phase === "commentary" ||
+        (item.phase !== "final_answer" && item.phase != null) || !item.text) continue;
+    const extracted = extractFileDirectives(item.text, { cwd, keepMediaLinks: true });
+    for (const file of extracted.files) {
+      if (file.kind === "MEDIA") addMedia(file.path);
+    }
+  }
+  return { files };
+}
+
 export function latestThreadProgress(turns) {
   const items = selectLatestTurn(turns)?.items;
   if (!Array.isArray(items)) return "";
@@ -3518,10 +3549,18 @@ class BridgeRuntime {
       if (running) {
         this.#attachRunningThread(event, threadId, historyThread);
       }
-      await sendReply(event.messageId, `${event.eventId}-resume-replay`,
-        running
-          ? formatRunningThreadReplay(historyThread)
-          : formatLatestTurnReplay(historyThread?.turns), this.config);
+      const replay = running
+        ? formatRunningThreadReplay(historyThread)
+        : formatLatestTurnReplay(historyThread?.turns);
+      await sendReply(event.messageId, `${event.eventId}-resume-replay`, replay, this.config);
+      if (!running) {
+        try {
+          const media = extractReplayMedia(historyThread?.turns, { cwd: this.cwdFor(event.chatId) });
+          if (media.files.length) await this.#deliverFiles(event, media.files, threadId);
+        } catch (error) {
+          console.warn(`[bridge] resume replay media delivery failed: ${error.message}`);
+        }
+      }
     } catch (error) {
       await sendReply(event.messageId, `${event.eventId}-resume-replay-error`,
         `最近一轮读取失败：${String(error.message || error).slice(0, 1500)}`, this.config);
