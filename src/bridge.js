@@ -38,7 +38,6 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "用户要求通过飞书交付本地文件时，先核实文件准确、存在且非空。最终答复中每个图片单独输出 MEDIA:C:\\绝对路径\\图片.png，每个其他文件单独输出 FILE:C:\\绝对路径\\报告.pdf。桥接会把 .md 文件转换为机器人 codex 文件夹中的飞书云文档，其他文件保持原生附件。不要只回复文件名或本地 Markdown 链接，不要自行调用 lark-cli，也不要输出不存在、有歧义、为空或并非用户所需文件的交付指令。",
   "桥接负责 /new、/cd、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
@@ -105,7 +104,7 @@ function normalizeLatexFormula(value) {
 function looksLikeBareFormula(value) {
   const candidate = String(value).trim();
   if (!candidate || candidate.length > 4_000 || /[\u3400-\u9fff]/u.test(candidate)) return false;
-  if (/https?:\/\/|^[#/]|```|`/.test(candidate)) return false;
+  if (/https?:\/\/|^[#/]|```|`|!?\[[^\]\r\n]*\]\([^)\r\n]*\)/.test(candidate)) return false;
   if (candidate.includes("$$")) return false;
   const hasOperand = /[A-Za-z0-9]|\\[A-Za-z]+/.test(candidate);
   const hasMathSyntax = /\\[A-Za-z]+|[_^]|[=<>]/.test(candidate);
@@ -276,7 +275,7 @@ export function splitLatexMarkdown(text) {
   return expanded;
 }
 
-export function latexImageUploadSpec(path) {
+export function localImageUploadSpec(path) {
   const imagePath = resolve(path);
   return {
     args: [
@@ -285,6 +284,25 @@ export function latexImageUploadSpec(path) {
     ],
     cwd: dirname(imagePath),
   };
+}
+
+export function latexImageUploadSpec(path) {
+  return localImageUploadSpec(path);
+}
+
+async function uploadLocalImage(path) {
+  const imagePath = resolve(path);
+  if (!existsSync(imagePath) || !statSync(imagePath).isFile()) throw new Error(`图片不存在：${imagePath}`);
+  if (statSync(imagePath).size < 1) throw new Error(`图片为空：${imagePath}`);
+  const upload = localImageUploadSpec(imagePath);
+  const { stdout } = await runCommand("lark-cli", upload.args, {
+    cwd: upload.cwd,
+    timeoutMs: 120_000,
+  });
+  const response = JSON.parse(stdout);
+  const imageKey = response.data?.image_key || response.image_key;
+  if (!imageKey) throw new Error("飞书图片上传未返回 image_key");
+  return imageKey;
 }
 
 export function latexCanvasLayout(sourceWidth, sourceHeight, {
@@ -359,40 +377,15 @@ async function renderLatexImage(formula, display = false) {
       left: layout.left,
       top: layout.top,
     }]).png().toFile(outputPath);
-    const upload = latexImageUploadSpec(outputPath);
-    const { stdout } = await runCommand("lark-cli", upload.args, {
-      cwd: upload.cwd,
-      timeoutMs: 120_000,
-    });
-    const response = JSON.parse(stdout);
-    const imageKey = response.data?.image_key || response.image_key;
-    if (!imageKey) throw new Error("飞书图片上传未返回 image_key");
-    return imageKey;
+    return uploadLocalImage(outputPath);
   } finally {
     try { unlinkSync(outputPath); } catch { /* best effort cleanup */ }
   }
 }
 
 export async function buildLatexPostContent(text) {
-  const segments = splitLatexMarkdown(text);
-  if (!segments.some((segment) => segment.type === "math")) return null;
-  const paragraphs = [[]];
-  for (const segment of segments) {
-    if (segment.type === "text") {
-      if (segment.value) paragraphs.at(-1).push({ tag: "md", text: segment.value });
-      continue;
-    }
-    const imageKey = await renderLatexImage(segment.value, segment.display);
-    if (segment.display) {
-      if (paragraphs.at(-1).length) paragraphs.push([]);
-      paragraphs.push([{ tag: "img", image_key: imageKey }]);
-      paragraphs.push([]);
-    } else {
-      paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
-    }
-  }
-  const content = paragraphs.filter((paragraph) => paragraph.length);
-  return { zh_cn: { content } };
+  const built = await buildFeishuPostContent(text);
+  return built?.content ?? null;
 }
 
 export function watchForStopRequest(stopFile, onStop, intervalMs = 250) {
@@ -1138,7 +1131,7 @@ function localMarkdownPath(target, cwd) {
   }
 }
 
-export function extractFileDirectives(text, { cwd = ROOT } = {}) {
+export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false } = {}) {
   const files = [];
   const seen = new Set();
   const addFile = (kind, path) => {
@@ -1161,10 +1154,136 @@ export function extractFileDirectives(text, { cwd = ROOT } = {}) {
   cleaned = cleaned.replace(markdownLink, (match, _label, target) => {
     const path = localMarkdownPath(target, cwd);
     if (!path) return match;
-    addFile(IMAGE_EXTENSIONS.has(extname(path).toLowerCase()) ? "MEDIA" : "FILE", path);
+    const isImage = IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
+    if (isImage && keepMediaLinks) {
+      addFile("MEDIA", path);
+      return match;
+    }
+    addFile(isImage ? "MEDIA" : "FILE", path);
     return "";
   }).replace(/\n{3,}/g, "\n\n").trim();
   return { text: cleaned, files };
+}
+
+function isStandaloneImageLine(value, start, end) {
+  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+  const lineEndIndex = value.indexOf("\n", end);
+  const lineEnd = lineEndIndex < 0 ? value.length : lineEndIndex;
+  return value.slice(lineStart, lineEnd).trim() === value.slice(start, end).trim();
+}
+
+export function splitLocalImageMarkdown(text, { cwd = ROOT } = {}) {
+  const value = String(text ?? "");
+  const segments = [];
+  let textStart = 0;
+  let cursor = 0;
+  while (cursor < value.length) {
+    if (value.startsWith("```", cursor)) {
+      const end = value.indexOf("```", cursor + 3);
+      cursor = end < 0 ? value.length : end + 3;
+      continue;
+    }
+    if (value[cursor] === "`") {
+      const end = value.indexOf("`", cursor + 1);
+      cursor = end < 0 ? value.length : end + 1;
+      continue;
+    }
+    if (value.startsWith("![", cursor)) {
+      const closeBracket = value.indexOf("]", cursor + 2);
+      if (closeBracket >= 0 && value[closeBracket + 1] === "(") {
+        const closeParen = value.indexOf(")", closeBracket + 2);
+        if (closeParen >= 0) {
+          const raw = value.slice(cursor, closeParen + 1);
+          const target = value.slice(closeBracket + 2, closeParen).trim();
+          const path = localMarkdownPath(target, cwd);
+          if (path && IMAGE_EXTENSIONS.has(extname(path).toLowerCase())) {
+            if (textStart < cursor) pushLatexText(segments, value.slice(textStart, cursor));
+            segments.push({
+              type: "image",
+              path,
+              raw,
+              block: isStandaloneImageLine(value, cursor, closeParen + 1),
+            });
+            cursor = closeParen + 1;
+            textStart = cursor;
+            continue;
+          }
+        }
+      }
+    }
+    cursor += 1;
+  }
+  pushLatexText(segments, value.slice(textStart));
+  return segments;
+}
+
+export function splitFeishuMarkdown(text, { cwd = ROOT } = {}) {
+  const segments = [];
+  for (const segment of splitLatexMarkdown(text)) {
+    if (segment.type !== "text") {
+      segments.push(segment);
+      continue;
+    }
+    for (const part of splitLocalImageMarkdown(segment.value, { cwd })) {
+      segments.push(part);
+    }
+  }
+  return segments;
+}
+
+export function removeLocalImageMarkdown(text, { cwd = ROOT } = {}) {
+  return splitLocalImageMarkdown(String(text ?? ""), { cwd })
+    .map((segment) => (segment.type === "image" ? "" : segment.value))
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = false } = {}) {
+  const segments = splitFeishuMarkdown(text, { cwd });
+  const hasMath = segments.some((segment) => segment.type === "math");
+  const hasImage = segments.some((segment) => segment.type === "image");
+  if (!hasMath && (!embedImages || !hasImage)) return null;
+  const paragraphs = [[]];
+  const consumedImages = [];
+  const uploadedImageKeys = new Map();
+  const pushText = (value) => {
+    if (value) paragraphs.at(-1).push({ tag: "md", text: value });
+  };
+  const pushBlockImage = (imageKey) => {
+    if (paragraphs.at(-1).length) paragraphs.push([]);
+    paragraphs.push([{ tag: "img", image_key: imageKey }]);
+    paragraphs.push([]);
+  };
+  for (const segment of segments) {
+    if (segment.type === "text") {
+      pushText(segment.value);
+      continue;
+    }
+    if (segment.type === "image") {
+      if (!embedImages) {
+        pushText(segment.raw);
+        continue;
+      }
+      const resolvedPath = resolve(segment.path);
+      let imageKey = uploadedImageKeys.get(resolvedPath);
+      if (!imageKey) {
+        imageKey = await uploadLocalImage(resolvedPath);
+        uploadedImageKeys.set(resolvedPath, imageKey);
+      }
+      consumedImages.push(resolvedPath);
+      if (segment.block) pushBlockImage(imageKey);
+      else paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
+      continue;
+    }
+    if (segment.type === "math") {
+      const imageKey = await renderLatexImage(segment.value, segment.display);
+      if (segment.display) pushBlockImage(imageKey);
+      else paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
+    }
+  }
+  const content = paragraphs.filter((paragraph) => paragraph.length);
+  return { content: { zh_cn: { content } }, consumedImages };
 }
 
 function fenced(value) {
@@ -1969,7 +2088,9 @@ async function updateApprovalCard(event) {
   ));
 }
 
-export async function sendReply(messageId, eventKey, text, config) {
+export async function sendReply(messageId, eventKey, text, config, options = {}) {
+  const { cwd = ROOT, embedImages = false } = options;
+  const consumedImages = [];
   const chunks = splitReply(text, config.replyChars);
   for (let index = 0; index < chunks.length; index += 1) {
     const key = idempotencyKey(eventKey, index);
@@ -1977,31 +2098,39 @@ export async function sendReply(messageId, eventKey, text, config) {
       "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     ];
     try {
-      let latexContent = null;
+      let postContent = null;
       try {
-        latexContent = await buildLatexPostContent(chunks[index]);
+        postContent = await buildFeishuPostContent(chunks[index], { cwd, embedImages });
       } catch (error) {
-        console.warn(`[bridge] LaTeX rendering failed for ${messageId}; keeping source markdown: ${error.message}`);
+        console.warn(`[bridge] 飞书 post 渲染失败，保留源 Markdown：${error.message}`);
       }
-      if (latexContent) {
+      if (postContent) {
         try {
           await runCommand("lark-cli", [
-            ...common, "--msg-type", "post", "--content", JSON.stringify(latexContent),
+            ...common, "--msg-type", "post", "--content", JSON.stringify(postContent.content),
             "--idempotency-key", key,
           ]);
+          consumedImages.push(...postContent.consumedImages);
           continue;
         } catch (error) {
           if (!isMarkdownValidationError(error)) throw error;
-          console.warn(`[bridge] LaTeX post rejected for ${messageId}; retrying as markdown`);
+          console.warn(`[bridge] 飞书 post 被拒绝，改用 Markdown：${error.message}`);
         }
       }
-      await runCommand("lark-cli", [...common, "--markdown", chunks[index], "--idempotency-key", key]);
+      const markdown = embedImages ? removeLocalImageMarkdown(chunks[index], { cwd }) : chunks[index];
+      if (markdown) {
+        await runCommand("lark-cli", [...common, "--markdown", markdown, "--idempotency-key", key]);
+      }
     } catch (error) {
       if (!isMarkdownValidationError(error)) throw error;
       console.warn(`[bridge] markdown rejected for ${messageId}; retrying as plain text`);
-      await runCommand("lark-cli", [...common, "--text", chunks[index], "--idempotency-key", `${key}-text`]);
+      const plainText = embedImages ? removeLocalImageMarkdown(chunks[index], { cwd }) : chunks[index];
+      if (plainText) {
+        await runCommand("lark-cli", [...common, "--text", plainText, "--idempotency-key", `${key}-text`]);
+      }
     }
   }
+  return { consumedImages: [...new Set(consumedImages)] };
 }
 
 export async function sendPlainTextReply(messageId, eventKey, text, config) {
@@ -3505,11 +3634,23 @@ class BridgeRuntime {
       }
       this.#retryPendingTitleJobs();
       const completed = await this.#runTurn(task);
-      const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd });
+      const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd, keepMediaLinks: true });
       if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
-        if (delivery.text) await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config);
-        else if (!delivery.files.length) await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
-        await this.#deliverFiles(event, delivery.files, snapshot.threadId);
+        let consumedImages = [];
+        if (delivery.text) {
+          const sent = await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config, {
+            cwd: snapshot.cwd,
+            embedImages: true,
+          });
+          consumedImages = sent?.consumedImages || [];
+        } else if (!delivery.files.length) {
+          await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
+        }
+        const consumed = new Set(consumedImages.map((path) => resolve(path)));
+        const remainingFiles = delivery.files.filter(
+          (file) => !(file.kind === "MEDIA" && consumed.has(resolve(file.path))),
+        );
+        await this.#deliverFiles(event, remainingFiles, snapshot.threadId);
       } else {
         console.log(`[bridge] suppressed detached thread output thread=${snapshot.threadId} chat=${event.chatId}`);
       }

@@ -45,6 +45,7 @@ import {
   isStandalonePath,
   latexCanvasLayout,
   latexImageUploadSpec,
+  localImageUploadSpec,
   loadResumeThreadStatuses,
   mergeRuntimeThreadStatuses,
   mergeProjectEnv,
@@ -67,6 +68,7 @@ import {
   queryTemperature,
   reactionArgs,
   reactionIdFromOutput,
+  removeLocalImageMarkdown,
   resumeThreadStatusLabel,
   resolveCodexCommand,
   resolveModelSelection,
@@ -81,6 +83,8 @@ import {
   standaloneRoot,
   shouldDeliverThreadOutput,
   splitReply,
+  splitFeishuMarkdown,
+  splitLocalImageMarkdown,
   snapshotTurnSettings,
   splitLatexMarkdown,
   statusDeepLink,
@@ -212,12 +216,27 @@ $$`;
   assert.ok(segments.some((segment) => segment.type === "text" && segment.value.includes("改用 $$ 块级包裹")));
 });
 
+test("splitLatexMarkdown does not treat Windows-path image links as bare formulas", () => {
+  assert.deepEqual(splitLatexMarkdown("![result](C:\\Users\\noha\\plot.png)"), [
+    { type: "text", value: "![result](C:\\Users\\noha\\plot.png)" },
+  ]);
+});
+
 test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
   const imagePath = resolve(".state", "latex", "formula.png");
   const upload = latexImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
   assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\formula.png");
   assert.equal(upload.args.includes(imagePath), false);
+});
+
+test("localImageUploadSpec shares the generic message-image upload shape", () => {
+  const imagePath = resolve(".state", "images", "plot.png");
+  const upload = localImageUploadSpec(imagePath);
+  assert.equal(upload.cwd, dirname(imagePath));
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\plot.png");
+  assert.equal(upload.args.includes(imagePath), false);
+  assert.deepEqual(upload, latexImageUploadSpec(imagePath));
 });
 
 test("latexCanvasLayout renders display formulas at a fixed canvas width", () => {
@@ -1427,6 +1446,85 @@ test("extractFileDirectives recognizes links to real local files", () => {
   }
 });
 
+test("extractFileDirectives keepMediaLinks preserves image links while extracting files", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-delivery-keep-"));
+  const image = join(directory, "plot.png");
+  const report = join(directory, "report.pdf");
+  try {
+    writeFileSync(image, "image");
+    writeFileSync(report, "report");
+    assert.deepEqual(extractFileDirectives([
+      `![图](${image})`,
+      `[报告](${report})`,
+    ].join("\n"), { cwd: directory, keepMediaLinks: true }), {
+      text: `![图](${image})`,
+      files: [
+        { kind: "MEDIA", path: image },
+        { kind: "FILE", path: report },
+      ],
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("splitFeishuMarkdown splits local image links and preserves remote and code content", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-feishu-image-"));
+  const png = join(directory, "plot.png");
+  const jpg = join(directory, "photo.jpg");
+  const report = join(directory, "report.pdf");
+  try {
+    writeFileSync(png, "image");
+    writeFileSync(jpg, "image");
+    writeFileSync(report, "report");
+    const segments = splitFeishuMarkdown([
+      "前文",
+      `![图](file:///${png.replaceAll("\\", "/")})`,
+      `![照片](${jpg})`,
+      `![报告](${report})`,
+      "![远程](https://example.com/x.png)",
+      "```\n![代码](C:/code.png)\n```",
+      "$x^2$",
+    ].join("\n\n"), { cwd: directory });
+    const images = segments.filter((segment) => segment.type === "image");
+    assert.equal(images.length, 2);
+    assert.deepEqual(images.map((segment) => segment.path), [resolve(png), resolve(jpg)]);
+    assert.ok(images.every((segment) => segment.block));
+    assert.ok(segments.some((segment) => segment.type === "math"));
+    const text = segments.filter((segment) => segment.type === "text").map((segment) => segment.value).join("");
+    assert.doesNotMatch(text, /!\[图\]/);
+    assert.doesNotMatch(text, /!\[照片\]/);
+    assert.match(text, /\[报告\]/);
+    assert.match(text, /\[远程\]/);
+    assert.match(text, /\[代码\]/);
+    const windowsSegments = splitFeishuMarkdown(`![plot](${png.replaceAll("/", "\\")})`, { cwd: directory });
+    assert.equal(windowsSegments.filter((segment) => segment.type === "image").length, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("removeLocalImageMarkdown strips only real local image links", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-remove-image-"));
+  const image = join(directory, "plot.png");
+  const report = join(directory, "report.pdf");
+  try {
+    writeFileSync(image, "image");
+    writeFileSync(report, "report");
+    const cleaned = removeLocalImageMarkdown([
+      "前文",
+      `![图](${image})`,
+      "![远程](https://example.com/x.png)",
+      `[报告](${report})`,
+    ].join("\n"), { cwd: directory });
+    assert.doesNotMatch(cleaned, /!\[图\]/);
+    assert.match(cleaned, /\[远程\]/);
+    assert.match(cleaned, /\[报告\]/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Markdown delivery recognizes only FILE directives with an md extension", () => {
   assert.equal(isMarkdownAttachment({ kind: "FILE", path: "C:\\work\\report.MD" }), true);
   assert.equal(isMarkdownAttachment({ kind: "MEDIA", path: "C:\\work\\report.md" }), false);
@@ -1605,7 +1703,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(channelContext.kind, "application");
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
-  assert.match(channelContext.value, /MEDIA:C:\\绝对路径\\图片\.png/);
+  assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
   assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
