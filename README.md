@@ -198,11 +198,11 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## GitHub 同步与另一台电脑部署
 
-本仓库公开托管在 GitHub（仓库名 `codex2larkAOI`，以实际页面为准）。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
+本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
 另一台电脑首次部署：
 
-1. `git clone https://github.com/<你的GitHub用户名>/codex2larkAOI.git`
+1. `git clone https://github.com/beifangzhishi-ops/codex2larkAOI.git`
 2. `cd codex2larkAOI`
 3. `npm install`（需要 Node.js >= 20）
 4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS` 等配置
