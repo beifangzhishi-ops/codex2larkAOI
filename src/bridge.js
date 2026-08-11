@@ -1001,7 +1001,7 @@ function historicalInputText(input) {
 export function cleanHistoricalFinalText(text) {
   return String(text || "")
     .replace(/^\s*(?:FILE|MEDIA):\s*(?:"[^"]+"|'[^']+'|.+?)\s*$/gim, "")
-    .replace(/\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g, (match, label, target) => {
+    .replace(/!?\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g, (match, label, target) => {
       const value = String(target || "").trim();
       return /^(?:https?:|mailto:|#)/i.test(value) ? match : label;
     })

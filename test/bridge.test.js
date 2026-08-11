@@ -1044,7 +1044,14 @@ test("resume replay accepts legacy finals, plan fallback, placeholders, and clea
   ] }]);
   assert.match(plan, /Codex：最终计划/);
   assert.equal(formatLatestTurnReplay([]), "最近一轮对话\n\n该会话还没有对话记录。");
-  assert.equal(cleanHistoricalFinalText("MEDIA:C:\\plot.png\n查看 [图片](./plot.png)"), "查看 图片");
+  assert.equal(
+    cleanHistoricalFinalText("MEDIA:C:\\plot.png\n查看 [图片](./plot.png)\n![audio](C:\\song.mp3)"),
+    "查看 图片\naudio",
+  );
+  assert.equal(
+    cleanHistoricalFinalText("![远程图](https://example.com/x.png)"),
+    "![远程图](https://example.com/x.png)",
+  );
 });
 
 test("resume history completeness requires full turn items", () => {
