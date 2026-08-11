@@ -76,6 +76,7 @@ import {
   selectLowestReasoningEffort,
   resolveWorkdirQuery,
   sanitizeGeneratedTitle,
+  sanitizePlanCardMarkdown,
   parseGeneratedTitle,
   runCommand,
   selectLatestTurn,
@@ -755,6 +756,16 @@ test("plan review cards carry one typed action pair and hide actions once proces
   assert.deepEqual(buttons.map((button) => button.value.action), ["planReject", "planAccept"]);
   assert.ok(buttons.every((button) => button.value.planItemId === "plan_1"));
   assert.equal(buildPlanReviewCard("计划", "plan_1", "accepted").elements.some((item) => item.tag === "action"), false);
+});
+
+test("plan review cards strip Markdown image syntax before rendering", () => {
+  const raw = "![audio](C:\\...mp3)\n\n正文 `![x](C:\\y.png)`";
+  const card = buildPlanReviewCard(raw, "plan_1");
+  const content = card.elements.find((item) => item.tag === "markdown").content;
+  assert.doesNotMatch(content, /!\[/);
+  assert.match(content, /\[audio\]/);
+  assert.match(content, /\[x\]/);
+  assert.equal(sanitizePlanCardMarkdown(raw), "[audio]\n\n正文 `[x]`");
 });
 
 test("approval settings keep on-request policy and delegate only new turns", () => {

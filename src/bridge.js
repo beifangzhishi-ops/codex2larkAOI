@@ -2189,16 +2189,27 @@ async function finishProcessingReaction(messageId, reactionId, succeeded, config
   }
 }
 
+export function sanitizePlanCardMarkdown(text) {
+  return String(text ?? "")
+    .replace(/!\[([^\]\r\n]*)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g, (_match, alt) => {
+      const label = String(alt || "").trim();
+      return `[${label || "图片"}]`;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function buildPlanReviewCard(plan, planItemId, status = "pending") {
   const processed = status !== "pending";
   const statusText = status === "accepted" ? "已接受，正在切换到默认执行模式。"
     : status === "rejected" ? "已否决，保持计划模式，等待修改意见。"
       : "请确认是否执行此计划。";
+  const safePlan = sanitizePlanCardMarkdown(plan);
   return {
     config: { wide_screen_mode: true },
     header: { template: processed ? "grey" : "blue", title: { tag: "plain_text", content: "计划确认" } },
     elements: [
-      { tag: "markdown", content: `${String(plan || "").trim()}\n\n${statusText}` },
+      { tag: "markdown", content: `${safePlan}\n\n${statusText}` },
       ...(processed ? [] : [{ tag: "action", actions: [
         controlButton("否决，继续修改", "default", "planReject", { planItemId }),
         controlButton("接受并执行", "primary", "planAccept", { planItemId }),
@@ -3852,7 +3863,15 @@ class BridgeRuntime {
       if (cardPlan !== plan) await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
       await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
         buildPlanReviewCard(cardPlan, planItemId));
-    }).catch((error) => console.error(`[bridge] plan review card failed: ${error.message}`));
+    }).catch(async (error) => {
+      console.error(`[bridge] plan review card failed: ${error.message}`);
+      try {
+        await sendReply(active.event.messageId, `${active.event.eventId}-plan-fallback-${planItemId}`,
+          `确认卡片发送失败，请直接回复同意或修改意见。\n\n${sanitizePlanCardMarkdown(plan)}`, this.config);
+      } catch (fallbackError) {
+        console.error(`[bridge] plan review fallback failed: ${fallbackError.message}`);
+      }
+    });
   }
 
   #queueUserInput(active, message) {
