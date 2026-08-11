@@ -7,6 +7,7 @@
 
 ## GitHub 同步
 
+- 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
 - 本项目的所有更新提交后，都推送到 GitHub 远程仓库 `https://github.com/beifangzhishi-ops/codex2larkAOI.git` 的 `noha` 分支。
 
 ## AKA/AOI 双槽协作
