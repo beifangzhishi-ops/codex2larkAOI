@@ -75,6 +75,25 @@ npm run check
 
 也可从资源管理器双击 `start.cmd` 或 `stop.cmd`。停止脚本写入本项目 `.state\\stop-requested`，由桥接优雅关闭本项目事件消费者；它不调用共享的 `lark-cli event stop --all`，也不会停止其他项目实例。自动化停止使用 `.\stop.cmd --no-pause-on-error`。
 
+## 共享 Codex app-server
+
+共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
+
+- `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
+- `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
+
+环境变量变化后需重启一次桌面端才生效：变量存在时桌面端连接共享 app-server，删除后回退到内置内核。启动顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+
+异常恢复：共享进程被手动结束但环境变量仍在时，双击 `shared-stop.cmd` 会删除变量；若端口仍有监听进程，脚本会提示手动排查，不会误杀其他 codex 进程。
+
+手动查看状态：
+
+```powershell
+Get-Process codex | Select-Object Id,StartTime,Path
+netstat -ano | Select-String ':45789'
+[Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL','User')
+```
+
 ## 飞书控制
 
 - `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常 `FILE:`/`MEDIA:` 交付；
