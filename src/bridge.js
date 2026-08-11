@@ -1366,6 +1366,7 @@ export function buildConfig(env) {
     allowGroups: String(env.FEISHU_ALLOW_GROUPS).toLowerCase() === "true",
     reactions: !["false", "0", "no"].includes(String(env.FEISHU_REACTIONS ?? "true").trim().toLowerCase()),
     codexCommand: resolveCodexCommand(env),
+    appServerWebSocketUrl: String(env.CODEX_APP_SERVER_WS_URL ?? "").trim(),
     model: env.CODEX_MODEL?.trim() || "",
     titleModel: titleModel || "auto",
     titleEffort: titleEffort || "auto",
@@ -2275,7 +2276,11 @@ class BridgeRuntime {
   constructor(state, config) {
     this.state = state;
     this.config = config;
-    this.client = new CodexAppServer({ cwd: ROOT, command: config.codexCommand });
+    this.client = new CodexAppServer({
+      cwd: ROOT,
+      command: config.codexCommand,
+      websocketUrl: config.appServerWebSocketUrl,
+    });
     this.loadedThreads = new Set();
     this.activeThreads = new Map();
     this.attachedThreads = new Map();
@@ -4049,6 +4054,7 @@ export async function main() {
   await runtime.start();
   console.log(`[bridge] root=${config.rootDir}`);
   console.log(`[bridge] codex=${config.codexCommand}`);
+  console.log(`[bridge] app-server=${config.appServerWebSocketUrl ? `websocket:${config.appServerWebSocketUrl}` : "stdio"}`);
   console.log(`[bridge] allowed_users=${config.allowedIds.size} full_read=true approval=${config.defaultApprovalMode} sandbox=workspace-write`);
   await startConsumer(state, config, runtime);
 }

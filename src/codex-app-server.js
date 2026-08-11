@@ -3,20 +3,22 @@ import { EventEmitter } from "node:events";
 import readline from "node:readline";
 
 export class CodexAppServer extends EventEmitter {
-  constructor({ cwd, command = "codex", args = [], requestTimeoutMs = 60_000 } = {}) {
+  constructor({ cwd, command = "codex", args = [], websocketUrl = "", requestTimeoutMs = 60_000 } = {}) {
     super();
     this.cwd = cwd;
     this.command = command;
     this.args = args;
+    this.websocketUrl = String(websocketUrl || "").trim();
     this.requestTimeoutMs = requestTimeoutMs;
     this.nextId = 1;
     this.pending = new Map();
     this.child = null;
+    this.ws = null;
     this.startPromise = null;
   }
 
   async start() {
-    if (this.child) return;
+    if (this.child || this.ws) return;
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.#start();
     try {
@@ -27,6 +29,23 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async #start() {
+    if (this.websocketUrl) {
+      await this.#connectWebSocket();
+    } else {
+      await this.#startChild();
+    }
+    await this.#requestRaw("initialize", {
+      clientInfo: {
+        name: "codex2lark",
+        title: "Codex to Feishu Bridge",
+        version: "1.0.0",
+      },
+      capabilities: { experimentalApi: true },
+    });
+    this.notify("initialized", {});
+  }
+
+  async #startChild() {
     const child = spawn(this.command, ["app-server", ...this.args], {
       cwd: this.cwd,
       env: process.env,
@@ -41,16 +60,37 @@ export class CodexAppServer extends EventEmitter {
     });
     child.once("error", (error) => this.#onClose(child, error));
     child.once("close", (code) => this.#onClose(child, new Error(`codex app-server exited ${code}`)));
+  }
 
-    await this.#requestRaw("initialize", {
-      clientInfo: {
-        name: "codex2lark",
-        title: "Codex to Feishu Bridge",
-        version: "1.0.0",
-      },
-      capabilities: { experimentalApi: true },
+  async #connectWebSocket() {
+    const WS = globalThis.WebSocket;
+    if (!WS) throw new Error("当前 Node.js 不支持全局 WebSocket，请升级到 Node 22+ 或安装 ws 依赖");
+    const ws = new WS(this.websocketUrl);
+    this.ws = ws;
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`websocket 连接超时: ${this.websocketUrl}`)), 15_000);
+      ws.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error(`websocket 连接失败: ${this.websocketUrl}`));
+      };
     });
-    this.notify("initialized", {});
+    ws.onmessage = (event) => {
+      let data = event.data;
+      if (typeof data !== "string") {
+        try {
+          data = Buffer.from(data).toString("utf8");
+        } catch {
+          return;
+        }
+      }
+      this.#onLine(String(data));
+    };
+    ws.onerror = () => { /* close 事件会统一处理 */ };
+    ws.onclose = () => this.#onClose(ws, new Error("codex app-server websocket closed"));
   }
 
   async request(method, params = {}, options = {}) {
@@ -59,7 +99,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #requestRaw(method, params, timeoutMs = this.requestTimeoutMs) {
-    if (!this.child?.stdin.writable) return Promise.reject(new Error("codex app-server is not running"));
+    if (!this.#canWrite()) return Promise.reject(new Error("codex app-server is not running"));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -69,6 +109,14 @@ export class CodexAppServer extends EventEmitter {
       this.pending.set(id, { resolve, reject, timer, method });
       this.#write({ method, id, params });
     });
+  }
+
+  #canWrite() {
+    if (this.ws) {
+      const OPEN = globalThis.WebSocket?.OPEN ?? 1;
+      return this.ws.readyState === OPEN;
+    }
+    return Boolean(this.child?.stdin?.writable);
   }
 
   notify(method, params = {}) {
@@ -84,17 +132,31 @@ export class CodexAppServer extends EventEmitter {
   }
 
   stop() {
+    const ws = this.ws;
     const child = this.child;
-    if (!child) return;
+    if (!ws && !child) return;
+    this.ws = null;
     this.child = null;
     const error = new Error("codex app-server stopped");
     this.#rejectPending(error);
     this.emit("closed", error);
+    if (ws) {
+      try {
+        ws.close();
+      } catch { /* already closed */ }
+      return;
+    }
     try { child.stdin.end(); } catch { /* process already closed */ }
     setTimeout(() => child.kill(), 2000).unref();
   }
 
   #write(message) {
+    if (this.ws) {
+      const OPEN = globalThis.WebSocket?.OPEN ?? 1;
+      if (this.ws.readyState !== OPEN) throw new Error("codex app-server is not running");
+      this.ws.send(JSON.stringify(message));
+      return;
+    }
     if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
@@ -130,7 +192,8 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #onClose(child, error) {
-    if (this.child !== child) return;
+    if (this.child !== child && this.ws !== child) return;
+    this.ws = null;
     this.child = null;
     this.#rejectPending(error);
     this.emit("closed", error);
