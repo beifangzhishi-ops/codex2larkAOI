@@ -791,7 +791,8 @@ test("plan review cards embed uploaded images with image keys", () => {
   ]);
   const images = card.elements.filter((item) => item.tag === "img");
   assert.equal(images.length, 1);
-  assert.equal(images[0].image_key, "img_v1_abc");
+  assert.equal(images[0].img_key, "img_v1_abc");
+  assert.equal(images[0].image_key, undefined);
   assert.equal(images[0].alt.content, "测试图");
   assert.ok(card.elements.some((item) => item.tag === "action"));
 });

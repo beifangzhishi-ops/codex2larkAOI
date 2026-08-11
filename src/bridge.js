@@ -2227,7 +2227,7 @@ export function buildPlanReviewCard(plan, planItemId, status = "pending", images
       { tag: "markdown", content: `${safePlan}\n\n${statusText}` },
       ...images.map((image) => ({
         tag: "img",
-        image_key: image.imageKey,
+        img_key: image.imageKey,
         alt: { tag: "plain_text", content: String(image.alt || "图片") },
       })),
       ...(processed ? [] : [{ tag: "action", actions: [
