@@ -17,6 +17,7 @@ import {
   buildModelResultCard,
   buildPlanReviewCard,
   splitPlanCardImages,
+  buildTurnInput,
   buildResolvedUserInputCard,
   buildUserInputCard,
   buildResumeCard,
@@ -57,6 +58,7 @@ import {
   markdownFolderFromCreateOutput,
   markdownFolderFromListOutput,
   markdownFolderGrantArgs,
+  messageImageDownloadSpec,
   normalizeModelCatalog,
   normalizeManualThreadName,
   normalizePersistedState,
@@ -126,8 +128,41 @@ test("normalizeEvent accepts flattened and JSON-wrapped text", () => {
     sender_id: "ou_1", message_type: "text", content: "{\"text\":\" hello \"}",
   }), {
     eventId: "evt", messageId: "om_1", chatId: "oc_1", chatType: "p2p",
-    senderId: "ou_1", messageType: "text", content: "hello",
+    senderId: "ou_1", messageType: "text", content: "hello", imageKey: "",
   });
+});
+
+test("normalizeEvent extracts image_key from image messages", () => {
+  assert.deepEqual(normalizeEvent({
+    event_id: "evt-img", message_id: "om_2", chat_id: "oc_1", chat_type: "p2p",
+    sender_id: "ou_1", message_type: "image", content: "{\"image_key\":\"img_v3_abc\"}",
+  }), {
+    eventId: "evt-img", messageId: "om_2", chatId: "oc_1", chatType: "p2p",
+    senderId: "ou_1", messageType: "image", content: "{\"image_key\":\"img_v3_abc\"}", imageKey: "img_v3_abc",
+  });
+});
+
+test("messageImageDownloadSpec builds bot image resource download args", () => {
+  const spec = messageImageDownloadSpec("om_1", "img_v3_x", "evt1.img");
+  assert.deepEqual(spec.args, [
+    "im", "+messages-resources-download",
+    "--message-id", "om_1",
+    "--file-key", "img_v3_x",
+    "--type", "image",
+    "--output", "evt1.img",
+    "--as", "bot",
+  ]);
+  assert.ok(spec.cwd.endsWith(`${sep}.state${sep}uploads`), `unexpected upload dir: ${spec.cwd}`);
+});
+
+test("buildTurnInput attaches pending local images before text", () => {
+  assert.deepEqual(buildTurnInput("看这张图", ["C:\\a.png", "C:\\b.png"]), [
+    { type: "localImage", path: "C:\\a.png" },
+    { type: "localImage", path: "C:\\b.png" },
+    { type: "text", text: "看这张图" },
+  ]);
+  assert.deepEqual(buildTurnInput("普通文字"), [{ type: "text", text: "普通文字" }]);
+  assert.deepEqual(buildTurnInput("", ["C:\\a.png"]), [{ type: "localImage", path: "C:\\a.png" }]);
 });
 
 test("splitReply prefers newline boundaries", () => {
