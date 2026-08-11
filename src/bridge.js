@@ -444,12 +444,15 @@ function normalizeTextContent(content) {
 
 function extractImageKey(content) {
   const text = String(content ?? "").trim();
-  if (!text.startsWith("{")) return "";
-  try {
-    return String(JSON.parse(text).image_key ?? "");
-  } catch {
-    return "";
+  if (text.startsWith("{")) {
+    try {
+      return String(JSON.parse(text).image_key ?? "");
+    } catch {
+      return "";
+    }
   }
+  const match = text.match(/\[Image:\s*([^\]]+)\]/i);
+  return match ? match[1].trim() : "";
 }
 
 export function normalizeEvent(value) {

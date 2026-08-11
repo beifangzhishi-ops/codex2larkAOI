@@ -135,11 +135,19 @@ test("normalizeEvent accepts flattened and JSON-wrapped text", () => {
 test("normalizeEvent extracts image_key from image messages", () => {
   assert.deepEqual(normalizeEvent({
     event_id: "evt-img", message_id: "om_2", chat_id: "oc_1", chat_type: "p2p",
-    sender_id: "ou_1", message_type: "image", content: "{\"image_key\":\"img_v3_abc\"}",
+    sender_id: "ou_1", message_type: "image", content: "[Image: img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg]",
   }), {
     eventId: "evt-img", messageId: "om_2", chatId: "oc_1", chatType: "p2p",
-    senderId: "ou_1", messageType: "image", content: "{\"image_key\":\"img_v3_abc\"}", imageKey: "img_v3_abc",
+    senderId: "ou_1", messageType: "image", content: "[Image: img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg]",
+    imageKey: "img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg",
   });
+});
+
+test("normalizeEvent still parses raw JSON image content", () => {
+  assert.equal(normalizeEvent({
+    event_id: "evt-img2", message_id: "om_3", chat_id: "oc_1", chat_type: "p2p",
+    sender_id: "ou_1", message_type: "image", content: "{\"image_key\":\"img_v3_raw\"}",
+  }).imageKey, "img_v3_raw");
 });
 
 test("messageImageDownloadSpec builds bot image resource download args", () => {
