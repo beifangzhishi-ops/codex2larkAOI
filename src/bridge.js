@@ -1150,7 +1150,7 @@ export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false
 
   // Codex often renders a local deliverable as a clickable link. Treat only links
   // whose targets resolve to real local files as attachments; web links stay intact.
-  const markdownLink = /\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g;
+  const markdownLink = /!?\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g;
   cleaned = cleaned.replace(markdownLink, (match, _label, target) => {
     const path = localMarkdownPath(target, cwd);
     if (!path) return match;

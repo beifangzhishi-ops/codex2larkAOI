@@ -1486,6 +1486,23 @@ test("extractFileDirectives keepMediaLinks preserves image links while extractin
   }
 });
 
+test("extractFileDirectives removes image-syntax file links without leaving an exclamation mark", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-delivery-audio-"));
+  const song = join(directory, "song.mp3");
+  try {
+    writeFileSync(song, "audio");
+    assert.deepEqual(extractFileDirectives(
+      `测试音频：\n\n![audio](${song})`,
+      { cwd: directory, keepMediaLinks: true },
+    ), {
+      text: "测试音频：",
+      files: [{ kind: "FILE", path: song }],
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("splitFeishuMarkdown splits local image links and preserves remote and code content", () => {
   const directory = mkdtempSync(join(tmpdir(), "codex2lark-feishu-image-"));
   const png = join(directory, "plot.png");
