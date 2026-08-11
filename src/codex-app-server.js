@@ -144,6 +144,14 @@ export class CodexAppServer extends EventEmitter {
       try {
         ws.close();
       } catch { /* already closed */ }
+      try {
+        const timer = setTimeout(() => {
+          try {
+            ws.terminate?.();
+          } catch { /* already closed */ }
+        }, 2000);
+        timer.unref?.();
+      } catch { /* ignore */ }
       return;
     }
     try { child.stdin.end(); } catch { /* process already closed */ }

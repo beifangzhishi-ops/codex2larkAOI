@@ -4026,6 +4026,7 @@ function startConsumer(state, config, runtime) {
     for (const child of children) child.stdin.end();
     setTimeout(() => {
       for (const child of children) child.kill();
+      process.exit(0);
     }, 3000).unref();
   };
   stopWatching = watchForStopRequest(STOP_FILE, stop);
