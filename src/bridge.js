@@ -2442,7 +2442,7 @@ export function approvalsReviewer(mode) {
 function turnSandbox(cwd) {
   return {
     type: "workspaceWrite",
-    writableRoots: [cwd],
+    writableRoots: [cwd, resolve(cwd, ".git"), resolve(cwd, ".agents"), resolve(cwd, ".codex")],
     readOnlyAccess: { type: "fullAccess" },
     networkAccess: false,
   };
