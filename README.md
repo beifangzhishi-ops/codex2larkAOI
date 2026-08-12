@@ -180,7 +180,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 记录 Codex 新版写入锁导致飞书 `/resume` 冲突的排查过程，旧内核 CodexLegacy 0.146.0-alpha.9.2 方案已弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”），排查详见 [Codex写入锁冲突排查记录.md](Codex写入锁冲突排查记录.md)；同日本项目更新统一推送 GitHub 分支（本机 `sjxgame`、noha 机器 `noha`）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（本机 `sjxgame`、noha 机器 `noha`）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。
 
 状态保存在 `.state/sessions.json`：
 
