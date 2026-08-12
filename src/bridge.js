@@ -1300,6 +1300,27 @@ export function formatThreadItem(item, stage = "completed") {
   return "";
 }
 
+export function extractUserMessageText(item) {
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content
+    .map(historicalInputText)
+    .map((text) => String(text || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function chatIdsForThread(state, threadId) {
+  if (!threadId || !state?.sessions) return [];
+  return Object.entries(state.sessions)
+    .filter(([, id]) => id === threadId)
+    .map(([chatId]) => chatId);
+}
+
+export function shouldMirrorExternalTurn(state, threadId, { activeThreadIds = new Set(), titleThreadIds = new Set() } = {}) {
+  if (!threadId || activeThreadIds.has(threadId) || titleThreadIds.has(threadId)) return false;
+  return chatIdsForThread(state, threadId).length > 0;
+}
+
 function loadEnv() {
   const envPath = resolve(ROOT, ".env");
   const fileValues = existsSync(envPath) ? parseDotEnv(readFileSync(envPath, "utf8")) : {};
@@ -2088,15 +2109,12 @@ async function updateApprovalCard(event) {
   ));
 }
 
-export async function sendReply(messageId, eventKey, text, config, options = {}) {
+export async function sendMessageCommon(commonArgs, eventKey, text, config, options = {}, runner = runCommand) {
   const { cwd = ROOT, embedImages = false } = options;
   const consumedImages = [];
   const chunks = splitReply(text, config.replyChars);
   for (let index = 0; index < chunks.length; index += 1) {
     const key = idempotencyKey(eventKey, index);
-    const common = [
-      "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
-    ];
     try {
       let postContent = null;
       try {
@@ -2106,8 +2124,8 @@ export async function sendReply(messageId, eventKey, text, config, options = {})
       }
       if (postContent) {
         try {
-          await runCommand("lark-cli", [
-            ...common, "--msg-type", "post", "--content", JSON.stringify(postContent.content),
+          await runner("lark-cli", [
+            ...commonArgs, "--msg-type", "post", "--content", JSON.stringify(postContent.content),
             "--idempotency-key", key,
           ]);
           consumedImages.push(...postContent.consumedImages);
@@ -2119,18 +2137,32 @@ export async function sendReply(messageId, eventKey, text, config, options = {})
       }
       const markdown = embedImages ? removeLocalImageMarkdown(chunks[index], { cwd }) : chunks[index];
       if (markdown) {
-        await runCommand("lark-cli", [...common, "--markdown", markdown, "--idempotency-key", key]);
+        await runner("lark-cli", [...commonArgs, "--markdown", markdown, "--idempotency-key", key]);
       }
     } catch (error) {
       if (!isMarkdownValidationError(error)) throw error;
-      console.warn(`[bridge] markdown rejected for ${messageId}; retrying as plain text`);
+      console.warn(`[bridge] markdown rejected for ${eventKey}; retrying as plain text`);
       const plainText = embedImages ? removeLocalImageMarkdown(chunks[index], { cwd }) : chunks[index];
       if (plainText) {
-        await runCommand("lark-cli", [...common, "--text", plainText, "--idempotency-key", `${key}-text`]);
+        await runner("lark-cli", [...commonArgs, "--text", plainText, "--idempotency-key", `${key}-text`]);
       }
     }
   }
   return { consumedImages: [...new Set(consumedImages)] };
+}
+
+export async function sendReply(messageId, eventKey, text, config, options = {}) {
+  return sendMessageCommon(
+    ["im", "+messages-reply", "--as", "bot", "--message-id", messageId],
+    eventKey, text, config, options,
+  );
+}
+
+export async function sendChatMessage(chatId, eventKey, text, config, options = {}, runner = runCommand) {
+  return sendMessageCommon(
+    ["im", "+messages-send", "--as", "bot", "--chat-id", chatId],
+    eventKey, text, config, options, runner,
+  );
 }
 
 export async function sendPlainTextReply(messageId, eventKey, text, config) {
@@ -2444,6 +2476,7 @@ class BridgeRuntime {
     this.loadedThreads = new Set();
     this.activeThreads = new Map();
     this.attachedThreads = new Map();
+    this.desktopMirrors = new Map();
     this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
     this.pendingUserInputs = new Map();
@@ -2463,6 +2496,20 @@ class BridgeRuntime {
 
   async start() {
     await this.client.start();
+    await this.#subscribeBoundThreads();
+  }
+
+  async #subscribeBoundThreads() {
+    for (const [chatId, threadId] of Object.entries(this.state.sessions || {})) {
+      if (!threadId || this.loadedThreads.has(threadId)) continue;
+      try {
+        await this.client.request("thread/resume", { threadId });
+        this.loadedThreads.add(threadId);
+        console.log(`[bridge] subscribed bound thread ${threadId} for chat ${chatId}`);
+      } catch (error) {
+        console.warn(`[bridge] cannot resume bound thread ${threadId} for chat ${chatId}: ${error.message}`);
+      }
+    }
   }
 
   stop() {
@@ -3852,6 +3899,63 @@ class BridgeRuntime {
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
   }
 
+  #ensureDesktopMirror(threadId, turnId) {
+    if (!threadId || !turnId) return null;
+    if (!shouldMirrorExternalTurn(this.state, threadId, {
+      activeThreadIds: this.activeThreads,
+      titleThreadIds: this.titleRuns,
+    })) return null;
+    const chatIds = chatIdsForThread(this.state, threadId);
+    let mirror = this.desktopMirrors.get(threadId);
+    if (!mirror) {
+      mirror = {
+        threadId,
+        turnId: "",
+        chatIds,
+        progressKeys: new Set(),
+        sendQueue: Promise.resolve(),
+      };
+      this.desktopMirrors.set(threadId, mirror);
+      console.log(`[bridge] desktop mirror started thread=${threadId} turn=${turnId} chatIds=${chatIds.join(",")}`);
+    }
+    mirror.chatIds = chatIds;
+    if (!mirror.turnId || mirror.turnId !== turnId) mirror.turnId = turnId;
+    return mirror;
+  }
+
+  #handleMirrorUserMessage(mirror, item, turnId) {
+    const key = `desktop-user-${item?.id || turnId || mirror.turnId}`;
+    if (mirror.progressKeys.has(key)) return;
+    const text = extractUserMessageText(item);
+    if (!text) return;
+    mirror.progressKeys.add(key);
+    mirror.sendQueue = mirror.sendQueue
+      .then(async () => {
+        await Promise.all(mirror.chatIds.map((chatId) =>
+          sendChatMessage(chatId, `desktop-user-${key}`, `[桌面] ${text}`, this.config)
+        ));
+        console.log(`[bridge] desktop mirror user message thread=${mirror.threadId} text=${text.slice(0, 80)}`);
+      })
+      .catch((error) => console.error(`[bridge] desktop mirror user message failed: ${error.message}`));
+  }
+
+  #queueMirrorProgress(mirror, key, text) {
+    if (!text || mirror.progressKeys.has(key)) return;
+    mirror.progressKeys.add(key);
+    mirror.sendQueue = mirror.sendQueue
+      .then(async () => {
+        await Promise.all(mirror.chatIds.map((chatId) =>
+          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { embedImages: true })
+        ));
+        console.log(`[bridge] desktop mirror progress thread=${mirror.threadId} text=${text.slice(0, 80)}`);
+      })
+      .catch((error) => console.error(`[bridge] desktop mirror progress failed: ${error.message}`));
+  }
+
+  #finishDesktopMirror(threadId) {
+    this.desktopMirrors.delete(threadId);
+  }
+
   #attachRunningThread(event, threadId, thread) {
     if (this.activeThreads.has(threadId)) return;
     this.attachedThreads.set(threadId, createRunningThreadAttachment(event, threadId, thread));
@@ -3975,6 +4079,33 @@ class BridgeRuntime {
       if (message.method === "error") titleRun.rejectDone(new Error(params.error?.message || "标题生成失败。"));
       return;
     }
+    if (message.method === "turn/started" && params.turn?.id) {
+      this.#ensureDesktopMirror(eventThreadId, params.turn.id);
+    } else if (message.method === "item/started" && params.item?.type === "userMessage" && params.turnId) {
+      this.#ensureDesktopMirror(eventThreadId, params.turnId);
+    }
+    if (this.activeThreads.has(eventThreadId)) this.#finishDesktopMirror(eventThreadId);
+    const mirror = this.desktopMirrors.get(eventThreadId);
+    if (mirror) {
+      if (message.method === "item/started" && params.item?.type === "userMessage") {
+        this.#handleMirrorUserMessage(mirror, params.item, params.turnId);
+      } else if (message.method === "item/completed") {
+        const item = params.item;
+        if (item?.type === "userMessage") {
+          this.#handleMirrorUserMessage(mirror, item, params.turnId);
+        } else if (item?.type === "agentMessage" && item.text?.trim()) {
+          const key = `item-${item.phase === "commentary" ? "commentary" : "final"}-${params.turnId || mirror.turnId}-${item.id}`;
+          const text = item.phase === "commentary" ? formatThreadItem(item, "completed") : item.text.trim();
+          this.#queueMirrorProgress(mirror, key, text);
+        }
+      } else if (message.method === "turn/completed") {
+        this.#finishDesktopMirror(eventThreadId);
+      } else if (message.method === "error") {
+        this.#queueMirrorProgress(mirror, `error-${mirror.turnId}`, `运行中的会话出错：${params.error?.message || "Codex app-server error"}`);
+        this.#finishDesktopMirror(eventThreadId);
+      }
+      return;
+    }
     const active = this.activeThreads.get(eventThreadId) || this.attachedThreads.get(eventThreadId);
     if (!active) return;
     if (message.method === "turn/started" && params.turn?.id) active.turnId = params.turn.id;
@@ -4010,6 +4141,7 @@ class BridgeRuntime {
 
   #onServerRequest(message) {
     const params = message.params || {};
+    if (this.desktopMirrors.has(params.threadId) && !this.attachedThreads.has(params.threadId)) return;
     if (message.method === "item/tool/requestUserInput") {
       const active = this.activeThreads.get(params.threadId) || this.attachedThreads.get(params.threadId);
       if (!active || !shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) {
@@ -4126,6 +4258,7 @@ class BridgeRuntime {
   #onClientClosed(error) {
     this.loadedThreads.clear();
     this.attachedThreads.clear();
+    this.desktopMirrors.clear();
     for (const active of this.activeThreads.values()) active.rejectDone(error);
     for (const titleRun of this.titleRuns.values()) titleRun.rejectDone(error);
   }
