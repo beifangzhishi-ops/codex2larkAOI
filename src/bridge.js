@@ -1374,7 +1374,14 @@ export function formatThreadItem(item, stage = "completed") {
   if (!item) return "";
   if (item.type === "agentMessage" && item.phase === "commentary" && stage === "completed") {
     const text = item.text?.trim() || "";
-    return /[\u3400-\u9fff]/u.test(text) ? text : "";
+    if (!text) return "";
+    return /[\u3400-\u9fff]/u.test(text) || /!\[[^\]]*\]\(\s*<?[^)>\r\n]+>?\s*\)/.test(text) ? text : "";
+  }
+  if (item.type === "imageView" && item.path && stage === "completed") {
+    return `![图片](${item.path})`;
+  }
+  if (item.type === "imageGeneration" && item.savedPath && stage === "completed") {
+    return `![生成的图片](${item.savedPath})`;
   }
   if (item.type === "reasoning") return "";
   return "";
@@ -4005,7 +4012,10 @@ class BridgeRuntime {
     active.progressKeys.add(key);
     active.sendQueue = active.sendQueue
       .then(() => shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)
-        ? sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config)
+        ? sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config, {
+            cwd: this.cwdFor(active.chatId),
+            embedImages: true,
+          })
         : undefined)
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
   }

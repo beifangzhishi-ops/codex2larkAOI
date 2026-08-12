@@ -1783,6 +1783,22 @@ test("Markdown delivery reply links both the document and shared folder", () => 
 test("formatThreadItem renders readable progress but suppresses tool calls", () => {
   assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "正在检查。" }), "正在检查。");
   assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "Continuing the plan mode" }), "");
+  assert.equal(
+    formatThreadItem({ type: "agentMessage", phase: "commentary", text: "![图](C:\\work\\plot.png)" }),
+    "![图](C:\\work\\plot.png)",
+  );
+  assert.equal(
+    formatThreadItem({ type: "imageView", path: "C:\\work\\photo.png" }),
+    "![图片](C:\\work\\photo.png)",
+  );
+  assert.equal(
+    formatThreadItem({ type: "imageView", path: "C:\\work\\photo.png" }, "started"),
+    "",
+  );
+  assert.equal(
+    formatThreadItem({ type: "imageGeneration", savedPath: "C:\\work\\generated.png" }),
+    "![生成的图片](C:\\work\\generated.png)",
+  );
   assert.equal(formatThreadItem({ type: "reasoning", summary: [{ text: "已确认根因。" }] }), "");
   assert.equal(formatThreadItem({ type: "commandExecution", command: "npm test" }, "started"), "");
   assert.equal(formatThreadItem({ type: "mcpToolCall", server: "docs", tool: "search" }, "started"), "");
