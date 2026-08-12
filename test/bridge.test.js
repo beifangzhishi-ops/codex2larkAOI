@@ -17,6 +17,7 @@ import {
   buildModelResultCard,
   buildPlanReviewCard,
   splitPlanCardImages,
+  buildTurnInput,
   buildResolvedUserInputCard,
   buildUserInputCard,
   buildResumeCard,
@@ -36,6 +37,7 @@ import {
   extractFileDirectives,
   extractUserMessageText,
   extractMathJaxSvg,
+  extractReplayMedia,
   formatTemperatureReport,
   formatResumeThreads,
   formatLatestTurnReplay,
@@ -58,6 +60,7 @@ import {
   markdownFolderFromCreateOutput,
   markdownFolderFromListOutput,
   markdownFolderGrantArgs,
+  messageImageDownloadSpec,
   normalizeModelCatalog,
   normalizeManualThreadName,
   normalizePersistedState,
@@ -129,8 +132,49 @@ test("normalizeEvent accepts flattened and JSON-wrapped text", () => {
     sender_id: "ou_1", message_type: "text", content: "{\"text\":\" hello \"}",
   }), {
     eventId: "evt", messageId: "om_1", chatId: "oc_1", chatType: "p2p",
-    senderId: "ou_1", messageType: "text", content: "hello",
+    senderId: "ou_1", messageType: "text", content: "hello", imageKey: "",
   });
+});
+
+test("normalizeEvent extracts image_key from image messages", () => {
+  assert.deepEqual(normalizeEvent({
+    event_id: "evt-img", message_id: "om_2", chat_id: "oc_1", chat_type: "p2p",
+    sender_id: "ou_1", message_type: "image", content: "[Image: img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg]",
+  }), {
+    eventId: "evt-img", messageId: "om_2", chatId: "oc_1", chatType: "p2p",
+    senderId: "ou_1", messageType: "image", content: "[Image: img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg]",
+    imageKey: "img_v3_0214g_ff05a72f-c4d9-41a1-88fb-276e4387e9dg",
+  });
+});
+
+test("normalizeEvent still parses raw JSON image content", () => {
+  assert.equal(normalizeEvent({
+    event_id: "evt-img2", message_id: "om_3", chat_id: "oc_1", chat_type: "p2p",
+    sender_id: "ou_1", message_type: "image", content: "{\"image_key\":\"img_v3_raw\"}",
+  }).imageKey, "img_v3_raw");
+});
+
+test("messageImageDownloadSpec builds bot image resource download args", () => {
+  const spec = messageImageDownloadSpec("om_1", "img_v3_x", "evt1.img");
+  assert.deepEqual(spec.args, [
+    "im", "+messages-resources-download",
+    "--message-id", "om_1",
+    "--file-key", "img_v3_x",
+    "--type", "image",
+    "--output", "evt1.img",
+    "--as", "bot",
+  ]);
+  assert.ok(spec.cwd.endsWith(`${sep}.state${sep}uploads`), `unexpected upload dir: ${spec.cwd}`);
+});
+
+test("buildTurnInput attaches pending local images before text", () => {
+  assert.deepEqual(buildTurnInput("看这张图", ["C:\\a.png", "C:\\b.png"]), [
+    { type: "localImage", path: "C:\\a.png" },
+    { type: "localImage", path: "C:\\b.png" },
+    { type: "text", text: "看这张图" },
+  ]);
+  assert.deepEqual(buildTurnInput("普通文字"), [{ type: "text", text: "普通文字" }]);
+  assert.deepEqual(buildTurnInput("", ["C:\\a.png"]), [{ type: "localImage", path: "C:\\a.png" }]);
 });
 
 test("splitReply prefers newline boundaries", () => {
@@ -1085,6 +1129,48 @@ test("resume replay accepts legacy finals, plan fallback, placeholders, and clea
     cleanHistoricalFinalText("![远程图](https://example.com/x.png)"),
     "![远程图](https://example.com/x.png)",
   );
+});
+
+test("resume replay extracts existing local images from user input and final answers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex2lark-replay-"));
+  try {
+    const photo = join(dir, "photo.jpg");
+    const plot = join(dir, "plot.png");
+    const report = join(dir, "note.pdf");
+    const missing = join(dir, "missing.png");
+    writeFileSync(photo, "jpg");
+    writeFileSync(plot, "png");
+    writeFileSync(report, "pdf");
+    const turns = [{ status: "completed", items: [
+      { type: "userMessage", content: [
+        { type: "text", text: "看看这些图" },
+        { type: "localImage", path: photo },
+        { type: "image", url: "data:image/png;base64,xx" },
+      ] },
+      { type: "agentMessage", phase: "final_answer", text: [
+        "完成。",
+        `![示意图](${plot})`,
+        `MEDIA:${photo}`,
+        `MEDIA:${missing}`,
+        `FILE:${report}`,
+        "[报告](https://example.com/report.pdf)",
+      ].join("\n") },
+    ] }];
+    const { files } = extractReplayMedia(turns, { cwd: dir });
+    assert.deepEqual(
+      files.map((file) => `${file.kind}:${resolve(file.path)}`),
+      [`MEDIA:${resolve(photo)}`, `MEDIA:${resolve(plot)}`],
+    );
+    assert.deepEqual(extractReplayMedia([], { cwd: dir }).files, []);
+    assert.deepEqual(
+      extractReplayMedia([{ items: [{ type: "userMessage", content: [
+        { type: "localImage", path: missing },
+      ] }] }], { cwd: dir }).files,
+      [],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("resume history completeness requires full turn items", () => {

@@ -21,6 +21,8 @@ const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
 const LATEX_DIR = resolve(STATE_DIR, "latex");
+const UPLOAD_DIR = resolve(STATE_DIR, "uploads");
+const MAX_PENDING_IMAGES = 9;
 const MARKDOWN_FOLDER_NAME = "codex";
 const LATEX_CANVAS_WIDTH = 1200;
 const LATEX_CANVAS_PADDING_X = 60;
@@ -286,6 +288,33 @@ export function localImageUploadSpec(path) {
   };
 }
 
+export function messageImageDownloadSpec(messageId, fileKey, fileName) {
+  return {
+    args: [
+      "im", "+messages-resources-download",
+      "--message-id", String(messageId),
+      "--file-key", String(fileKey),
+      "--type", "image",
+      "--output", String(fileName),
+      "--as", "bot",
+    ],
+    cwd: UPLOAD_DIR,
+  };
+}
+
+export async function downloadMessageImage(messageId, fileKey, eventId) {
+  mkdirSync(UPLOAD_DIR, { recursive: true });
+  const spec = messageImageDownloadSpec(messageId, fileKey, `${eventId}.img`);
+  await runCommand("lark-cli", spec.args, { cwd: spec.cwd, timeoutMs: 60_000 });
+  const matches = readdirSync(UPLOAD_DIR)
+    .filter((name) => name.startsWith(`${eventId}.`))
+    .map((name) => resolve(UPLOAD_DIR, name))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  const imagePath = matches[0];
+  if (!imagePath || statSync(imagePath).size < 1) throw new Error("下载结果为空或文件缺失");
+  return imagePath;
+}
+
 export function latexImageUploadSpec(path) {
   return localImageUploadSpec(path);
 }
@@ -413,6 +442,19 @@ function normalizeTextContent(content) {
   }
 }
 
+function extractImageKey(content) {
+  const text = String(content ?? "").trim();
+  if (text.startsWith("{")) {
+    try {
+      return String(JSON.parse(text).image_key ?? "");
+    } catch {
+      return "";
+    }
+  }
+  const match = text.match(/\[Image:\s*([^\]]+)\]/i);
+  return match ? match[1].trim() : "";
+}
+
 export function normalizeEvent(value) {
   const event = value?.event ?? value;
   return {
@@ -423,7 +465,14 @@ export function normalizeEvent(value) {
     senderId: String(event?.sender_id ?? ""),
     messageType: String(event?.message_type ?? ""),
     content: normalizeTextContent(event?.content),
+    imageKey: extractImageKey(event?.content),
   };
+}
+
+export function buildTurnInput(text, imagePaths = []) {
+  const input = imagePaths.map((path) => ({ type: "localImage", path: String(path) }));
+  if (text) input.push({ type: "text", text: String(text) });
+  return input;
 }
 
 export function parseControlCommand(text) {
@@ -1030,6 +1079,37 @@ export function formatLatestTurnReplay(turns) {
   const userText = userParts.join("\n").trim() || "（该轮没有可回放的用户输入）";
   const finalText = finalParts.join("\n\n").trim() || "（该轮没有最终答复）";
   return `最近一轮对话\n\n用户：${userText}\n\nCodex：${finalText}`;
+}
+
+export function extractReplayMedia(turns, { cwd = ROOT } = {}) {
+  const turn = selectLatestTurn(turns);
+  if (!turn) return { files: [] };
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  const files = [];
+  const seen = new Set();
+  const addMedia = (path, base = cwd) => {
+    const resolvedPath = isAbsolute(path) ? resolve(path) : resolve(base, path);
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) return;
+    const key = `MEDIA\0${resolvedPath}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    files.push({ kind: "MEDIA", path: resolvedPath });
+  };
+  for (const item of items) {
+    if (item?.type === "userMessage" && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (part?.type === "localImage" && part.path) addMedia(part.path);
+      }
+      continue;
+    }
+    if (item?.type !== "agentMessage" || item.phase === "commentary" ||
+        (item.phase !== "final_answer" && item.phase != null) || !item.text) continue;
+    const extracted = extractFileDirectives(item.text, { cwd, keepMediaLinks: true });
+    for (const file of extracted.files) {
+      if (file.kind === "MEDIA") addMedia(file.path);
+    }
+  }
+  return { files };
 }
 
 export function latestThreadProgress(turns) {
@@ -2480,6 +2560,7 @@ class BridgeRuntime {
     this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
     this.pendingUserInputs = new Map();
+    this.pendingImages = new Map();
     this.resumeCandidates = new Map();
     this.chatRouteQueues = new Map();
     this.threadQueues = new ThreadTaskQueueManager(
@@ -2933,7 +3014,7 @@ class BridgeRuntime {
       const turnId = this.activeThreads.get(threadId)?.turnId || attached?.turnId;
       if (turnId) {
         await this.client.request("turn/steer", {
-          threadId, expectedTurnId: turnId, input: [{ type: "text", text: event.content }],
+          threadId, expectedTurnId: turnId, input: this.#takeImageInputs(event.chatId, event.content),
         });
         await sendReply(event.messageId, `${event.eventId}-steer`,
           goal?.status === "active" ? "已将消息注入正在运行的 Goal。" : "已将消息引导至正在运行的任务。", this.config);
@@ -3407,6 +3488,27 @@ class BridgeRuntime {
     await this.#recordUserInputAnswer(event, entry, question, event.answer);
   }
 
+  async acceptImage(event) {
+    if (!event.imageKey) throw new Error("图片消息缺少 image_key");
+    const imagePath = await downloadMessageImage(event.messageId, event.imageKey, event.eventId);
+    return this.#stashImage(event.chatId, imagePath);
+  }
+
+  #stashImage(chatId, path) {
+    const list = this.pendingImages.get(chatId) || [];
+    list.push(path);
+    const dropped = list.length > MAX_PENDING_IMAGES;
+    if (dropped) list.splice(0, list.length - MAX_PENDING_IMAGES);
+    this.pendingImages.set(chatId, list);
+    return dropped;
+  }
+
+  #takeImageInputs(chatId, text) {
+    const paths = this.pendingImages.get(chatId) || [];
+    this.pendingImages.delete(chatId);
+    return buildTurnInput(text, paths);
+  }
+
   async #handleUserInputText(event) {
     const entry = this.#pendingUserInput(event.chatId);
     if (!entry) return false;
@@ -3565,10 +3667,18 @@ class BridgeRuntime {
       if (running) {
         this.#attachRunningThread(event, threadId, historyThread);
       }
-      await sendReply(event.messageId, `${event.eventId}-resume-replay`,
-        running
-          ? formatRunningThreadReplay(historyThread)
-          : formatLatestTurnReplay(historyThread?.turns), this.config);
+      const replay = running
+        ? formatRunningThreadReplay(historyThread)
+        : formatLatestTurnReplay(historyThread?.turns);
+      await sendReply(event.messageId, `${event.eventId}-resume-replay`, replay, this.config);
+      if (!running) {
+        try {
+          const media = extractReplayMedia(historyThread?.turns, { cwd: this.cwdFor(event.chatId) });
+          if (media.files.length) await this.#deliverFiles(event, media.files, threadId);
+        } catch (error) {
+          console.warn(`[bridge] resume replay media delivery failed: ${error.message}`);
+        }
+      }
     } catch (error) {
       await sendReply(event.messageId, `${event.eventId}-resume-replay-error`,
         `最近一轮读取失败：${String(error.message || error).slice(0, 1500)}`, this.config);
@@ -3661,6 +3771,7 @@ class BridgeRuntime {
   }
 
   async #startThread(chatId, cwd, { standalone = false } = {}) {
+    this.pendingImages.delete(chatId);
     const previousThreadId = this.state.sessions[chatId];
     const discardPreviousTitle = this.state.pendingTitleJobs[previousThreadId]?.state === "awaitingFirstTurn" &&
       !this.activeThreads.has(previousThreadId) && !this.threadQueues.hasWork(previousThreadId);
@@ -3781,7 +3892,7 @@ class BridgeRuntime {
     try {
       const result = await this.client.request("turn/start", {
         threadId,
-        input: [{ type: "text", text: event.content }],
+        input: this.#takeImageInputs(event.chatId, event.content),
         additionalContext: this.config.turnAdditionalContext,
         cwd,
         approvalPolicy: approvalPolicy(),
@@ -4276,8 +4387,24 @@ async function acceptEvent(raw, runtime, state, config) {
     return;
   }
   if (event.chatType === "group" && !config.allowGroups) return;
+  if (event.messageType === "image") {
+    try {
+      const dropped = await runtime.acceptImage(event);
+      console.log(`[bridge] stashed image event=${event.eventId} chat=${event.chatId}`);
+      await sendReply(event.messageId, `${event.eventId}-image-stashed`,
+        dropped
+          ? "已收到图片（超过 9 张，最早的图片已移除），发送文字说明即可一起处理。"
+          : "已收到图片，发送文字说明即可一起处理。",
+        config);
+    } catch (error) {
+      console.error(`[bridge] image download failed event=${event.eventId}: ${error.message}`);
+      await sendReply(event.messageId, `${event.eventId}-image-error`,
+        `图片下载失败：${String(error.message || error).slice(0, 1500)}`, config);
+    }
+    return;
+  }
   if (event.messageType !== "text" || !event.content) {
-    await sendReply(event.messageId, `${event.eventId}-unsupported`, "目前仅支持文字消息；Codex 生成的文件可以由桥接发送。", config);
+    await sendReply(event.messageId, `${event.eventId}-unsupported`, "目前仅支持文字和图片消息；Codex 生成的文件可以由桥接发送。", config);
     return;
   }
   const command = parseControlCommand(event.content);
