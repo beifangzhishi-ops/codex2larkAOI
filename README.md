@@ -218,6 +218,6 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
 6. 安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
 
-日常更新：本机提交后统一推送到 GitHub 的 `sjxgame` 分支（`git push origin HEAD:sjxgame`）；另一台电脑执行 `git pull origin sjxgame`，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+日常更新：本机（game 机器）提交后统一推送到 GitHub 的 `sjxgame` 分支（`git push origin HEAD:sjxgame`）；noha 机器推送自己的 `noha` 分支。`main` 作为稳定汇合点：稳定改动合并进 `main` 需由机器主人审核后执行，自动化不直接推送 `main`。各机器日常从 `origin/main` 拉取稳定内容合并进自己的分支（game 机器：`git fetch origin` 后 `git merge origin/main` 并推送 `sjxgame`；noha 机器同样处理 `noha`），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
