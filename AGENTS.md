@@ -10,6 +10,9 @@
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
 - 本机（Songjx）的所有更新提交后，统一推送到 GitHub 远程仓库的 `sjxgame` 分支。
 - noha 机器的所有更新提交后，统一推送到 GitHub 远程仓库的 `noha` 分支。
+- 本机（Songjx）只能动自己的 `sjxgame` 分支和 `main`，不能动其他分支（如 `noha`）。
+- noha 机器只能动自己的 `noha` 分支和 `main`，不能动其他分支（如 `sjxgame`）。
+- 自动化任务遵循同样约束：只操作 noha 和 main，不推送、不改写、不同步 `sjxgame`；main 的稳定内容由各机器自行拉取合并。
 
 ## AKA/AOI 双槽协作
 

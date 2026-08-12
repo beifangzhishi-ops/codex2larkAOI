@@ -26,6 +26,7 @@ import {
   buildScreenshotPowerShellCommand,
   buildTitleThreadOptions,
   buildTitleTurnParams,
+  chatIdsForThread,
   cleanHistoricalFinalText,
   createPendingTitleJob,
   DEFAULT_TITLE_MODEL,
@@ -34,6 +35,7 @@ import {
   createStandaloneCwd,
   ensureStandaloneCwd,
   extractFileDirectives,
+  extractUserMessageText,
   extractMathJaxSvg,
   extractReplayMedia,
   formatTemperatureReport,
@@ -81,11 +83,13 @@ import {
   resolveWorkdirQuery,
   sanitizeGeneratedTitle,
   sanitizePlanCardMarkdown,
+  sendChatMessage,
   parseGeneratedTitle,
   runCommand,
   selectLatestTurn,
   selectResumeThread,
   standaloneRoot,
+  shouldMirrorExternalTurn,
   shouldDeliverThreadOutput,
   splitReply,
   splitFeishuMarkdown,
@@ -1782,6 +1786,74 @@ test("formatThreadItem renders readable progress but suppresses tool calls", () 
   assert.equal(formatThreadItem({ type: "reasoning", summary: [{ text: "已确认根因。" }] }), "");
   assert.equal(formatThreadItem({ type: "commandExecution", command: "npm test" }, "started"), "");
   assert.equal(formatThreadItem({ type: "mcpToolCall", server: "docs", tool: "search" }, "started"), "");
+});
+
+test("extractUserMessageText joins text inputs and marks non-text placeholders", () => {
+  assert.equal(
+    extractUserMessageText({
+      content: [
+        { type: "text", text: " 你好 " },
+        { type: "localImage", path: "C:\\x.png" },
+        { type: "text", text: "" },
+      ],
+    }),
+    "你好\n[图片]",
+  );
+  assert.equal(extractUserMessageText({ content: [] }), "");
+  assert.equal(extractUserMessageText({}), "");
+  assert.equal(extractUserMessageText({ content: [{ type: "mention", name: "小明", path: "x" }] }), "[提及：小明]");
+});
+
+test("chatIdsForThread reverses session bindings", () => {
+  assert.deepEqual(
+    chatIdsForThread({ sessions: { oc_a: "t1", oc_b: "t1", oc_c: "t2" } }, "t1"),
+    ["oc_a", "oc_b"],
+  );
+  assert.deepEqual(chatIdsForThread({ sessions: {} }, "t1"), []);
+  assert.deepEqual(chatIdsForThread({}, "t1"), []);
+});
+
+test("shouldMirrorExternalTurn only mirrors bound threads outside bridge-owned turns", () => {
+  const state = { sessions: { oc_a: "t1" } };
+  assert.equal(shouldMirrorExternalTurn(state, "t1", { activeThreadIds: new Set() }), true);
+  assert.equal(shouldMirrorExternalTurn(state, "t1", { activeThreadIds: new Set(["t1"]) }), false);
+  assert.equal(shouldMirrorExternalTurn(state, "t1", { titleThreadIds: new Set(["t1"]) }), false);
+  assert.equal(shouldMirrorExternalTurn(state, "t2", {}), false);
+  assert.equal(shouldMirrorExternalTurn(state, "", {}), false);
+});
+
+test("sendChatMessage sends new bot messages with idempotency keys", async () => {
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: "{}" };
+  };
+  const config = buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_WORKDIR: process.cwd() });
+  const result = await sendChatMessage("oc_test", "desktop-user-1", "你好", config, {}, runner);
+  assert.deepEqual(result, { consumedImages: [] });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "lark-cli");
+  assert.ok(calls[0].args.includes("+messages-send"));
+  assert.ok(calls[0].args.includes("--chat-id"));
+  assert.ok(calls[0].args.includes("oc_test"));
+  assert.ok(calls[0].args.some((arg) => arg.startsWith("--idempotency-key")));
+});
+
+test("sendChatMessage falls back to markdown when post is rejected and splits long text", async () => {
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push({ command, args });
+    if (args.includes("--msg-type") && args.includes("post")) {
+      throw new Error("99992402 field validation failed");
+    }
+    return { stdout: "{}" };
+  };
+  const config = buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_WORKDIR: process.cwd() });
+  const longText = `段落一\n\n${"很长".repeat(2000)}\n\n段落二`;
+  await sendChatMessage("oc_test", "desktop-user-2", longText, config, {}, runner);
+  const markdownCalls = calls.filter((call) => call.args.includes("--markdown"));
+  assert.ok(markdownCalls.length >= 1);
+  assert.ok(calls.every((call) => call.args.includes("--chat-id")));
 });
 
 test("user input cards expose options and parse a typed answer callback", () => {
