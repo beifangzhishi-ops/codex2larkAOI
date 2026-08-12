@@ -44,6 +44,7 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 与 `/cd 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
+- `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；
 - `CODEX_COMMAND`：仅用于启动预检的 `codex.exe` 绝对路径；留空时自动发现最新版 VS Code 扩展内置内核（与共享 app-server 一致）；实际连接走 `CODEX_APP_SERVER_WS_URL` 指定的共享 app-server，不要指向已删除的项目内旧版内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-terra`（经 CodexModelProxy 中转的 DeepSeek-V4-Flash），三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
@@ -160,8 +161,6 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 - 模型提供的可读推理摘要，不发送隐藏链式推理；
 - 最终回答。
 
-Codex 流断连自动重试（`Reconnecting... n/5`）时，桥接会把重连进度转发到飞书，并保持当前轮次存活；只有重试耗尽的真实错误才会按失败处理并中断轮次。
-
 终端、文件修改、MCP、网页搜索等工具调用事件不会转发到飞书，避免过程消息过多。
 
 所有已识别的斜杠命令和控制卡片都通过聊天级短路由队列处理，不等待正在运行的 Codex turn。普通任务在选路时固定 thread、目录、模型、思考强度和审批模式，再进入 thread 队列；同一 thread 严格串行，不同 thread 可并行。`/new` 或 `/resume` 切换选择后，旧 thread 的任务继续后台执行并保留历史，但不再向该飞书聊天推送进度、审批提示、最终答复、错误或附件；恢复一个仍在运行的 thread 后，桥接会重新加入该 thread 并接收此后的 commentary、推理摘要和最终答复。
@@ -182,7 +181,7 @@ Codex 流断连自动重试（`Reconnecting... n/5`）时，桥接会把重连�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（本机 `sjxgame`、noha 机器 `noha`）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 修复 Codex 流断连重试被误判为轮次失败的问题：`Reconnecting... n/5` 作为重连进度转发，不再中断当前 turn，恢复后继续转发最终答复。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。
 
 状态保存在 `.state/sessions.json`：
 
@@ -207,19 +206,21 @@ Codex 流断连自动重试（`Reconnecting... n/5`）时，桥接会把重连�
 
 凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
 
-## GitHub 同步与另一台电脑部署
+## GitHub 同步与多机部署
 
 本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
-另一台电脑首次部署：
+每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定基准，稳定内容由各机器自行拉取合并。
+
+首次部署：
 
 1. `git clone https://github.com/beifangzhishi-ops/codex2larkAOI.git`
 2. `cd codex2larkAOI`
 3. `npm install`（需要 Node.js >= 20）
-4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS` 等配置
+4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS`、`LOCAL_BRANCH` 等配置（`LOCAL_BRANCH` 填本机维护的分支名）
 5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
-6. 安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
+6. 切换到本机分支（如 `git checkout <本机分支>` 或 `git pull origin <本机分支>`）；安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
 
-日常更新：本机提交后统一推送到 GitHub 的 `sjxgame` 分支（`git push origin HEAD:sjxgame`）；另一台电脑执行 `git pull origin sjxgame`，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 稳定内容由各机器拉取合并，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
