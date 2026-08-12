@@ -1408,6 +1408,11 @@ export function shouldMirrorExternalTurn(state, threadId, { activeThreadIds = ne
   return chatIdsForThread(state, threadId).length > 0;
 }
 
+export function desktopMirrorCwd(result, fallback = ROOT) {
+  const cwd = result?.thread?.cwd;
+  return cwd ? String(cwd) : fallback;
+}
+
 function loadEnv() {
   const envPath = resolve(ROOT, ".env");
   const fileValues = existsSync(envPath) ? parseDotEnv(readFileSync(envPath, "utf8")) : {};
@@ -4033,6 +4038,16 @@ class BridgeRuntime {
         threadId,
         turnId: "",
         chatIds,
+        cwd: ROOT,
+        cwdReady: this.client.request("thread/read", { threadId })
+          .then((result) => {
+            mirror.cwd = desktopMirrorCwd(result, mirror.cwd);
+            return mirror.cwd;
+          })
+          .catch((error) => {
+            console.warn(`[bridge] desktop mirror thread/read failed: ${error.message}`);
+            return mirror.cwd;
+          }),
         progressKeys: new Set(),
         sendQueue: Promise.resolve(),
       };
@@ -4052,8 +4067,9 @@ class BridgeRuntime {
     mirror.progressKeys.add(key);
     mirror.sendQueue = mirror.sendQueue
       .then(async () => {
+        const cwd = mirror.cwdReady ? await mirror.cwdReady : mirror.cwd;
         await Promise.all(mirror.chatIds.map((chatId) =>
-          sendChatMessage(chatId, `desktop-user-${key}`, `[桌面] ${text}`, this.config)
+          sendChatMessage(chatId, `desktop-user-${key}`, `[桌面] ${text}`, this.config, { cwd })
         ));
         console.log(`[bridge] desktop mirror user message thread=${mirror.threadId} text=${text.slice(0, 80)}`);
       })
@@ -4065,8 +4081,9 @@ class BridgeRuntime {
     mirror.progressKeys.add(key);
     mirror.sendQueue = mirror.sendQueue
       .then(async () => {
+        const cwd = mirror.cwdReady ? await mirror.cwdReady : mirror.cwd;
         await Promise.all(mirror.chatIds.map((chatId) =>
-          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { embedImages: true })
+          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { cwd, embedImages: true })
         ));
         console.log(`[bridge] desktop mirror progress thread=${mirror.threadId} text=${text.slice(0, 80)}`);
       })

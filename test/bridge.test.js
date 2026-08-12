@@ -34,6 +34,7 @@ import {
   createConsumerReadiness,
   createStandaloneCwd,
   ensureStandaloneCwd,
+  desktopMirrorCwd,
   extractFileDirectives,
   extractUserMessageText,
   extractMathJaxSvg,
@@ -1836,6 +1837,13 @@ test("shouldMirrorExternalTurn only mirrors bound threads outside bridge-owned t
   assert.equal(shouldMirrorExternalTurn(state, "t1", { titleThreadIds: new Set(["t1"]) }), false);
   assert.equal(shouldMirrorExternalTurn(state, "t2", {}), false);
   assert.equal(shouldMirrorExternalTurn(state, "", {}), false);
+});
+
+test("desktopMirrorCwd falls back to the project root when thread/read lacks a cwd", () => {
+  assert.equal(desktopMirrorCwd({ thread: { cwd: "C:\\work\\project" } }), "C:\\work\\project");
+  assert.equal(desktopMirrorCwd({ thread: {} }), process.cwd());
+  assert.equal(desktopMirrorCwd({}), process.cwd());
+  assert.equal(desktopMirrorCwd({ thread: { cwd: "" } }, "C:\\fallback"), "C:\\fallback");
 });
 
 test("sendChatMessage sends new bot messages with idempotency keys", async () => {
