@@ -166,7 +166,7 @@ function Invoke-Start {
       if ($afterProbe.Count -eq 0) {
         Write-Host "幽灵监听已被清理，继续启动。"
       } else {
-        Show-Error ("端口 " + $port + " 仍有幽灵监听（PID 不存在），通常需要重启 Codex 桌面端或电脑后释放。")
+        Show-Error ("端口 " + $port + " 仍有幽灵监听（PID 不存在）。该残留是共享 app-server 被强杀后的内核 socket，仅重启桌面端无效，必须重启电脑后才会释放。")
         exit 1
       }
     }
@@ -319,7 +319,7 @@ function Invoke-Stop {
   }
 
   if ($ghostSeen) {
-    Write-Host ("[警告] 端口 " + $port + " 仍有幽灵监听（PID 不存在）。共享 server 已停止，该残留通常需要重启 Codex 桌面端或电脑后释放。") -ForegroundColor Yellow
+    Write-Host ("[警告] 端口 " + $port + " 仍有幽灵监听（PID 不存在）。共享 server 已停止，该残留是内核 socket，仅重启桌面端无效，必须重启电脑后才会释放。") -ForegroundColor Yellow
   } elseif ($externalSeen) {
     Write-Host ("[警告] 端口 " + $port + " 仍有其他共享 app-server 实例监听，未自动停止（避免误杀）。环境变量与 PID 文件已清理。") -ForegroundColor Yellow
   }
