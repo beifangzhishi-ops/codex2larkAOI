@@ -85,9 +85,9 @@ AOI 桥接自身不再启动 codex 子进程：启动时通过 `CODEX_APP_SERVER
 - `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
 - `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
 
-环境变量变化后需重启一次桌面端才生效：变量存在时桌面端连接共享 app-server，删除后回退到内置内核。启动顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+桌面端只在启动时读取 `CODEX_APP_SERVER_WS_URL`：同一端口重启共享 app-server 后桌面端会自动重连，无需重启；换端口或删除变量后需重启一次桌面端才生效。正常顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）与桌面端；停止时先关闭 Codex 桌面端，再双击 `shared-stop.cmd`。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
 
-异常恢复：共享进程被手动结束但环境变量仍在时，双击 `shared-stop.cmd` 会删除变量；若端口仍有监听进程，脚本会提示手动排查，不会误杀其他 codex 进程。
+异常恢复：共享进程被强杀后，Windows 端口表可能残留“进程不存在但仍在 LISTENING”的幽灵占用。`shared-stop.cmd` 会识别该情况并正常收尾（删除环境变量与 PID 文件），提示重启桌面端或电脑后端口才会释放；`shared-start.cmd` 遇到幽灵占用时不会误判“已在运行”，会提示先重启清理。若检测到 AOI/AKA 桥接占用端口（防御分支），脚本会自动调用对应 `stop.cmd` 停止并弹窗提示；其他未知进程仍会要求人工排查，不会误杀其他 codex 进程。
 
 手动查看状态：
 
