@@ -1240,6 +1240,7 @@ async function compressImageUnderLimit(path) {
 
 function localMarkdownPath(target, cwd) {
   let value = String(target || "").trim();
+  if (value.startsWith("<") && value.endsWith(">")) value = value.slice(1, -1).trim();
   try { value = decodeURIComponent(value); } catch { /* keep the original target */ }
   try {
     if (/^file:\/\//i.test(value)) value = fileURLToPath(value);
@@ -1361,6 +1362,86 @@ export function removeLocalImageMarkdown(text, { cwd = ROOT } = {}) {
     .trim();
 }
 
+export function promoteLocalImageLinks(text, { cwd = ROOT } = {}) {
+  return String(text ?? "").replace(
+    /(?<!!)\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)/g,
+    (match, label, target) => {
+      const cleanTarget = String(target || "").trim().replace(/^<|>$/g, "").trim();
+      const path = localMarkdownPath(cleanTarget, cwd);
+      if (!path || !IMAGE_EXTENSIONS.has(extname(path).toLowerCase())) return match;
+      return `![${label}](${cleanTarget})`;
+    },
+  );
+}
+
+const POST_INLINE_PATTERN = /(?<!!)(\*\*[^*]+\*\*|`[^`]+`|\[[^\]\r\n]+\]\(\s*<?[^)>\r\n]+>?\s*\))/g;
+
+function postInlineElements(text) {
+  const elements = [];
+  const value = String(text ?? "");
+  let cursor = 0;
+  for (const match of value.matchAll(POST_INLINE_PATTERN)) {
+    if (match.index > cursor) elements.push({ tag: "text", text: value.slice(cursor, match.index) });
+    const token = match[0];
+    if (token.startsWith("**")) {
+      elements.push({ tag: "text", text: token.slice(2, -2), style: { bold: true } });
+    } else if (token.startsWith("`")) {
+      elements.push({ tag: "text", text: token.slice(1, -1) });
+    } else {
+      const link = token.match(/^\[([^\]\r\n]+)\]\(\s*<?([^)>\r\n]+)>?\s*\)$/);
+      if (!link) {
+        elements.push({ tag: "text", text: token });
+      } else {
+        const label = link[1];
+        const url = String(link[2] || "").trim().replace(/^<|>$/g, "").trim();
+        if (/^(?:https?:|mailto:)/i.test(url)) elements.push({ tag: "a", href: url, text: label });
+        else elements.push({ tag: "text", text: label });
+      }
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < value.length) elements.push({ tag: "text", text: value.slice(cursor) });
+  return elements.filter((element) => element.text !== "");
+}
+
+export function markdownToPostParagraphs(value) {
+  const paragraphs = [];
+  const lines = String(value ?? "").split(/\r?\n/);
+  let inCodeBlock = false;
+  let codeLines = [];
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      if (inCodeBlock) {
+        if (codeLines.length) paragraphs.push([{ tag: "text", text: codeLines.join("\n") }]);
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+      }
+      continue;
+    }
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) continue;
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (heading) {
+      paragraphs.push([{ tag: "text", text: heading[2], style: { bold: true } }]);
+      continue;
+    }
+    const bullet = line.match(/^\s{0,3}([-*+])\s+(.*)$/);
+    const ordered = line.match(/^\s{0,3}(\d+)[.)]\s+(.*)$/);
+    const body = bullet ? bullet[2] : ordered ? ordered[2] : line;
+    const prefix = bullet ? "• " : ordered ? `${ordered[1]}. ` : "";
+    const elements = postInlineElements(body);
+    if (prefix) elements.unshift({ tag: "text", text: prefix });
+    if (elements.length) paragraphs.push(elements);
+  }
+  if (inCodeBlock && codeLines.length) paragraphs.push([{ tag: "text", text: codeLines.join("\n") }]);
+  return paragraphs;
+}
+
 export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = false } = {}) {
   const segments = splitFeishuMarkdown(text, { cwd });
   const hasMath = segments.some((segment) => segment.type === "math");
@@ -1369,9 +1450,6 @@ export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = f
   const paragraphs = [[]];
   const consumedImages = [];
   const uploadedImageKeys = new Map();
-  const pushText = (value) => {
-    if (value) paragraphs.at(-1).push({ tag: "md", text: value });
-  };
   const pushBlockImage = (imageKey) => {
     if (paragraphs.at(-1).length) paragraphs.push([]);
     paragraphs.push([{ tag: "img", image_key: imageKey }]);
@@ -1379,12 +1457,12 @@ export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = f
   };
   for (const segment of segments) {
     if (segment.type === "text") {
-      pushText(segment.value);
+      paragraphs.push(...markdownToPostParagraphs(segment.value));
       continue;
     }
     if (segment.type === "image") {
       if (!embedImages) {
-        pushText(segment.raw);
+        paragraphs.push([{ tag: "text", text: segment.raw }]);
         continue;
       }
       const resolvedPath = resolve(segment.path);
@@ -1417,7 +1495,7 @@ export function formatThreadItem(item, stage = "completed") {
   if (item.type === "agentMessage" && item.phase === "commentary" && stage === "completed") {
     const text = item.text?.trim() || "";
     if (!text) return "";
-    return /[\u3400-\u9fff]/u.test(text) || /!\[[^\]]*\]\(\s*<?[^)>\r\n]+>?\s*\)/.test(text) ? text : "";
+    return /[\u3400-\u9fff]/u.test(text) || /(?:!\[|\[[^\]\r\n]+\]\(\s*<?[^)>\r\n]+>?\s*\))/.test(text) ? text : "";
   }
   if (item.type === "imageView" && item.path && stage === "completed") {
     return `![图片](${item.path})`;
@@ -2244,9 +2322,10 @@ async function updateApprovalCard(event) {
 }
 
 export async function sendMessageCommon(commonArgs, eventKey, text, config, options = {}, runner = runCommand) {
-  const { cwd = ROOT, embedImages = false } = options;
+  const { cwd = ROOT, embedImages = false, promoteLinkedImages = false } = options;
   const consumedImages = [];
-  const chunks = splitReply(text, config.replyChars);
+  const promoted = promoteLinkedImages ? promoteLocalImageLinks(text, { cwd }) : String(text ?? "");
+  const chunks = splitReply(promoted, config.replyChars);
   for (let index = 0; index < chunks.length; index += 1) {
     const key = idempotencyKey(eventKey, index);
     try {
@@ -4092,6 +4171,7 @@ class BridgeRuntime {
         ? sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config, {
             cwd: this.cwdFor(active.chatId),
             embedImages: true,
+            promoteLinkedImages: true,
           })
         : undefined)
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
@@ -4141,7 +4221,7 @@ class BridgeRuntime {
       .then(async () => {
         const cwd = mirror.cwdReady ? await mirror.cwdReady : mirror.cwd;
         await Promise.all(mirror.chatIds.map((chatId) =>
-          sendChatMessage(chatId, `desktop-user-${key}`, `[桌面] ${text}`, this.config, { cwd })
+          sendChatMessage(chatId, `desktop-user-${key}`, `[桌面] ${text}`, this.config, { cwd, promoteLinkedImages: true })
         ));
         console.log(`[bridge] desktop mirror user message thread=${mirror.threadId} text=${text.slice(0, 80)}`);
       })
@@ -4155,7 +4235,7 @@ class BridgeRuntime {
       .then(async () => {
         const cwd = mirror.cwdReady ? await mirror.cwdReady : mirror.cwd;
         await Promise.all(mirror.chatIds.map((chatId) =>
-          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { cwd, embedImages: true })
+          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { cwd, embedImages: true, promoteLinkedImages: true })
         ));
         console.log(`[bridge] desktop mirror progress thread=${mirror.threadId} text=${text.slice(0, 80)}`);
       })

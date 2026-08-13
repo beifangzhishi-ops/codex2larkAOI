@@ -63,6 +63,7 @@ import {
   markdownFolderFromCreateOutput,
   markdownFolderFromListOutput,
   markdownFolderGrantArgs,
+  markdownToPostParagraphs,
   messageImageDownloadSpec,
   normalizeModelCatalog,
   normalizeManualThreadName,
@@ -74,6 +75,7 @@ import {
   parseControlCardAction,
   parseUserInputCardAction,
   parseDotEnv,
+  promoteLocalImageLinks,
   queryTemperature,
   reactionArgs,
   reactionIdFromOutput,
@@ -1713,6 +1715,75 @@ test("removeLocalImageMarkdown strips only real local image links", () => {
   }
 });
 
+test("promoteLocalImageLinks promotes real local image links but leaves other links intact", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-promote-image-"));
+  const png = join(directory, "plot.png");
+  const txt = join(directory, "notes.txt");
+  try {
+    writeFileSync(png, "image");
+    writeFileSync(txt, "notes");
+    const plainPng = `[图](${png})`;
+    const anglePng = `[图](<${png.replaceAll("\\", "/")}>)`;
+    const promotedPng = `![图](${png})`;
+    const promotedAnglePng = `![图](${png.replaceAll("\\", "/")})`;
+    assert.equal(promoteLocalImageLinks(`先看图 ${plainPng} 吧`, { cwd: directory }), `先看图 ${promotedPng} 吧`);
+    assert.equal(promoteLocalImageLinks(anglePng, { cwd: directory }), promotedAnglePng);
+    assert.equal(promoteLocalImageLinks(`[笔记](${txt})`, { cwd: directory }), `[笔记](${txt})`);
+    assert.equal(promoteLocalImageLinks("[文档](https://example.com/report.pdf)", { cwd: directory }), "[文档](https://example.com/report.pdf)");
+    assert.equal(promoteLocalImageLinks(`![已嵌入](${png})`, { cwd: directory }), `![已嵌入](${png})`);
+    assert.equal(promoteLocalImageLinks("[缺失](C:\\missing.png)", { cwd: directory }), "[缺失](C:\\missing.png)");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("markdownToPostParagraphs renders common Markdown as Feishu post rich text", () => {
+  const paragraphs = markdownToPostParagraphs([
+    "# 标题",
+    "",
+    "正文含 **粗体** 和 `行内代码`，以及 [网页](https://example.com) 与 [本地](C:\\work\\a.md)。",
+    "",
+    "- 项目一",
+    "- **项目二**",
+    "",
+    "1. 第一步",
+    "2. 第二步",
+    "",
+    "```",
+    "code block",
+    "```",
+  ].join("\n"));
+  assert.deepEqual(paragraphs[0], [{ tag: "text", text: "标题", style: { bold: true } }]);
+  assert.deepEqual(paragraphs[1], [
+    { tag: "text", text: "正文含 " },
+    { tag: "text", text: "粗体", style: { bold: true } },
+    { tag: "text", text: " 和 " },
+    { tag: "text", text: "行内代码" },
+    { tag: "text", text: "，以及 " },
+    { tag: "a", href: "https://example.com", text: "网页" },
+    { tag: "text", text: " 与 " },
+    { tag: "text", text: "本地" },
+    { tag: "text", text: "。" },
+  ]);
+  assert.deepEqual(paragraphs[2], [
+    { tag: "text", text: "• " },
+    { tag: "text", text: "项目一" },
+  ]);
+  assert.deepEqual(paragraphs[3], [
+    { tag: "text", text: "• " },
+    { tag: "text", text: "项目二", style: { bold: true } },
+  ]);
+  assert.deepEqual(paragraphs[4], [
+    { tag: "text", text: "1. " },
+    { tag: "text", text: "第一步" },
+  ]);
+  assert.deepEqual(paragraphs[5], [
+    { tag: "text", text: "2. " },
+    { tag: "text", text: "第二步" },
+  ]);
+  assert.deepEqual(paragraphs[6], [{ tag: "text", text: "code block" }]);
+});
+
 test("Markdown delivery recognizes only FILE directives with an md extension", () => {
   assert.equal(isMarkdownAttachment({ kind: "FILE", path: "C:\\work\\report.MD" }), true);
   assert.equal(isMarkdownAttachment({ kind: "MEDIA", path: "C:\\work\\report.md" }), false);
@@ -1817,6 +1888,10 @@ test("Markdown delivery reply links both the document and shared folder", () => 
 test("formatThreadItem renders readable progress but suppresses tool calls", () => {
   assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "正在检查。" }), "正在检查。");
   assert.equal(formatThreadItem({ type: "agentMessage", phase: "commentary", text: "Continuing the plan mode" }), "");
+  assert.equal(
+    formatThreadItem({ type: "agentMessage", phase: "commentary", text: "Done: [plot.png](C:\\work\\plot.png)" }),
+    "Done: [plot.png](C:\\work\\plot.png)",
+  );
   assert.equal(
     formatThreadItem({ type: "agentMessage", phase: "commentary", text: "![图](C:\\work\\plot.png)" }),
     "![图](C:\\work\\plot.png)",
