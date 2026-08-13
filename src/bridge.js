@@ -1195,6 +1195,48 @@ export function resolveWorkdirQuery(query, rootDir, currentDir = rootDir) {
 }
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024; // lark-cli 图片消息上限 5MB
+const FILE_UPLOAD_LIMIT_BYTES = 30 * 1024 * 1024; // 飞书文件消息上限 30MB
+
+export function isImagePath(path) {
+  return IMAGE_EXTENSIONS.has(extname(String(path || "")).toLowerCase());
+}
+
+function normalizeDirectiveKind(kind, path) {
+  const normalized = String(kind || "").toUpperCase();
+  return normalized === "MEDIA" && !isImagePath(path) ? "FILE" : normalized;
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
+
+async function compressImageUnderLimit(path) {
+  const extension = extname(path).toLowerCase();
+  const outputExtension = extension === ".png" ? "png" : "jpg";
+  const temp = resolve(tmpdir(), `codex2lark-${randomUUID()}.${outputExtension}`);
+  try {
+    let width = 0;
+    let quality = 82;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let pipeline = sharp(path, { animated: false });
+      if (width > 0) pipeline = pipeline.resize({ width });
+      const rendered = extension === ".png"
+        ? pipeline.png({ compressionLevel: 9, adaptiveFiltering: true })
+        : pipeline.jpeg({ quality, mozjpeg: true });
+      await rendered.toFile(temp);
+      if (statSync(temp).size <= IMAGE_UPLOAD_LIMIT_BYTES) return temp;
+      width = width > 0 ? Math.max(320, Math.floor(width * 0.7)) : 2560;
+      quality = Math.max(35, quality - 20);
+    }
+  } catch {
+    // 压缩失败时由调用方降级处理
+  }
+  try { unlinkSync(temp); } catch { /* 已删除或不存在 */ }
+  return "";
+}
 
 function localMarkdownPath(target, cwd) {
   let value = String(target || "").trim();
@@ -1224,7 +1266,7 @@ export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false
   let cleaned = text.replace(pattern, (_match, kind, doubleQuoted, singleQuoted, bare) => {
     let path = String(doubleQuoted || singleQuoted || bare || "").trim();
     if (path.startsWith("`") && path.endsWith("`")) path = path.slice(1, -1).trim();
-    addFile(kind.toUpperCase(), path);
+    addFile(normalizeDirectiveKind(kind, path), path);
     return "";
   });
 
@@ -1234,7 +1276,7 @@ export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false
   cleaned = cleaned.replace(markdownLink, (match, _label, target) => {
     const path = localMarkdownPath(target, cwd);
     if (!path) return match;
-    const isImage = IMAGE_EXTENSIONS.has(extname(path).toLowerCase());
+    const isImage = isImagePath(path);
     if (isImage && keepMediaLinks) {
       addFile("MEDIA", path);
       return match;
@@ -2373,13 +2415,43 @@ export function isMarkdownAttachment(directive) {
   return directive?.kind === "FILE" && extname(String(directive.path || "")).toLowerCase() === ".md";
 }
 
+export function attachmentUploadChannel(path, kind = "") {
+  // 以文件实际类型为准：MEDIA 只对真正的图片生效，其余一律走文件通道，
+  // 避免非图片文件（如音频）被误按图片发送而失败。
+  return isImagePath(path) && String(kind || "").toUpperCase() === "MEDIA" ? "image" : "file";
+}
+
 async function sendNativeAttachment(event, directive, index) {
   const path = attachmentPath(directive);
-  const mediaFlag = directive.kind === "MEDIA" ? "--image" : "--file";
-  await runCommand("lark-cli", [
-    "im", "+messages-reply", "--as", "bot", "--message-id", event.messageId,
-    mediaFlag, `.\\${basename(path)}`, "--idempotency-key", idempotencyKey(event.eventId, "file", index, path),
-  ], { cwd: dirname(path), timeoutMs: 120_000 });
+  const size = statSync(path).size;
+  let channel = attachmentUploadChannel(path, directive.kind);
+  let sendPath = path;
+  let tempPath = "";
+  if (channel === "image" && size > IMAGE_UPLOAD_LIMIT_BYTES) {
+    tempPath = await compressImageUnderLimit(path);
+    if (tempPath) {
+      sendPath = tempPath;
+    } else if (size <= FILE_UPLOAD_LIMIT_BYTES) {
+      // 压缩失败或压缩后仍超限时降级为文件发送，保证交付
+      channel = "file";
+    } else {
+      throw new Error(`图片大小 ${formatBytes(size)} 超过飞书上限（图片 5MB / 文件 30MB），无法发送：${basename(path)}`);
+    }
+  }
+  if (channel === "file" && size > FILE_UPLOAD_LIMIT_BYTES) {
+    throw new Error(`文件大小 ${formatBytes(size)} 超过飞书单次发送上限 30MB：${basename(path)}`);
+  }
+  try {
+    await runCommand("lark-cli", [
+      "im", "+messages-reply", "--as", "bot", "--message-id", event.messageId,
+      channel === "image" ? "--image" : "--file", `.\\${basename(sendPath)}`,
+      "--idempotency-key", idempotencyKey(event.eventId, "file", index, path),
+    ], { cwd: dirname(sendPath), timeoutMs: 120_000 });
+  } finally {
+    if (tempPath) {
+      try { unlinkSync(tempPath); } catch { /* 压缩临时文件清理失败不影响交付结果 */ }
+    }
+  }
 }
 
 let markdownCreationQueue = Promise.resolve();

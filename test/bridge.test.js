@@ -39,6 +39,7 @@ import {
   extractUserMessageText,
   extractMathJaxSvg,
   extractReplayMedia,
+  attachmentUploadChannel,
   formatTemperatureReport,
   formatResumeThreads,
   formatLatestTurnReplay,
@@ -46,6 +47,7 @@ import {
   formatThreadItem,
   idempotencyKey,
   initializeMarkdownDelivery,
+  isImagePath,
   isMarkdownAttachment,
   isMarkdownValidationError,
   isStandalonePath,
@@ -1621,6 +1623,37 @@ test("extractFileDirectives removes image-syntax file links without leaving an e
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("extractFileDirectives downgrades MEDIA markers for non-image files", () => {
+  assert.deepEqual(extractFileDirectives([
+    "MEDIA:C:\\work\\song.wav",
+    "MEDIA:\"C:\\work\\plot.png\"",
+    "FILE:C:\\work\\archive.zip",
+  ].join("\n")), {
+    text: "",
+    files: [
+      { kind: "FILE", path: "C:\\work\\song.wav" },
+      { kind: "MEDIA", path: "C:\\work\\plot.png" },
+      { kind: "FILE", path: "C:\\work\\archive.zip" },
+    ],
+  });
+});
+
+test("isImagePath recognizes supported image extensions only", () => {
+  assert.equal(isImagePath("C:\\work\\plot.PNG"), true);
+  assert.equal(isImagePath("C:\\work\\photo.jpg"), true);
+  assert.equal(isImagePath("C:\\work\\song.wav"), false);
+  assert.equal(isImagePath("C:\\work\\archive.zip"), false);
+  assert.equal(isImagePath(""), false);
+});
+
+test("attachmentUploadChannel picks image only for MEDIA with a real image file", () => {
+  assert.equal(attachmentUploadChannel("C:\\work\\song.wav", "MEDIA"), "file");
+  assert.equal(attachmentUploadChannel("C:\\work\\song.wav", "FILE"), "file");
+  assert.equal(attachmentUploadChannel("C:\\work\\plot.png", "MEDIA"), "image");
+  assert.equal(attachmentUploadChannel("C:\\work\\plot.png", "FILE"), "file");
+  assert.equal(attachmentUploadChannel("C:\\work\\plot.png"), "file");
 });
 
 test("splitFeishuMarkdown splits local image links and preserves remote and code content", () => {
