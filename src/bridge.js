@@ -2652,6 +2652,10 @@ export function shouldDeliverThreadOutput(state, chatId, threadId) {
   return Boolean(threadId) && state?.sessions?.[chatId] === threadId;
 }
 
+export function isTransientCodexError(message) {
+  return /^Reconnecting\.\.\./i.test(String(message || ""));
+}
+
 export class ThreadTaskQueueManager {
   constructor(worker, onError = (error) => console.error(error)) {
     this.worker = worker;
@@ -4422,6 +4426,8 @@ class BridgeRuntime {
   #onNotification(message) {
     const params = message.params || {};
     const eventThreadId = params.threadId || params.thread?.id;
+    const errorMessage = params.error?.message || "";
+    const transientError = message.method === "error" && isTransientCodexError(errorMessage);
     const titleRun = this.titleRuns.get(eventThreadId);
     if (titleRun) {
       if (message.method === "turn/started" && params.turn?.id) titleRun.turnId = params.turn.id;
@@ -4433,7 +4439,10 @@ class BridgeRuntime {
         titleRun.finalMessages.push(params.item.text.trim());
       }
       if (message.method === "turn/completed") titleRun.resolveDone(params.turn || { status: "completed" });
-      if (message.method === "error") titleRun.rejectDone(new Error(params.error?.message || "标题生成失败。"));
+      if (message.method === "error") {
+        if (transientError) return;
+        titleRun.rejectDone(new Error(errorMessage || "标题生成失败。"));
+      }
       return;
     }
     if (message.method === "turn/started" && params.turn?.id) {
@@ -4458,8 +4467,12 @@ class BridgeRuntime {
       } else if (message.method === "turn/completed") {
         this.#finishDesktopMirror(eventThreadId);
       } else if (message.method === "error") {
-        this.#queueMirrorProgress(mirror, `error-${mirror.turnId}`, `运行中的会话出错：${params.error?.message || "Codex app-server error"}`);
-        this.#finishDesktopMirror(eventThreadId);
+        if (transientError) {
+          this.#queueMirrorProgress(mirror, `error-${mirror.turnId}-${errorMessage}`, `连接中断，正在重试：${errorMessage}`);
+        } else {
+          this.#queueMirrorProgress(mirror, `error-${mirror.turnId}`, `运行中的会话出错：${errorMessage || "Codex app-server error"}`);
+          this.#finishDesktopMirror(eventThreadId);
+        }
       }
       return;
     }
@@ -4488,10 +4501,14 @@ class BridgeRuntime {
     }
     if (message.method === "turn/completed" && !active.external) active.resolveDone(params.turn || { status: "completed" });
     if (message.method === "error") {
+      if (transientError) {
+        this.#queueProgress(active, `reconnecting-${active.turnId}-${errorMessage}`, `连接中断，正在重试：${errorMessage}`);
+        return;
+      }
       if (active.external) {
-        this.#queueProgress(active, `error-${active.turnId}`, `运行中的会话出错：${params.error?.message || "Codex app-server error"}`);
+        this.#queueProgress(active, `error-${active.turnId}`, `运行中的会话出错：${errorMessage || "Codex app-server error"}`);
       } else {
-        active.rejectDone(new Error(params.error?.message || "Codex app-server error"));
+        active.rejectDone(new Error(errorMessage || "Codex app-server error"));
       }
     }
   }
