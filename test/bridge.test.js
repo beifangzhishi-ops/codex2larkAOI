@@ -48,6 +48,7 @@ import {
   isMarkdownAttachment,
   isMarkdownValidationError,
   isStandalonePath,
+  isTransientCodexError,
   latexCanvasLayout,
   latexImageUploadSpec,
   localImageUploadSpec,
@@ -524,6 +525,14 @@ test("thread output follows the chat's current selection instead of the original
   assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-b"), true);
   delete state.sessions.chat;
   assert.equal(shouldDeliverThreadOutput(state, "chat", "thread-b"), false);
+});
+
+test("isTransientCodexError only treats Reconnecting notifications as transient", () => {
+  assert.equal(isTransientCodexError("Reconnecting... 1/5"), true);
+  assert.equal(isTransientCodexError("Reconnecting... 5/5"), true);
+  assert.equal(isTransientCodexError("stream disconnected before completion"), false);
+  assert.equal(isTransientCodexError(""), false);
+  assert.equal(isTransientCodexError(undefined), false);
 });
 
 test("background launcher resolves on ready IPC and reports startup failures", async () => {
