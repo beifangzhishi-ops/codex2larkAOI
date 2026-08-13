@@ -1195,6 +1195,12 @@ export function resolveWorkdirQuery(query, rootDir, currentDir = rootDir) {
 }
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const AUDIO_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".wma"]);
+const FFMPEG_CANDIDATES = [
+  process.env.FFMPEG_PATH,
+  "C:/Users/Songjx/Documents/ChatGPT/New project/tools/ffmpeg/bin/ffmpeg.exe",
+  "ffmpeg",
+].filter(Boolean);
 const IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024; // lark-cli 图片消息上限 5MB
 const FILE_UPLOAD_LIMIT_BYTES = 30 * 1024 * 1024; // 飞书文件消息上限 30MB
 
@@ -1202,8 +1208,13 @@ export function isImagePath(path) {
   return IMAGE_EXTENSIONS.has(extname(String(path || "")).toLowerCase());
 }
 
+export function isAudioPath(path) {
+  return AUDIO_EXTENSIONS.has(extname(String(path || "")).toLowerCase());
+}
+
 function normalizeDirectiveKind(kind, path) {
   const normalized = String(kind || "").toUpperCase();
+  if (normalized === "AUDIO" && !isAudioPath(path)) return "FILE";
   return normalized === "MEDIA" && !isImagePath(path) ? "FILE" : normalized;
 }
 
@@ -1263,7 +1274,7 @@ export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false
     seen.add(key);
     files.push({ kind, path });
   };
-  const pattern = /^\s*(FILE|MEDIA):\s*(?:"([^"]+)"|'([^']+)'|(.+?))\s*$/gim;
+  const pattern = /^\s*(FILE|MEDIA|AUDIO):\s*(?:"([^"]+)"|'([^']+)'|(.+?))\s*$/gim;
   let cleaned = text.replace(pattern, (_match, kind, doubleQuoted, singleQuoted, bare) => {
     let path = String(doubleQuoted || singleQuoted || bare || "").trim();
     if (path.startsWith("`") && path.endsWith("`")) path = path.slice(1, -1).trim();
@@ -1278,11 +1289,12 @@ export function extractFileDirectives(text, { cwd = ROOT, keepMediaLinks = false
     const path = localMarkdownPath(target, cwd);
     if (!path) return match;
     const isImage = isImagePath(path);
+    const isAudio = isAudioPath(path);
     if (isImage && keepMediaLinks) {
       addFile("MEDIA", path);
       return match;
     }
-    addFile(isImage ? "MEDIA" : "FILE", path);
+    addFile(isImage ? "MEDIA" : isAudio ? "AUDIO" : "FILE", path);
     return "";
   }).replace(/\n{3,}/g, "\n\n").trim();
   return { text: cleaned, files };
@@ -2324,7 +2336,8 @@ async function updateApprovalCard(event) {
 export async function sendMessageCommon(commonArgs, eventKey, text, config, options = {}, runner = runCommand) {
   const { cwd = ROOT, embedImages = false, promoteLinkedImages = false } = options;
   const consumedImages = [];
-  const promoted = promoteLinkedImages ? promoteLocalImageLinks(text, { cwd }) : String(text ?? "");
+  const cleaned = String(text ?? "").replace(/^::(?:git|code-comment)[^\r\n]*$/gim, "");
+  const promoted = promoteLinkedImages ? promoteLocalImageLinks(cleaned, { cwd }) : cleaned;
   const chunks = splitReply(promoted, config.replyChars);
   for (let index = 0; index < chunks.length; index += 1) {
     const key = idempotencyKey(eventKey, index);
@@ -2533,6 +2546,60 @@ async function sendNativeAttachment(event, directive, index) {
   }
 }
 
+function resolveFfmpeg() {
+  for (const candidate of FFMPEG_CANDIDATES) {
+    try {
+      if (candidate && existsSync(candidate)) return candidate;
+    } catch { /* try next candidate */ }
+  }
+  return "";
+}
+
+async function convertToOpus(sourcePath, directory) {
+  const ffmpeg = resolveFfmpeg();
+  if (!ffmpeg) throw new Error("未找到 ffmpeg，无法转码音频为飞书语音消息。");
+  const output = resolve(directory, `${basename(sourcePath, extname(sourcePath))}-${randomUUID().slice(0, 8)}.opus`);
+  await runCommand(ffmpeg, ["-y", "-i", sourcePath, "-c:a", "libopus", "-b:a", "64k", output], { timeoutMs: 120_000 });
+  if (!existsSync(output) || statSync(output).size < 1) throw new Error("音频转码结果为空。");
+  return output;
+}
+
+async function sendAudio(commonArgs, eventKey, directive, index) {
+  const path = attachmentPath(directive);
+  const extension = extname(path).toLowerCase();
+  let sendPath = path;
+  let tempPath = "";
+  try {
+    if (extension !== ".opus") {
+      mkdirSync(UPLOAD_DIR, { recursive: true });
+      tempPath = await convertToOpus(path, UPLOAD_DIR);
+      sendPath = tempPath;
+    }
+    await runCommand("lark-cli", [
+      ...commonArgs, "--audio", `.\\${basename(sendPath)}`,
+      "--idempotency-key", idempotencyKey(eventKey, "audio", index, path),
+    ], { cwd: dirname(sendPath), timeoutMs: 120_000 });
+  } finally {
+    if (tempPath) {
+      try { unlinkSync(tempPath); } catch { /* 转码临时文件清理失败不影响交付 */ }
+    }
+  }
+}
+
+async function sendAudioAttachment(event, directive, index) {
+  await sendAudio(
+    ["im", "+messages-reply", "--as", "bot", "--message-id", event.messageId],
+    event.eventId, directive, index,
+  );
+}
+
+async function sendAudioAttachmentToChat(chatId, eventKey, directive, index) {
+  await sendAudio(
+    ["im", "+messages-send", "--as", "bot", "--chat-id", chatId],
+    eventKey, directive, index,
+  );
+}
+
 let markdownCreationQueue = Promise.resolve();
 
 function queueMarkdownCreation(task) {
@@ -2555,11 +2622,19 @@ async function uploadMarkdownDocument(path, config) {
 }
 
 async function sendAttachment(event, directive, config, index) {
-  if (!isMarkdownAttachment(directive)) {
-    await sendNativeAttachment(event, directive, index);
-    return null;
+  if (isMarkdownAttachment(directive)) return uploadMarkdownDocument(attachmentPath(directive), config);
+  if (directive.kind === "AUDIO") {
+    try {
+      await sendAudioAttachment(event, directive, index);
+      return null;
+    } catch (error) {
+      console.warn(`[bridge] audio message failed; sending native file: ${error.message}`);
+      await sendNativeAttachment(event, directive, index);
+      return null;
+    }
   }
-  return uploadMarkdownDocument(attachmentPath(directive), config);
+  await sendNativeAttachment(event, directive, index);
+  return null;
 }
 
 async function sendNativeAttachmentToChat(chatId, eventKey, directive, index) {
@@ -4279,6 +4354,24 @@ class BridgeRuntime {
         for (let index = 0; index < delivery.files.length; index += 1) {
           const file = delivery.files[index];
           if (file.kind === "MEDIA") continue;
+          if (file.kind === "AUDIO") {
+            try {
+              await Promise.all(mirror.chatIds.map((chatId) =>
+                sendAudioAttachmentToChat(chatId, `desktop-progress-${key}`, file, index)
+              ));
+            } catch (error) {
+              console.warn(`[bridge] desktop mirror audio message failed: ${error.message}`);
+              try {
+                await Promise.all(mirror.chatIds.map((chatId) =>
+                  sendNativeAttachmentToChat(chatId, `desktop-progress-${key}`, file, index)
+                ));
+                notes.push(`音频消息发送失败，已发送原始文件：${basename(file.path)}`);
+              } catch (sendError) {
+                notes.push(`音频消息发送失败，原始文件发送也失败：${String(sendError.message || sendError).slice(0, 500)}`);
+              }
+            }
+            continue;
+          }
           if (isMarkdownAttachment(file)) {
             try {
               const doc = await uploadMarkdownDocument(file.path, this.config);

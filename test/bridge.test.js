@@ -47,6 +47,7 @@ import {
   formatThreadItem,
   idempotencyKey,
   initializeMarkdownDelivery,
+  isAudioPath,
   isImagePath,
   isMarkdownAttachment,
   isMarkdownValidationError,
@@ -1629,7 +1630,7 @@ test("extractFileDirectives removes image-syntax file links without leaving an e
       { cwd: directory, keepMediaLinks: true },
     ), {
       text: "测试音频：",
-      files: [{ kind: "FILE", path: song }],
+      files: [{ kind: "AUDIO", path: song }],
     });
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -1657,6 +1658,40 @@ test("isImagePath recognizes supported image extensions only", () => {
   assert.equal(isImagePath("C:\\work\\song.wav"), false);
   assert.equal(isImagePath("C:\\work\\archive.zip"), false);
   assert.equal(isImagePath(""), false);
+});
+
+test("isAudioPath recognizes supported audio extensions only", () => {
+  assert.equal(isAudioPath("C:\\work\\song.wav"), true);
+  assert.equal(isAudioPath("C:\\work\\clip.OPUS"), true);
+  assert.equal(isAudioPath("C:\\work\\voice.mp3"), true);
+  assert.equal(isAudioPath("C:\\work\\plot.png"), false);
+  assert.equal(isAudioPath("C:\\work\\archive.zip"), false);
+  assert.equal(isAudioPath(""), false);
+});
+
+test("extractFileDirectives marks real local audio links as AUDIO and removes them from text", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-audio-"));
+  const wav = join(directory, "song.wav");
+  const png = join(directory, "plot.png");
+  try {
+    writeFileSync(wav, "audio");
+    writeFileSync(png, "image");
+    const result = extractFileDirectives([
+      "对比音频：",
+      `![音频](${wav})`,
+      `![图](${png})`,
+      "结束",
+    ].join("\n"), { cwd: directory });
+    assert.deepEqual(result.files, [
+      { kind: "AUDIO", path: wav },
+      { kind: "MEDIA", path: png },
+    ]);
+    assert.doesNotMatch(result.text, /song\.wav/);
+    assert.match(result.text, /对比音频/);
+    assert.match(result.text, /结束/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("attachmentUploadChannel picks image only for MEDIA with a real image file", () => {
@@ -1995,6 +2030,21 @@ test("sendChatMessage falls back to markdown when post is rejected and splits lo
   const markdownCalls = calls.filter((call) => call.args.includes("--markdown"));
   assert.ok(markdownCalls.length >= 1);
   assert.ok(calls.every((call) => call.args.includes("--chat-id")));
+});
+
+test("sendChatMessage strips Codex git directives before sending", async () => {
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: "{}" };
+  };
+  const config = buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_WORKDIR: process.cwd() });
+  await sendChatMessage("oc_test", "desktop-user-3",
+    "完成。\n\n::git-commit{cwd=\"C:\\work\"}\n::git-stage{cwd=\"C:\\work\"}",
+    config, {}, runner);
+  const payload = calls.flatMap((call) => call.args).join("\n");
+  assert.doesNotMatch(payload, /::git-/);
+  assert.match(payload, /完成。/);
 });
 
 test("user input cards expose options and parse a typed answer callback", () => {
