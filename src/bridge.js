@@ -2541,12 +2541,7 @@ function queueMarkdownCreation(task) {
   return queued;
 }
 
-async function sendAttachment(event, directive, config, index) {
-  if (!isMarkdownAttachment(directive)) {
-    await sendNativeAttachment(event, directive, index);
-    return null;
-  }
-  const path = attachmentPath(directive);
+async function uploadMarkdownDocument(path, config) {
   const folder = config.markdownDelivery;
   if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
   return queueMarkdownCreation(async () => {
@@ -2557,6 +2552,27 @@ async function sendAttachment(event, directive, config, index) {
     });
     return { ...markdownDocumentFromCreateOutput(stdout), title: spec.title, folderUrl: folder.folderUrl };
   });
+}
+
+async function sendAttachment(event, directive, config, index) {
+  if (!isMarkdownAttachment(directive)) {
+    await sendNativeAttachment(event, directive, index);
+    return null;
+  }
+  return uploadMarkdownDocument(attachmentPath(directive), config);
+}
+
+async function sendNativeAttachmentToChat(chatId, eventKey, directive, index) {
+  const path = attachmentPath(directive);
+  const size = statSync(path).size;
+  if (size > FILE_UPLOAD_LIMIT_BYTES) {
+    throw new Error(`文件大小 ${formatBytes(size)} 超过飞书单次发送上限 30MB：${basename(path)}`);
+  }
+  await runCommand("lark-cli", [
+    "im", "+messages-send", "--as", "bot", "--chat-id", chatId,
+    "--file", `.\\${basename(path)}`,
+    "--idempotency-key", idempotencyKey(eventKey, "file", index, path),
+  ], { cwd: dirname(path), timeoutMs: 120_000 });
 }
 
 export function buildScreenshotPowerShellCommand(outputPath) {
@@ -3176,12 +3192,31 @@ class BridgeRuntime {
       const attached = this.attachedThreads.get(threadId);
       const turnId = this.activeThreads.get(threadId)?.turnId || attached?.turnId;
       if (turnId) {
-        await this.client.request("turn/steer", {
-          threadId, expectedTurnId: turnId, input: this.#takeImageInputs(event.chatId, event.content),
-        });
-        await sendReply(event.messageId, `${event.eventId}-steer`,
-          goal?.status === "active" ? "已将消息注入正在运行的 Goal。" : "已将消息引导至正在运行的任务。", this.config);
-        return;
+        const input = this.#takeImageInputs(event.chatId, event.content);
+        const confirmText = goal?.status === "active"
+          ? "已将消息注入正在运行的 Goal。" : "已将消息引导至正在运行的任务。";
+        try {
+          await this.client.request("turn/steer", { threadId, expectedTurnId: turnId, input });
+          await sendReply(event.messageId, `${event.eventId}-steer`, confirmText, this.config);
+          return;
+        } catch (error) {
+          const found = String(error?.message || "").match(/but found ([^\s.]+)/)?.[1];
+          if (found) {
+            const active = this.activeThreads.get(threadId) || this.attachedThreads.get(threadId);
+            if (active) active.turnId = found;
+            try {
+              await this.client.request("turn/steer", { threadId, expectedTurnId: found, input });
+              await sendReply(event.messageId, `${event.eventId}-steer`, confirmText, this.config);
+              return;
+            } catch (retryError) {
+              console.warn(`[bridge] turn/steer retry failed for ${threadId}: ${retryError.message}`);
+            }
+          } else {
+            console.warn(`[bridge] turn/steer failed for ${threadId}: ${error.message}`);
+          }
+          this.activeThreads.delete(threadId);
+          this.attachedThreads.delete(threadId);
+        }
       }
     }
     const snapshot = snapshotTurnSettings({
@@ -4234,10 +4269,42 @@ class BridgeRuntime {
     mirror.sendQueue = mirror.sendQueue
       .then(async () => {
         const cwd = mirror.cwdReady ? await mirror.cwdReady : mirror.cwd;
+        const delivery = extractFileDirectives(text, { cwd, keepMediaLinks: true });
+        let messageText = delivery.text;
+        const notes = [];
+        for (let index = 0; index < delivery.files.length; index += 1) {
+          const file = delivery.files[index];
+          if (file.kind === "MEDIA") continue;
+          if (isMarkdownAttachment(file)) {
+            try {
+              const doc = await uploadMarkdownDocument(file.path, this.config);
+              notes.push(markdownDeliveryReply(doc.title, doc.documentUrl, doc.folderUrl));
+            } catch (fallbackError) {
+              console.warn(`[bridge] desktop mirror markdown upload failed: ${fallbackError.message}`);
+              try {
+                await Promise.all(mirror.chatIds.map((chatId) =>
+                  sendNativeAttachmentToChat(chatId, `desktop-progress-${key}`, file, index)
+                ));
+                notes.push(`Markdown 云文档上传失败，已发送原始文件：${basename(file.path)}\n\n原因：${String(fallbackError.message || fallbackError).slice(0, 500)}`);
+              } catch (sendError) {
+                notes.push(`Markdown 云文档上传失败，原始文件发送也失败：${String(sendError.message || sendError).slice(0, 500)}`);
+              }
+            }
+            continue;
+          }
+          try {
+            await Promise.all(mirror.chatIds.map((chatId) =>
+              sendNativeAttachmentToChat(chatId, `desktop-progress-${key}`, file, index)
+            ));
+          } catch (error) {
+            notes.push(`文件发送失败：${String(error.message || error).slice(0, 500)}`);
+          }
+        }
+        if (notes.length) messageText = [messageText, ...notes].filter(Boolean).join("\n\n");
         await Promise.all(mirror.chatIds.map((chatId) =>
-          sendChatMessage(chatId, `desktop-progress-${key}`, text, this.config, { cwd, embedImages: true, promoteLinkedImages: true })
+          sendChatMessage(chatId, `desktop-progress-${key}`, messageText, this.config, { cwd, embedImages: true, promoteLinkedImages: true })
         ));
-        console.log(`[bridge] desktop mirror progress thread=${mirror.threadId} text=${text.slice(0, 80)}`);
+        console.log(`[bridge] desktop mirror progress thread=${mirror.threadId} text=${messageText.slice(0, 80)}`);
       })
       .catch((error) => console.error(`[bridge] desktop mirror progress failed: ${error.message}`));
   }
