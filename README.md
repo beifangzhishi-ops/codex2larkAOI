@@ -120,7 +120,7 @@ netstat -ano | Select-String ':45789'
 - `/model <model-id>`：选择模型并采用该模型的默认思考强度；
 - `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
 - `/think`：无参快捷命令，把当前聊天模型切换为 `.env` 配置的思考模型和思考强度（默认 `gpt-5.6-sol` / `high`）；
-- `/work`：无参快捷命令，把当前聊天模型切换为 `.env` 配置的执行模型和思考强度（默认 `deepseek-v4-flash` / `max`）；带参数时不识别为命令，按普通任务处理；
+- `/work`：无参快捷命令，把当前聊天模型切换为 `.env` 配置的执行模型和思考强度（默认 `deepseek-v4-flash` / `max`）；带参数时视为无效命令；
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
 - `/temperature`：查询桥接主机本机温度（CPU、磁盘、风扇、GPU），由桥接直接读取 LibreHardwareMonitor 的温度服务并回复，不占用 Codex 会话；
@@ -136,7 +136,7 @@ netstat -ano | Select-String ':45789'
 - `/status`：以交互卡片查看当前目录、会话名和 ID、审批方式、插话方式、下一轮模型、思考强度、设置来源及权限；卡片提供“复制会话 ID / 复制会话名 / 复制工作目录 / 复制为深度链接 / 复制为 MD”按钮，前四项把对应内容作为纯文本直接发送到对话，最后一项把状态内容上传为云文档；
 - `/help`：显示带有继续对话、模型设置、切换审批模式、切换插话模式、查看状态和停止操作按钮的交互卡片；两个模式按钮均会在原卡片内刷新为可切换的另一种模式；`/new` 与 `/screen` 保留为卡片中的文字命令，不提供按钮。
 
-桥接只识别以上完整斜杠命令。自然语言中的“停止执行”“切换项目”“改为自动审批”等内容始终作为普通 Codex 任务处理。
+任何以 `/` 开头的消息都按命令处理，不再进入 Codex；写错（包括参数格式不正确）会收到“无效命令”提示，可发送 `/help` 查看支持的命令。自然语言中的“停止执行”“切换项目”“改为自动审批”等内容始终作为普通 Codex 任务处理。
 
 ## 查询本机温度
 
@@ -188,7 +188,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。同日新增 `/think` 与 `/work` 模型快捷命令：分别按 `.env` 的 `CODEX_THINK_MODEL/CODEX_THINK_EFFORT` 与 `CODEX_WORK_MODEL/CODEX_WORK_EFFORT` 切换思考/执行模型（默认 `gpt-5.6-sol` / `high` 与 `deepseek-v4-flash` / `max`），仅接受无参形式，`/status` 增加模型预设展示。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。同日新增 `/think` 与 `/work` 模型快捷命令：分别按 `.env` 的 `CODEX_THINK_MODEL/CODEX_THINK_EFFORT` 与 `CODEX_WORK_MODEL/CODEX_WORK_EFFORT` 切换思考/执行模型（默认 `gpt-5.6-sol` / `high` 与 `deepseek-v4-flash` / `max`），仅接受无参形式，`/status` 增加模型预设展示。同日所有以 `/` 开头的消息一律按命令处理，写错的命令直接回复“无效命令”提示，不再作为普通任务进入 Codex。
 
 状态保存在 `.state/sessions.json`：
 
