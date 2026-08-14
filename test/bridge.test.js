@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import {
+  applyForkBinding,
   approvalPolicy,
   approvalsReviewer,
   approvalCardUpdateArgs,
@@ -26,6 +27,8 @@ import {
   buildScreenshotPowerShellCommand,
   buildTitleThreadOptions,
   buildTitleTurnParams,
+  compactThreadRequest,
+  compactionBlockReason,
   chatIdsForThread,
   cleanHistoricalFinalText,
   createPendingTitleJob,
@@ -43,8 +46,10 @@ import {
   formatLatestTurnReplay,
   formatRunningThreadReplay,
   formatThreadItem,
+  forkThreadRequest,
   idempotencyKey,
   initializeMarkdownDelivery,
+  isContextCompactionCompleted,
   isMarkdownAttachment,
   isMarkdownValidationError,
   isStandalonePath,
@@ -75,6 +80,7 @@ import {
   queryTemperature,
   reactionArgs,
   reactionIdFromOutput,
+  registerPendingCompaction,
   removeLocalImageMarkdown,
   resumeThreadStatusLabel,
   resolveCodexCommand,
@@ -98,6 +104,7 @@ import {
   snapshotTurnSettings,
   splitLatexMarkdown,
   statusDeepLink,
+  takePendingCompaction,
   ThreadTaskQueueManager,
   watchForStopRequest,
   hasCompleteTurnHistory,
@@ -778,6 +785,10 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/stop"), { type: "stop" });
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
+  assert.deepEqual(parseControlCommand("/compress"), { type: "compress" });
+  assert.deepEqual(parseControlCommand("/compact"), { type: "compress" });
+  assert.deepEqual(parseControlCommand("/branch"), { type: "branch" });
+  assert.deepEqual(parseControlCommand("/fork"), { type: "branch" });
   assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
   assert.deepEqual(parseControlCommand("/new"), { type: "new", query: "" });
   assert.deepEqual(parseControlCommand("/new Demo"), { type: "new", query: "Demo" });
@@ -790,6 +801,10 @@ test("parseControlCommand only recognizes complete slash commands", () => {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
   });
   assert.equal(parseControlCommand("/approval"), null);
+  assert.equal(parseControlCommand("/compress now"), null);
+  assert.equal(parseControlCommand("/compact now"), null);
+  assert.equal(parseControlCommand("/branch now"), null);
+  assert.equal(parseControlCommand("/fork now"), null);
   assert.equal(parseControlCommand("/interject pause"), null);
   assert.equal(parseControlCommand("/screen now"), null);
   assert.equal(parseControlCommand("/temperature now"), null);
@@ -806,6 +821,70 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.equal(parseControlCommand("同意执行"), null);
   assert.equal(parseControlCommand("切换到 Demo 项目"), null);
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
+});
+
+test("fork and compaction helpers build official App Server requests", () => {
+  assert.deepEqual(forkThreadRequest("thr_1"), {
+    method: "thread/fork",
+    params: { threadId: "thr_1" },
+  });
+  assert.deepEqual(compactThreadRequest("thr_1"), {
+    method: "thread/compact/start",
+    params: { threadId: "thr_1" },
+  });
+  assert.equal(isContextCompactionCompleted({
+    method: "item/completed",
+    params: { item: { type: "contextCompaction" } },
+  }), true);
+  assert.equal(isContextCompactionCompleted({
+    method: "item/started",
+    params: { item: { type: "contextCompaction" } },
+  }), false);
+});
+
+test("fork binding preserves chat settings and prepares auto title for the new thread", () => {
+  const state = {
+    sessions: { oc_1: "thr_src" },
+    workdirs: { oc_1: "C:/work" },
+    standaloneChats: {},
+    threadModes: { thr_src: "plan" },
+    pendingTitleJobs: { thr_src: { state: "awaitingFirstTurn", attempts: 0 } },
+  };
+  applyForkBinding(state, "oc_1", "thr_src", "thr_new", "C:/work", { discardSourceTitle: true });
+  assert.equal(state.sessions.oc_1, "thr_new");
+  assert.equal(state.workdirs.oc_1, "C:/work");
+  assert.equal(state.threadModes.thr_new, "plan");
+  assert.equal(state.pendingTitleJobs.thr_src, undefined);
+  assert.equal(state.pendingTitleJobs.thr_new.state, "awaitingFirstTurn");
+
+  const standalone = {
+    sessions: { oc_2: "thr_src2" },
+    workdirs: { oc_2: "C:/standalone" },
+    standaloneChats: { oc_2: true },
+    threadModes: {},
+    pendingTitleJobs: {},
+  };
+  applyForkBinding(standalone, "oc_2", "thr_src2", "thr_new2", "C:/standalone");
+  assert.equal(standalone.sessions.oc_2, "thr_new2");
+  assert.equal(standalone.standaloneChats.oc_2, true);
+  assert.equal(standalone.pendingTitleJobs.thr_new2.state, "awaitingFirstTurn");
+});
+
+test("compaction guard rejects missing, running, queued, and already compacting threads", () => {
+  assert.match(compactionBlockReason("", {}), /当前没有可压缩的会话/);
+  assert.match(compactionBlockReason("thr_1", { active: true }), /任务运行或排队/);
+  assert.match(compactionBlockReason("thr_1", { queued: true }), /任务运行或排队/);
+  assert.match(compactionBlockReason("thr_1", { compacting: true }), /任务运行或排队/);
+  assert.equal(compactionBlockReason("thr_1", {}), "");
+});
+
+test("compaction tracking registers once and takes at most one completion", () => {
+  const pendingCompactions = new Map();
+  const pending = { chatId: "oc_1", eventId: "evt_1", messageId: "om_1" };
+  registerPendingCompaction(pendingCompactions, "thr_1", pending);
+  assert.equal(pendingCompactions.get("thr_1"), pending);
+  assert.equal(takePendingCompaction(pendingCompactions, "thr_1"), pending);
+  assert.equal(takePendingCompaction(pendingCompactions, "thr_1"), undefined);
 });
 
 test("plan review cards carry one typed action pair and hide actions once processed", () => {
@@ -1058,6 +1137,8 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(card.elements[0].content, /\/cd 项目名或路径/);
   assert.match(card.elements[0].content, /\/model/);
   assert.match(card.elements[0].content, /\/rename/);
+  assert.match(card.elements[0].content, /\/branch/);
+  assert.match(card.elements[0].content, /\/compress/);
   assert.match(card.elements[0].content, /\/plan/);
   assert.match(card.elements[0].content, /\/default/);
   assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
@@ -1935,7 +2016,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/branch、\/compress、\/model、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",

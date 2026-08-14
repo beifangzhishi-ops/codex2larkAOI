@@ -109,6 +109,8 @@ netstat -ano | Select-String ':45789'
 - `/resume`：用交互卡片按更新时间列出最近 5 个未归档的 Codex 历史会话（包括 App Server、CLI 和 IDE 会话）；恢复列表优先显示桥接当前运行态、App Server 当前运行状态和 Goal 状态，最后才使用最新历史轮次，因此不会把桥接正在执行的会话误显示为“已中断”；
 - 恢复卡片按需显示“上一页”和“下一页”，中间页共 5 个会话按钮和 2 个翻页按钮；也可使用 `/resume prev|next`；
 - `/resume 编号|标题`：继续当前列表中的历史会话，将当前飞书聊天绑定到该 thread，并切换到其工作目录；标题必须唯一匹配；已完成轮次会回放真正的最近一轮用户输入和最终答复，不重发历史附件；运行中的普通会话或 Goal 会话会显示已接入提示，并回放最近一条 commentary 或推理摘要；随后实时转发后续过程消息，不显示空的历史输入或最终答复占位；
+- `/branch`（别名 `/fork`）：调用 App Server `thread/fork`，保留当前会话的已存历史并创建新会话，立即把当前飞书聊天绑定到新会话；原会话保持独立，若正在运行则继续后台执行，但不再向该飞书聊天转发；新分支沿用原工作目录、协作模式、模型、审批和插话设置；
+- `/compress`（别名 `/compact`）：调用 App Server `thread/compact/start` 压缩当前会话上下文；会话空闲时执行，回复“已开始”和“已完成”；任务运行、排队或已有压缩进行时拒绝执行；
 - `/rename 新标题`：重命名当前飞书聊天绑定的 Codex 会话；标题最多 80 个字符。手动重命名会取消该会话尚未完成的自动命名，避免被自动标题覆盖；
 - `/model`：通过交互卡片选择模型，再选择该模型实际支持的思考强度；模型列表来自 App Server `model/list`，不会硬编码；
 - `/model default`：恢复部署级 `CODEX_MODEL` 或 Codex 默认模型和默认思考强度；
@@ -181,7 +183,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`。
 
 状态保存在 `.state/sessions.json`：
 

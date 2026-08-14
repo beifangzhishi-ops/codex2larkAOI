@@ -40,7 +40,7 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "桥接负责 /new、/cd、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -482,6 +482,8 @@ export function parseControlCommand(text) {
   const plan = value.match(/^\/plan(?:\s+(.+))?$/i);
   if (plan) return { type: "plan", query: (plan[1] || "").trim() };
   if (lower === "/default") return { type: "defaultMode" };
+  if (lower === "/compress" || lower === "/compact") return { type: "compress" };
+  if (lower === "/branch" || lower === "/fork") return { type: "branch" };
   const goal = value.match(/^\/goal(?:\s+(.+))?$/i);
   if (goal) {
     const argument = (goal[1] || "").trim();
@@ -511,6 +513,61 @@ export function parseControlCommand(text) {
   const cdCommand = value.match(/^\/cd(?:\s+(.+))?$/i);
   if (cdCommand) return { type: "cd", query: (cdCommand[1] || "").trim() };
   return null;
+}
+
+export function forkThreadRequest(threadId) {
+  return { method: "thread/fork", params: { threadId: String(threadId) } };
+}
+
+export function compactThreadRequest(threadId) {
+  return { method: "thread/compact/start", params: { threadId: String(threadId) } };
+}
+
+export function isContextCompactionCompleted(message) {
+  return message?.method === "item/completed" && message?.params?.item?.type === "contextCompaction";
+}
+
+export function compactionBlockReason(threadId, { active = false, queued = false, compacting = false } = {}) {
+  if (!threadId) return "当前没有可压缩的会话；请先发送任务或使用 `/resume` 继续历史会话。";
+  if (active || queued || compacting) return "当前会话有任务运行或排队中，请先 `/stop` 或等待任务结束再压缩。";
+  return "";
+}
+
+export function registerPendingCompaction(pendingCompactions, threadId, pending) {
+  pendingCompactions.set(threadId, pending);
+  return pending;
+}
+
+export function takePendingCompaction(pendingCompactions, threadId) {
+  const pending = pendingCompactions.get(threadId);
+  if (pending) pendingCompactions.delete(threadId);
+  return pending;
+}
+
+export function applyForkBinding(state, chatId, sourceThreadId, newThreadId, cwd, { discardSourceTitle = false } = {}) {
+  if (!state || !chatId || !sourceThreadId || !newThreadId) {
+    throw new Error("分支绑定参数不完整。");
+  }
+  state.sessions ??= {};
+  state.workdirs ??= {};
+  state.standaloneChats ??= {};
+  state.threadModes ??= {};
+  state.pendingTitleJobs ??= {};
+  const previousCwd = state.workdirs?.[chatId];
+  const standalone = Boolean(state.standaloneChats?.[chatId]);
+  const sourceMode = state.threadModes?.[sourceThreadId];
+  if (discardSourceTitle) delete state.pendingTitleJobs[sourceThreadId];
+  state.sessions[chatId] = String(newThreadId);
+  if (previousCwd) state.workdirs[chatId] = previousCwd;
+  else delete state.workdirs[chatId];
+  if (standalone) state.standaloneChats[chatId] = true;
+  else delete state.standaloneChats[chatId];
+  if (sourceMode) state.threadModes[newThreadId] = sourceMode;
+  state.pendingTitleJobs[newThreadId] = {
+    ...createPendingTitleJob(newThreadId, cwd || previousCwd || "", "", ""),
+    state: "awaitingFirstTurn",
+  };
+  return state;
 }
 
 const TEMPERATURE_SENSOR_TYPE = new Set(["Temperature", 2]);
@@ -1981,6 +2038,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
         "`/cd 项目名或路径` 切换当前会话目录 · `/cd` 查看当前目录",
         "`/rename 标题` 重命名当前会话",
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
+        "`/branch` 保留当前历史创建新会话 · `/compress` 压缩当前上下文",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
         "`/plan [任务]` 进入计划模式并开始新一轮 · `/default` 切回默认执行模式",
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
@@ -2566,6 +2624,7 @@ class BridgeRuntime {
     this.pendingUserInputs = new Map();
     this.pendingImages = new Map();
     this.resumeCandidates = new Map();
+    this.pendingCompactions = new Map();
     this.chatRouteQueues = new Map();
     this.threadQueues = new ThreadTaskQueueManager(
       (task) => this.#executeThreadTask(task),
@@ -2937,7 +2996,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan [任务]` 进入计划模式并开始新一轮\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/branch` 保留当前历史创建新会话\n`/compress` 压缩当前上下文\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan [任务]` 进入计划模式并开始新一轮\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -2993,6 +3052,24 @@ class BridgeRuntime {
       } catch (error) {
         await sendReply(event.messageId, `${event.eventId}-resume-failed`,
           `历史会话操作失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
+    if (command?.type === "branch") {
+      try {
+        await this.#handleBranch(event);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-branch-error`,
+          `创建分支失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
+    if (command?.type === "compress") {
+      try {
+        await this.#handleCompress(event);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-compress-error`,
+          `压缩失败：${String(error.message || error).slice(0, 1500)}`, this.config);
       }
       return;
     }
@@ -3583,6 +3660,57 @@ class BridgeRuntime {
       console.warn(`[bridge] cannot update approval card ${event.messageId}: ${error.message}`);
       const label = event.decision === "decline" ? "已拒绝" : "已批准";
       await sendReply(event.messageId, `${event.eventId}-approval-result`, `${label}待处理操作。`, this.config);
+    }
+  }
+
+  async #handleBranch(event) {
+    const sourceThreadId = this.state.sessions[event.chatId];
+    if (!sourceThreadId) {
+      await sendReply(event.messageId, `${event.eventId}-branch-none`,
+        "当前没有可分支的会话；请先发送任务或使用 `/resume` 继续历史会话。", this.config);
+      return;
+    }
+    const request = forkThreadRequest(sourceThreadId);
+    const result = await this.client.request(request.method, request.params);
+    const newThreadId = result?.thread?.id;
+    if (!newThreadId) throw new Error("App Server 未返回新会话 ID。");
+    const cwd = this.cwdFor(event.chatId);
+    const discardSourceTitle = this.state.pendingTitleJobs?.[sourceThreadId]?.state === "awaitingFirstTurn" &&
+      !this.activeThreads.has(sourceThreadId) && !this.threadQueues.hasWork(sourceThreadId);
+    applyForkBinding(this.state, event.chatId, sourceThreadId, newThreadId, cwd, { discardSourceTitle });
+    if (this.state.pendingWorkdirQueries) delete this.state.pendingWorkdirQueries[event.chatId];
+    this.pendingImages.delete(event.chatId);
+    this.resumeCandidates.delete(event.chatId);
+    this.loadedThreads.add(newThreadId);
+    this.#cancelDetachedApprovals(event.chatId, newThreadId);
+    saveState(this.state);
+    await sendReply(event.messageId, `${event.eventId}-branch-done`,
+      `已从当前会话创建新分支（保留完整历史）。\n原会话：${sourceThreadId}\n新会话：${newThreadId}\n工作目录：${this.cwdLabelFor(event.chatId)}`, this.config);
+  }
+
+  async #handleCompress(event) {
+    const threadId = this.state.sessions[event.chatId];
+    const blocked = compactionBlockReason(threadId, {
+      active: this.activeThreads.has(threadId) || this.attachedThreads.has(threadId),
+      queued: this.threadQueues.hasWork(threadId),
+      compacting: this.pendingCompactions.has(threadId),
+    });
+    if (blocked) {
+      await sendReply(event.messageId, `${event.eventId}-compress-blocked`, blocked, this.config);
+      return;
+    }
+    const request = compactThreadRequest(threadId);
+    await this.client.request(request.method, request.params);
+    registerPendingCompaction(this.pendingCompactions, threadId, {
+      chatId: event.chatId,
+      eventId: event.eventId,
+      messageId: event.messageId,
+    });
+    try {
+      await sendReply(event.messageId, `${event.eventId}-compress-started`, "上下文压缩已开始。", this.config);
+    } catch (error) {
+      this.pendingCompactions.delete(threadId);
+      throw error;
     }
   }
 
@@ -4198,6 +4326,28 @@ class BridgeRuntime {
         titleRun.rejectDone(new Error(errorMessage || "标题生成失败。"));
       }
       return;
+    }
+    if (params.item?.type === "contextCompaction") {
+      const pending = isContextCompactionCompleted(message)
+        ? takePendingCompaction(this.pendingCompactions, eventThreadId)
+        : this.pendingCompactions.get(eventThreadId);
+      if (isContextCompactionCompleted(message) && pending) {
+        void sendReply(pending.messageId, `${pending.eventId}-compress-completed`,
+          "上下文压缩已完成。", this.config).catch((error) => {
+          console.warn(`[bridge] compaction completion reply failed: ${error.message}`);
+        });
+      }
+      return;
+    }
+    if (message.method === "error" && !transientError) {
+      const pending = takePendingCompaction(this.pendingCompactions, eventThreadId);
+      if (pending) {
+        void sendReply(pending.messageId, `${pending.eventId}-compress-error`,
+          `上下文压缩失败：${errorMessage || "Codex app-server error"}`, this.config).catch((error) => {
+          console.warn(`[bridge] compaction failure reply failed: ${error.message}`);
+        });
+        return;
+      }
     }
     if (message.method === "turn/started" && params.turn?.id) {
       this.#ensureDesktopMirror(eventThreadId, params.turn.id);
