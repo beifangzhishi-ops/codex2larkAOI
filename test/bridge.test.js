@@ -33,8 +33,10 @@ import {
   createRunningThreadAttachment,
   createConsumerReadiness,
   createStandaloneCwd,
-  ensureStandaloneCwd,
   desktopMirrorCwd,
+  ensureStandaloneCwd,
+  formatLocalDate,
+  isLegacyStandalonePath,
   extractFileDirectives,
   extractUserMessageText,
   extractMathJaxSvg,
@@ -86,6 +88,7 @@ import {
   resolveCodexCommand,
   resolveModelSelection,
   resolveTitleFallbackAfterFailures,
+  resolveStandaloneCwdAlias,
   selectLowestReasoningEffort,
   resolveWorkdirQuery,
   sanitizeGeneratedTitle,
@@ -380,6 +383,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   assert.equal(legacy.autoTitleModel, DEFAULT_TITLE_MODEL);
   assert.deepEqual(legacy.interjectionModes, {});
   assert.deepEqual(legacy.standaloneChats, {});
+  assert.deepEqual(legacy.standaloneCwdAliases, {});
   assert.deepEqual(legacy.pendingTitleJobs, {});
   assert.deepEqual(legacy.threadModes, {});
   assert.deepEqual(legacy.pendingChatModes, {});
@@ -394,6 +398,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
     interjectionModes: { chat: "queue" },
     modelSettings: { chat: { mode: "explicit", modelId: "sol", effort: "low" } },
     standaloneChats: { chat: true },
+    standaloneCwdAliases: { "C:\\old\\uuid": "C:\\new\\2026-08-14\\uuid" },
     pendingTitleJobs: { thr_2: { state: "pending", attempts: 1 } },
     threadModes: { thr_2: "plan" },
     pendingChatModes: { chat: "default" },
@@ -408,6 +413,7 @@ test("persisted state remains backward compatible and excludes runtime queues", 
   assert.equal(current.autoTitleModel, "gpt-new-title");
   assert.equal(current.interjectionModes.chat, "queue");
   assert.equal(current.standaloneChats.chat, true);
+  assert.equal(current.standaloneCwdAliases[resolve("C:\\old\\uuid")], resolve("C:\\new\\2026-08-14\\uuid"));
   assert.equal(current.pendingTitleJobs.thr_2.attempts, 1);
   assert.equal(current.threadModes.thr_2, "plan");
   assert.equal(current.planReviews.plan_1.status, "pending");
@@ -980,7 +986,9 @@ test("resume helpers format compact pages and select history without ambiguous t
     { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", updatedAt: 1_730_000_000 },
     { id: "thr_4", name: "临时问题", cwd: join(standaloneRoot(), "00000000-0000-0000-0000-000000000000"), updatedAt: 1_720_000_000 },
   ];
-  const output = formatResumeThreads(threads, "thr_1", true);
+  const resumeThreads = threads.map((thread) => thread.id === "thr_4"
+    ? { ...thread, cwd: join(standaloneRoot(), "2026-08-14", "00000000-0000-4000-8000-000000000000") } : thread);
+  const output = formatResumeThreads(resumeThreads, "thr_1", true);
   assert.match(output, /1\. Fix tests \[当前\]/);
   assert.doesNotMatch(output, /thr_2/);
   assert.match(output, /\| two/);
@@ -996,24 +1004,42 @@ test("resume helpers format compact pages and select history without ambiguous t
   assert.match(formatResumeThreads([], ""), /没有可恢复/);
 });
 
-test("standalone cwd helpers isolate workspace-less chats under the system temp root", () => {
-  const root = resolve(standaloneRoot());
-  const dir = createStandaloneCwd();
-  const nested = join(root, "nested", "work");
+test("standalone cwd helpers use a local-date UUID workspace and desktop subdirectories", () => {
+  const parent = mkdtempSync(join(tmpdir(), "codex2lark-standalone-root-"));
+  const root = resolve(parent, "Codex");
+  const date = new Date(2026, 7, 14, 23, 59, 59);
+  const uuid = "00000000-0000-4000-8000-000000000000";
+  const dir = createStandaloneCwd({ root, date, uuid });
+  const nested = join(dir, "nested", "work");
   try {
     assert.ok(existsSync(dir));
     assert.ok(resolve(dir).startsWith(`${root}${sep}`));
-    assert.equal(isStandalonePath(dir), true);
-    assert.equal(isStandalonePath(nested), true);
-    assert.equal(isStandalonePath(join(root)), true);
+    assert.equal(formatLocalDate(date), "2026-08-14");
+    assert.equal(isStandalonePath(dir, { root }), true);
+    assert.equal(isStandalonePath(nested, { root }), true);
+    assert.equal(isStandalonePath(join(root, "2026-08-14"), { root }), false);
+    assert.equal(isStandalonePath(join(root, "2026-08-14", "ordinary-project"), { root }), false);
     assert.equal(isStandalonePath("C:\\work\\project"), false);
     assert.equal(isStandalonePath(""), false);
-    ensureStandaloneCwd(nested);
+    ensureStandaloneCwd(nested, { root });
     assert.ok(existsSync(nested));
+    assert.ok(existsSync(join(dir, "outputs")));
+    assert.ok(existsSync(join(dir, "work")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
-    rmSync(join(root, "nested"), { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("standalone aliases preserve nested paths and distinguish legacy roots", () => {
+  const oldRoot = join(tmpdir(), "codex2lark-alias-old");
+  const oldWorkspace = join(oldRoot, "00000000-0000-4000-8000-000000000000");
+  const targetWorkspace = join(tmpdir(), "codex2lark-alias-new", "2026-08-14", "00000000-0000-4000-8000-000000000000");
+  const nested = join(oldWorkspace, "uutix-grab", "work");
+  const mapped = resolveStandaloneCwdAlias(nested, { [oldWorkspace]: targetWorkspace });
+  assert.equal(mapped, join(targetWorkspace, "uutix-grab", "work"));
+  assert.equal(isLegacyStandalonePath(nested, { root: oldRoot }), true);
+  assert.equal(isStandalonePath(nested, { root: oldRoot }), false);
 });
 
 test("approval cards expose exactly three scoped decisions and parse callbacks", () => {

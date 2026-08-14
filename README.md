@@ -12,7 +12,7 @@
 
 - Codex 可读取本机文件；
 - Codex 只可写当前 `/new 项目名或路径` 或 `/cd 项目名或路径` 选择的项目目录；
-- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的系统临时目录，本机文件仍可只读访问；
+- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的 `Documents\Codex\YYYY-MM-DD\UUID` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问；
 - `auto` 模式使用 App Server Auto-review 代为处理后续轮次的按需审批，不解除沙箱；
 - `manual` 模式把 Codex 的命令/文件审批转发到飞书；
 - 切换审批模式不处理已经发出的审批请求；
@@ -85,9 +85,9 @@ AOI 桥接自身不再启动 codex 子进程：启动时通过 `CODEX_APP_SERVER
 - `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
 - `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
 
-环境变量变化后需重启一次桌面端才生效：变量存在时桌面端连接共享 app-server，删除后回退到内置内核。启动顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+桌面端只在启动时读取 `CODEX_APP_SERVER_WS_URL`：同一端口重启共享 app-server 后桌面端会自动重连，无需重启；换端口或删除变量后需重启一次桌面端才生效。正常顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）与桌面端；停止时先关闭 Codex 桌面端，再双击 `shared-stop.cmd`。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
 
-异常恢复：共享进程被手动结束但环境变量仍在时，双击 `shared-stop.cmd` 会删除变量；若端口仍有监听进程，脚本会提示手动排查，不会误杀其他 codex 进程。
+异常恢复：共享进程被强杀后，Windows 端口表可能残留“进程不存在但仍在 LISTENING”的幽灵占用。`shared-stop.cmd` 会识别该情况并正常收尾（删除环境变量与 PID 文件），提示重启桌面端或电脑后端口才会释放；`shared-start.cmd` 遇到幽灵占用时不会误判“已在运行”，会提示先重启清理。若检测到 AOI/AKA 桥接占用端口（防御分支），脚本会自动调用对应 `stop.cmd` 停止并弹窗提示；其他未知进程仍会要求人工排查，不会误杀其他 codex 进程。
 
 手动查看状态：
 
@@ -99,9 +99,10 @@ netstat -ano | Select-String ':45789'
 
 ## 飞书控制
 
-- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；
+- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的 `C:\Users\<用户>\Documents\Codex\YYYY-MM-DD\<UUID>` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；日期使用本地日期，UUID 永久保留，不使用标题命名目录；
 - `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
 - `/cd 分层名称或路径`：使用与 `/new` 相同的匹配规则，但保留当前会话，仅把后续任务的工作目录切换到目标目录；运行中的任务继续在原目录完成；`/cd` 无参数显示当前工作目录；
+
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
 - `/plan 任务描述`：先进入计划模式，再把任务描述作为新一轮消息交给 Codex；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
@@ -181,7 +182,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。
 
 状态保存在 `.state/sessions.json`：
 
@@ -191,6 +192,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 - `planReviews`：计划确认卡片及其处理状态；
 - `workdirs`：聊天到当前项目目录；
 - `standaloneChats`：标记处于无工作区独立对话模式的聊天；
+- `standaloneCwdAliases`：旧 Temp 独立对话目录到新桌面端目录的绝对路径映射，恢复嵌套 cwd 时自动转换；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；
@@ -210,7 +212,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
-每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定基准，稳定内容由各机器自行拉取合并。
+每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定汇合点，稳定改动经用户明确确认后由自动化任务合并、验证并推送。
 
 首次部署：
 
@@ -223,4 +225,4 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 作为稳定汇合点：稳定改动合并进 `main` 需由机器主人审核后执行，自动化不直接推送 `main`。各机器日常从 `origin/main` 拉取稳定内容合并进自己的分支（`git fetch origin` 后 `git merge origin/main` 并推送本机分支），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
-Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
+Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
