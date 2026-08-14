@@ -184,7 +184,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：公式图片上传改用绝对路径，单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。
 
 状态保存在 `.state/sessions.json`：
 

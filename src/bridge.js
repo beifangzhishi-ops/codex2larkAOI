@@ -304,11 +304,17 @@ export function localImageUploadSpec(path) {
   const imagePath = resolve(path);
   return {
     args: [
-      "im", "images", "create", "--as", "bot", "--file", `image=${imagePath}`,
+      "im", "images", "create", "--as", "bot", "--file", "image=-",
       "--data", JSON.stringify({ image_type: "message" }),
     ],
     cwd: dirname(imagePath),
   };
+}
+
+export function localImageUploadInvocation(path) {
+  const imagePath = resolve(path);
+  const upload = localImageUploadSpec(imagePath);
+  return { ...upload, input: readFileSync(imagePath) };
 }
 
 export function messageImageDownloadSpec(messageId, fileKey, fileName) {
@@ -346,9 +352,10 @@ async function uploadLocalImage(path) {
   const imagePath = resolve(path);
   if (!existsSync(imagePath) || !statSync(imagePath).isFile()) throw new Error(`图片不存在：${imagePath}`);
   if (statSync(imagePath).size < 1) throw new Error(`图片为空：${imagePath}`);
-  const upload = localImageUploadSpec(imagePath);
+  const upload = localImageUploadInvocation(imagePath);
   const { stdout } = await runCommand("lark-cli", upload.args, {
     cwd: upload.cwd,
+    input: upload.input,
     timeoutMs: 120_000,
   });
   const response = JSON.parse(stdout);

@@ -59,6 +59,7 @@ import {
   isTransientCodexError,
   latexCanvasLayout,
   latexImageUploadSpec,
+  localImageUploadInvocation,
   localImageUploadSpec,
   loadResumeThreadStatuses,
   mergeRuntimeThreadStatuses,
@@ -284,19 +285,30 @@ test("splitLatexMarkdown does not treat Windows-path image links as bare formula
   ]);
 });
 
-test("latexImageUploadSpec uses an absolute image path for lark-cli", () => {
+test("latexImageUploadSpec feeds the image through stdin", () => {
   const imagePath = resolve(".state", "latex", "formula.png");
   const upload = latexImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], `image=${imagePath}`);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=-");
 });
 
 test("localImageUploadSpec shares the generic message-image upload shape", () => {
   const imagePath = resolve(".state", "images", "plot.png");
   const upload = localImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], `image=${imagePath}`);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=-");
   assert.deepEqual(upload, latexImageUploadSpec(imagePath));
+});
+
+test("localImageUploadInvocation reads the image bytes into stdin input", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-upload-"));
+  const imagePath = join(directory, "formula.png");
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  writeFileSync(imagePath, bytes);
+  const invocation = localImageUploadInvocation(imagePath);
+  assert.equal(invocation.cwd, directory);
+  assert.equal(invocation.args[invocation.args.indexOf("--file") + 1], "image=-");
+  assert.deepEqual(invocation.input, bytes);
 });
 
 test("latexCanvasLayout renders display formulas at a fixed canvas width", () => {
