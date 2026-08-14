@@ -853,22 +853,30 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high"), {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
   });
-  assert.equal(parseControlCommand("/approval"), null);
-  assert.equal(parseControlCommand("/interject pause"), null);
-  assert.equal(parseControlCommand("/screen now"), null);
-  assert.equal(parseControlCommand("/temperature now"), null);
-  assert.equal(parseControlCommand("/temp"), null);
-  assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
-  assert.equal(parseControlCommand("/rename"), null);
+  assert.deepEqual(parseControlCommand("/"), { type: "invalid", raw: "/" });
+  assert.deepEqual(parseControlCommand("/ "), { type: "invalid", raw: "/" });
+  assert.deepEqual(parseControlCommand("/foo"), { type: "invalid", raw: "/foo" });
+  assert.deepEqual(parseControlCommand("/stop now"), { type: "invalid", raw: "/stop now" });
+  assert.deepEqual(parseControlCommand("/approval"), { type: "invalid", raw: "/approval" });
+  assert.deepEqual(parseControlCommand("/compress now"), { type: "invalid", raw: "/compress now" });
+  assert.deepEqual(parseControlCommand("/compact now"), { type: "invalid", raw: "/compact now" });
+  assert.deepEqual(parseControlCommand("/branch now"), { type: "invalid", raw: "/branch now" });
+  assert.deepEqual(parseControlCommand("/fork now"), { type: "invalid", raw: "/fork now" });
+  assert.deepEqual(parseControlCommand("/interject pause"), { type: "invalid", raw: "/interject pause" });
+  assert.deepEqual(parseControlCommand("/screen now"), { type: "invalid", raw: "/screen now" });
+  assert.deepEqual(parseControlCommand("/temperature now"), { type: "invalid", raw: "/temperature now" });
+  assert.deepEqual(parseControlCommand("/temp"), { type: "invalid", raw: "/temp" });
+  assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high extra"), { type: "invalid", raw: "/model gpt-5.6-sol high extra" });
+  assert.deepEqual(parseControlCommand("/rename"), { type: "invalid", raw: "/rename" });
   assert.deepEqual(parseControlCommand("/model default high"), {
     type: "model", modelId: "default", effort: "high",
   });
   assert.deepEqual(parseControlCommand("/think"), { type: "think" });
   assert.deepEqual(parseControlCommand("/work"), { type: "work" });
-  assert.equal(parseControlCommand("/think gpt-5.6-sol"), null);
-  assert.equal(parseControlCommand("/work deepseek-v4-flash"), null);
-  assert.equal(parseControlCommand("/mode auto"), null);
-  assert.equal(parseControlCommand("/reject"), null);
+  assert.deepEqual(parseControlCommand("/think gpt-5.6-sol"), { type: "invalid", raw: "/think gpt-5.6-sol" });
+  assert.deepEqual(parseControlCommand("/work deepseek-v4-flash"), { type: "invalid", raw: "/work deepseek-v4-flash" });
+  assert.deepEqual(parseControlCommand("/mode auto"), { type: "invalid", raw: "/mode auto" });
+  assert.deepEqual(parseControlCommand("/reject"), { type: "invalid", raw: "/reject" });
   assert.equal(parseControlCommand("改为自动审批"), null);
   assert.equal(parseControlCommand("停止当前操作"), null);
   assert.equal(parseControlCommand("同意执行"), null);
@@ -2070,7 +2078,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/think、\/work、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",

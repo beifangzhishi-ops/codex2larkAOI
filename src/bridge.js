@@ -63,7 +63,8 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "桥接负责 /new、/cd、/resume、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/cd、/resume、/model、/think、/work、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "任何以 / 开头的消息都按命令处理；写错的命令会收到“无效命令”提示，不会进入 Codex。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -577,6 +578,7 @@ export function parseControlCommand(text) {
   if (newCommand) return { type: "new", query: (newCommand[1] || "").trim() };
   const cdCommand = value.match(/^\/cd(?:\s+(.+))?$/i);
   if (cdCommand) return { type: "cd", query: (cdCommand[1] || "").trim() };
+  if (value.startsWith("/")) return { type: "invalid", raw: value };
   return null;
 }
 
@@ -2879,6 +2881,11 @@ class BridgeRuntime {
       await this.#handleImmediate(event, command);
       return;
     }
+    if (command?.type === "invalid") {
+      await sendReply(event.messageId, `${event.eventId}-invalid-command`,
+        `无效命令：${String(command.raw || "").slice(0, 200)}。\n发送 /help 查看支持的命令。`, this.config);
+      return;
+    }
     if (command?.type === "userInput") {
       await this.#handleUserInputCard(event);
       return;
@@ -4701,3 +4708,4 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exitCode = 1;
   });
 }
+
