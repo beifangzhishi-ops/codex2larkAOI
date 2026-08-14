@@ -12,7 +12,7 @@
 
 - Codex 可读取本机文件；
 - Codex 只可写当前 `/new 项目名或路径` 或 `/cd 项目名或路径` 选择的项目目录；
-- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的系统临时目录，本机文件仍可只读访问；
+- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的 `Documents\Codex\YYYY-MM-DD\UUID` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问；
 - `auto` 模式使用 App Server Auto-review 代为处理后续轮次的按需审批，不解除沙箱；
 - `manual` 模式把 Codex 的命令/文件审批转发到飞书；
 - 切换审批模式不处理已经发出的审批请求；
@@ -99,9 +99,25 @@ netstat -ano | Select-String ':45789'
 
 ## 飞书控制
 
-- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；
+- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的 `C:\Users\<用户>\Documents\Codex\YYYY-MM-DD\<UUID>` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；日期使用本地日期，UUID 永久保留，不使用标题命名目录；
 - `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
 - `/cd 分层名称或路径`：使用与 `/new` 相同的匹配规则，但保留当前会话，仅把后续任务的工作目录切换到目标目录；运行中的任务继续在原目录完成；`/cd` 无参数显示当前工作目录；
+
+### 迁移旧独立对话
+
+旧版 `%TEMP%\codex2larkAOI\standalone\<UUID>` 目录可迁入桌面端布局。命令默认只预览，不移动文件：
+
+```cmd
+npm run migrate:standalone
+```
+
+确认 AOI 已停服、旧线程没有运行中的轮次或后台终端后，再执行：
+
+```cmd
+npm run migrate:standalone -- --apply
+```
+
+迁移按旧目录创建日期归档到 `Documents\Codex\YYYY-MM-DD\<UUID>`，同盘移动全部目录并补充 `outputs`、`work`。执行前会检查目标冲突，生成 SHA-256 清单、状态备份和迁移记录；状态中的 `standaloneCwdAliases` 保存旧路径到新路径的映射，嵌套 cwd 会保留相对路径。桥接恢复旧线程时通过 `thread/resume` 携带新 cwd，归档状态保持不变；Codex 自身维护的线程元数据不直接改写，因此 `thread/read` 仍可能显示旧路径，桌面端状态由 Codex 自行维护。任一步失败会恢复目录、状态和旧 cwd，不自动合并冲突目录。
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
 - `/plan 任务描述`：先进入计划模式，再把任务描述作为新一轮消息交给 Codex；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
@@ -193,6 +209,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 - `planReviews`：计划确认卡片及其处理状态；
 - `workdirs`：聊天到当前项目目录；
 - `standaloneChats`：标记处于无工作区独立对话模式的聊天；
+- `standaloneCwdAliases`：旧 Temp 独立对话目录到新桌面端目录的绝对路径映射，恢复嵌套 cwd 时自动转换；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；
@@ -225,4 +242,4 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 稳定内容由各机器拉取合并，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
-Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
+Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。

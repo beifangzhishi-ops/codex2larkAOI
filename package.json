@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/service-control.js launch",
     "start:foreground": "node src/service-control.js start",
+    "migrate:standalone": "node scripts/migrate-standalone-cwds.mjs",
     "check": "node --check src/bridge.js && node --check src/service-control.js && node --test --test-isolation=none"
   },
   "engines": {
