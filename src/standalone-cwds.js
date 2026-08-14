@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -109,13 +109,6 @@ export function resolveStandaloneCwdAlias(cwd, aliases = {}) {
   if (!best) return value;
   const suffix = relative(best.source, target);
   return resolve(best.destination, suffix);
-}
-
-export function legacyDirectoryTarget(directory, { root = standaloneRoot(), date } = {}) {
-  const uuid = basename(resolve(directory));
-  if (!validUuid(uuid)) throw new Error(`旧独立对话目录名称不是 UUID: ${directory}`);
-  const archiveDate = date || new Date();
-  return resolve(root, formatLocalDate(archiveDate), uuid);
 }
 
 export { validDateSegment, validUuid };

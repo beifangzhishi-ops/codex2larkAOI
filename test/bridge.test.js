@@ -112,7 +112,6 @@ import {
   watchForStopRequest,
   hasCompleteTurnHistory,
 } from "../src/bridge.js";
-import { buildMigrationEntries } from "../scripts/migrate-standalone-cwds.mjs";
 import {
   launchService,
   preparePowerShellEnvironment,
@@ -1114,26 +1113,6 @@ test("standalone aliases preserve nested paths and distinguish legacy roots", ()
   assert.equal(mapped, join(targetWorkspace, "uutix-grab", "work"));
   assert.equal(isLegacyStandalonePath(nested, { root: oldRoot }), true);
   assert.equal(isStandalonePath(nested, { root: oldRoot }), false);
-});
-
-test("standalone migration planning uses a temporary root and preserves file totals", () => {
-  const parent = mkdtempSync(join(tmpdir(), "codex2lark-migration-plan-"));
-  const sourceRoot = join(parent, "old", "standalone");
-  const targetRoot = join(parent, "new", "Codex");
-  const uuid = "00000000-0000-4000-8000-000000000001";
-  const source = join(sourceRoot, uuid, "uutix-grab");
-  mkdirSync(source, { recursive: true });
-  writeFileSync(join(source, "one.txt"), "迁移计划测试\n", "utf8");
-  try {
-    const [entry] = buildMigrationEntries({ sourceRoot, targetRoot });
-    assert.equal(entry.uuid, uuid);
-    assert.equal(entry.summary.files, 1);
-    assert.equal(entry.summary.bytes, Buffer.byteLength("迁移计划测试\n"));
-    assert.equal(entry.target.startsWith(targetRoot), true);
-    assert.equal(existsSync(entry.target), false);
-  } finally {
-    rmSync(parent, { recursive: true, force: true });
-  }
 });
 
 test("approval cards expose exactly three scoped decisions and parse callbacks", () => {

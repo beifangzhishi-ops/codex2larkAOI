@@ -103,21 +103,6 @@ netstat -ano | Select-String ':45789'
 - `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
 - `/cd 分层名称或路径`：使用与 `/new` 相同的匹配规则，但保留当前会话，仅把后续任务的工作目录切换到目标目录；运行中的任务继续在原目录完成；`/cd` 无参数显示当前工作目录；
 
-### 迁移旧独立对话
-
-旧版 `%TEMP%\codex2larkAOI\standalone\<UUID>` 目录可迁入桌面端布局。命令默认只预览，不移动文件：
-
-```cmd
-npm run migrate:standalone
-```
-
-确认 AOI 已停服、旧线程没有运行中的轮次或后台终端后，再执行：
-
-```cmd
-npm run migrate:standalone -- --apply
-```
-
-迁移按旧目录创建日期归档到 `Documents\Codex\YYYY-MM-DD\<UUID>`，同盘移动全部目录并补充 `outputs`、`work`。执行前会检查目标冲突，生成 SHA-256 清单、状态备份和迁移记录；状态中的 `standaloneCwdAliases` 保存旧路径到新路径的映射，嵌套 cwd 会保留相对路径。桥接恢复旧线程时通过 `thread/resume` 携带新 cwd，归档状态保持不变；Codex 自身维护的线程元数据不直接改写，因此 `thread/read` 仍可能显示旧路径，桌面端状态由 Codex 自行维护。任一步失败会恢复目录、状态和旧 cwd，不自动合并冲突目录。
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
 - `/plan 任务描述`：先进入计划模式，再把任务描述作为新一轮消息交给 Codex；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
@@ -199,7 +184,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。
 
 状态保存在 `.state/sessions.json`：
 
@@ -229,7 +214,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
-每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定基准，稳定内容由各机器自行拉取合并。
+每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定汇合点，稳定改动经用户明确确认后由自动化任务合并、验证并推送。
 
 首次部署：
 
@@ -240,6 +225,6 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
 6. 切换到本机分支（如 `git checkout <本机分支>` 或 `git pull origin <本机分支>`）；安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
 
-日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 稳定内容由各机器拉取合并，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；稳定内容进入 `main` 需用户明确确认后由自动化任务合并推送，各机器日常从 `origin/main` 拉取稳定内容合并进自己的分支（`git fetch origin` 后 `git merge origin/main` 并推送本机分支），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
