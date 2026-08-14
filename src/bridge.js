@@ -63,7 +63,7 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/think、/work、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
   "codex2lark.aoi.feishu-channel": {
@@ -571,6 +571,8 @@ export function parseControlCommand(text) {
   if (lower === "/help") return { type: "help" };
   if (lower === "/screen") return { type: "screen" };
   if (lower === "/temperature") return { type: "temperature" };
+  if (lower === "/think") return { type: "think" };
+  if (lower === "/work") return { type: "work" };
   const model = value.match(/^\/model(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
   if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
   const newCommand = value.match(/^\/new(?:\s+(.+))?$/i);
@@ -921,6 +923,11 @@ const TITLE_OUTPUT_SCHEMA = {
 
 // CodexModelProxy 中转入口 slug，经中转映射到 DeepSeek-V4-Flash（deepseek-v4-flash）。
 export const DEFAULT_TITLE_MODEL = "gpt-5.6-terra";
+// /think 与 /work 快捷命令的部署级默认模型和思考强度。
+export const DEFAULT_THINK_MODEL = "gpt-5.6-sol";
+export const DEFAULT_THINK_EFFORT = "high";
+export const DEFAULT_WORK_MODEL = "deepseek-v4-flash";
+export const DEFAULT_WORK_EFFORT = "max";
 const TITLE_MAX_ATTEMPTS = 3;
 
 const TITLE_BASE_INSTRUCTIONS = [
@@ -1701,6 +1708,10 @@ export function buildConfig(env) {
     codexCommand: resolveCodexCommand(env),
     appServerWebSocketUrl: String(env.CODEX_APP_SERVER_WS_URL ?? "").trim(),
     model: env.CODEX_MODEL?.trim() || "",
+    thinkModel: String(env.CODEX_THINK_MODEL ?? "").trim() || DEFAULT_THINK_MODEL,
+    thinkEffort: String(env.CODEX_THINK_EFFORT ?? "").trim() || DEFAULT_THINK_EFFORT,
+    workModel: String(env.CODEX_WORK_MODEL ?? "").trim() || DEFAULT_WORK_MODEL,
+    workEffort: String(env.CODEX_WORK_EFFORT ?? "").trim() || DEFAULT_WORK_EFFORT,
     titleModel: titleModel || "auto",
     titleEffort: titleEffort || "auto",
     defaultApprovalMode,
@@ -2034,6 +2045,36 @@ export function resolveModelSelection(catalog, setting = null, deploymentModel =
   return { entry, effort, source, fallbackNotice, repairedSetting };
 }
 
+export function resolveQuickModelSelection(catalog, model = "", effort = "") {
+  const modelValue = String(model || "").trim();
+  const effortValue = String(effort || "").trim();
+  if (!modelValue) {
+    const fallback = resolveModelSelection(catalog, { mode: "default" }, "");
+    if (fallback.error) return { error: fallback.error };
+    return { entry: fallback.entry, effort: fallback.effort };
+  }
+  const entry = findModelCatalogEntry(catalog, modelValue);
+  if (!entry) return { error: `找不到可选模型：${modelValue}` };
+  const supported = entry.supportedReasoningEfforts.map((item) => item.reasoningEffort);
+  const targetEffort = effortValue || entry.defaultReasoningEffort;
+  if (!supported.includes(targetEffort)) {
+    return { error: `模型 ${entry.displayName} 不支持思考强度：${targetEffort}；可用档位：${supported.join("、") || "（无）"}` };
+  }
+  return { entry, effort: targetEffort };
+}
+
+export function buildModelPresetLines(catalog, config = {}) {
+  const think = resolveQuickModelSelection(catalog, config.thinkModel, config.thinkEffort);
+  const work = resolveQuickModelSelection(catalog, config.workModel, config.workEffort);
+  const presetText = (resolved) => resolved.error
+    ? `不可用（${resolved.error.slice(0, 120)}）`
+    : `${resolved.entry.displayName}（${resolved.entry.model}）/ ${resolved.effort}`;
+  return [
+    `思考模型预设：${presetText(think)}`,
+    `执行模型预设：${presetText(work)}`,
+  ].join("\n");
+}
+
 function modelSummary(selection) {
   return [
     `${selection.entry.displayName}（${selection.entry.model}）`,
@@ -2096,6 +2137,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/branch` 保留当前历史创建新会话 · `/compress` 压缩当前上下文",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
+        "`/think` 切换思考模型 · `/work` 切换执行模型",
         "`/plan [任务]` 进入计划模式并开始新一轮 · `/default` 切回默认执行模式",
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
         "`/goal pause|resume|clear` 暂停、恢复或清除 Goal",
@@ -3108,6 +3150,15 @@ class BridgeRuntime {
       }
       return;
     }
+    if (command?.type === "think" || command?.type === "work") {
+      try {
+        await this.#handleQuickModelCommand(event, command.type);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-${command.type}-error`,
+          `切换${command.type === "think" ? "思考" : "执行"}模型失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
     if (command?.type === "model") {
       try {
         await this.#handleModelCommand(event, command);
@@ -3356,6 +3407,13 @@ class BridgeRuntime {
     } catch (error) {
       modelLines = `下一轮模型：无法读取（${String(error.message || error).slice(0, 160)}）\n下一轮思考强度：无法读取\n设置来源：未知`;
     }
+    let presetLines;
+    try {
+      const catalog = await this.#listModels();
+      presetLines = buildModelPresetLines(catalog, this.config);
+    } catch (error) {
+      presetLines = "思考/执行模型预设：无法读取";
+    }
     const goal = await this.#getGoal(threadId);
     const goalLines = goal ? [
       "Goal：",
@@ -3375,6 +3433,7 @@ class BridgeRuntime {
       `审批：${this.modeFor(chatId) === "auto" ? "替我审批（Auto-review）" : "人工审批"}`,
       `插话：${this.interjectionModeFor(chatId) === "guide" ? "引导（注入运行中的任务）" : "排队（等待当前任务结束）"}`,
       modelLines,
+      presetLines,
       ...goalLines,
       standalone ? "权限：全盘读取、仅本会话临时目录可写" : "权限：全盘读取、当前项目目录写入",
     ].join("\n");
@@ -3465,6 +3524,23 @@ class BridgeRuntime {
     }
     const goalText = goal ? `目标：${goal.objective || "未提供"}\n状态：${resumeThreadStatusLabel({ resumeGoal: goal })}` : "当前会话没有 Goal。";
     await sendReply(event.messageId, `${event.eventId}-goal`, goalText, this.config);
+  }
+
+  async #handleQuickModelCommand(event, slot) {
+    const preset = slot === "think"
+      ? { model: this.config.thinkModel, effort: this.config.thinkEffort, label: "思考模型" }
+      : { model: this.config.workModel, effort: this.config.workEffort, label: "执行模型" };
+    const catalog = await this.#listModels();
+    const resolved = resolveQuickModelSelection(catalog, preset.model, preset.effort);
+    if (resolved.error) throw new Error(resolved.error);
+    this.state.modelSettings[event.chatId] = {
+      mode: "explicit",
+      modelId: resolved.entry.id,
+      effort: resolved.effort,
+    };
+    saveState(this.state);
+    await sendReply(event.messageId, `${event.eventId}-${slot}-model`,
+      `已切换${preset.label}。\n${resolved.entry.displayName}（${resolved.entry.model}）\n思考强度：${resolved.effort}\n生效范围：后续轮次`, this.config);
   }
 
   async #handleModelCommand(event, command) {

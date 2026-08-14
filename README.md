@@ -47,6 +47,8 @@ notepad .env
 - `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；
 - `CODEX_COMMAND`：仅用于启动预检的 `codex.exe` 绝对路径；留空时自动发现最新版 VS Code 扩展内置内核（与共享 app-server 一致）；实际连接走 `CODEX_APP_SERVER_WS_URL` 指定的共享 app-server，不要指向已删除的项目内旧版内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
+- `CODEX_THINK_MODEL`、`CODEX_THINK_EFFORT`：`/think` 快捷命令使用的思考模型和思考强度，默认 `gpt-5.6-sol` / `high`；模型需在 App Server `model/list` 中可用；
+- `CODEX_WORK_MODEL`、`CODEX_WORK_EFFORT`：`/work` 快捷命令使用的执行模型和思考强度，默认 `deepseek-v4-flash` / `max`；模型需在 App Server `model/list` 中可用；
 - `CODEX_TITLE_MODEL`、`CODEX_TITLE_EFFORT`：用于异步生成会话标题；模型留空或设为 `auto` 时，初始偏好 `gpt-5.6-terra`（经 CodexModelProxy 中转的 DeepSeek-V4-Flash），三次标题尝试失败后若该模型已不可用，则切换到首个成功业务轮次的模型并更新暂存值；档位留空或设为 `auto` 时取所选模型支持列表的最低档位；显式配置时不会跟随聊天的 `/model` 设置；
 - `CODEX_APPROVAL_MODE=auto|manual`：新聊天的默认审批模式；
 - `CODEX_INTERJECTION_MODE=guide|queue`：新聊天的默认插话模式；`guide` 会将消息注入正在运行的同一会话，`queue` 则等待当前任务结束；
@@ -117,6 +119,8 @@ netstat -ano | Select-String ':45789'
 - `/model default`：恢复部署级 `CODEX_MODEL` 或 Codex 默认模型和默认思考强度；
 - `/model <model-id>`：选择模型并采用该模型的默认思考强度；
 - `/model <model-id> <思考强度>`：同时设置模型和思考强度；只有 `model/list` 当前返回的组合才会生效；
+- `/think`：无参快捷命令，把当前聊天模型切换为 `.env` 配置的思考模型和思考强度（默认 `gpt-5.6-sol` / `high`）；
+- `/work`：无参快捷命令，把当前聊天模型切换为 `.env` 配置的执行模型和思考强度（默认 `deepseek-v4-flash` / `max`）；带参数时不识别为命令，按普通任务处理；
 - 模型设置按飞书聊天持久化，只影响设置完成后的普通任务；模型或强度失效时会安全回退并明确提示；
 - `/screen`：按物理像素截取 Windows 桥接主机的完整虚拟桌面，兼容多显示器和 DPI 缩放，并作为图片回复；发送完成后删除临时图片；
 - `/temperature`：查询桥接主机本机温度（CPU、磁盘、风扇、GPU），由桥接直接读取 LibreHardwareMonitor 的温度服务并回复，不占用 Codex 会话；
@@ -184,7 +188,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。
+维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。同日新增 `/think` 与 `/work` 模型快捷命令：分别按 `.env` 的 `CODEX_THINK_MODEL/CODEX_THINK_EFFORT` 与 `CODEX_WORK_MODEL/CODEX_WORK_EFFORT` 切换思考/执行模型（默认 `gpt-5.6-sol` / `high` 与 `deepseek-v4-flash` / `max`），仅接受无参形式，`/status` 增加模型预设展示。
 
 状态保存在 `.state/sessions.json`：
 
@@ -198,7 +202,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；
-- `modelSettings`：聊天到后续轮次的模型和思考强度策略；
+- `modelSettings`：聊天到后续轮次的模型和思考强度策略（由 `/model`、`/think`、`/work` 更新）；
 - `autoTitleModel`：自动标题模式下最后一次可用的标题模型；
 - `pendingTitleJobs`：待生成或待写入的会话标题任务，保存有限输入摘要、首个业务轮次模型、任务级标题模型/档位、重试次数和最近错误；
 - `markdownDelivery`：机器人 `codex` 文件夹的 token、链接和已授予编辑权限的允许用户；
