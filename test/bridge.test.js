@@ -16,6 +16,7 @@ import {
   buildHelpCard,
   buildModelCard,
   buildModelResultCard,
+  buildModelPresetLines,
   buildPlanReviewCard,
   splitPlanCardImages,
   buildTurnInput,
@@ -31,6 +32,10 @@ import {
   cleanHistoricalFinalText,
   createPendingTitleJob,
   DEFAULT_TITLE_MODEL,
+  DEFAULT_THINK_MODEL,
+  DEFAULT_THINK_EFFORT,
+  DEFAULT_WORK_MODEL,
+  DEFAULT_WORK_EFFORT,
   createRunningThreadAttachment,
   createConsumerReadiness,
   createStandaloneCwd,
@@ -83,6 +88,7 @@ import {
   resumeThreadStatusLabel,
   resolveCodexCommand,
   resolveModelSelection,
+  resolveQuickModelSelection,
   resolveTitleFallbackAfterFailures,
   resolveStandaloneCwdAlias,
   selectLowestReasoningEffort,
@@ -857,6 +863,10 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/model default high"), {
     type: "model", modelId: "default", effort: "high",
   });
+  assert.deepEqual(parseControlCommand("/think"), { type: "think" });
+  assert.deepEqual(parseControlCommand("/work"), { type: "work" });
+  assert.equal(parseControlCommand("/think gpt-5.6-sol"), null);
+  assert.equal(parseControlCommand("/work deepseek-v4-flash"), null);
   assert.equal(parseControlCommand("/mode auto"), null);
   assert.equal(parseControlCommand("/reject"), null);
   assert.equal(parseControlCommand("改为自动审批"), null);
@@ -1135,6 +1145,8 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(card.elements[0].content, /\/new 项目名或路径/);
   assert.match(card.elements[0].content, /\/cd 项目名或路径/);
   assert.match(card.elements[0].content, /\/model/);
+  assert.match(card.elements[0].content, /\/think/);
+  assert.match(card.elements[0].content, /\/work/);
   assert.match(card.elements[0].content, /\/rename/);
   assert.match(card.elements[0].content, /\/plan/);
   assert.match(card.elements[0].content, /\/default/);
@@ -1389,6 +1401,47 @@ test("model catalog and selection use only server-supported model efforts", () =
   assert.equal(deployment.entry.id, "terra");
   assert.equal(deployment.source, "部署默认");
   assert.match(resolveModelSelection([{ ...catalog[1], isDefault: false }]).error, /默认模型/);
+});
+
+test("quick model presets resolve strictly and render status lines", () => {
+  const catalog = normalizeModelCatalog({ data: [
+    {
+      id: "gpt-5.6-sol", model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+    },
+    {
+      id: "deepseek-v4-flash", model: "deepseek-v4-flash", displayName: "OC · DSV4 Flash",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "max" },
+      ],
+    },
+  ] });
+  assert.equal(DEFAULT_THINK_MODEL, "gpt-5.6-sol");
+  assert.equal(DEFAULT_THINK_EFFORT, "high");
+  assert.equal(DEFAULT_WORK_MODEL, "deepseek-v4-flash");
+  assert.equal(DEFAULT_WORK_EFFORT, "max");
+  const think = resolveQuickModelSelection(catalog, DEFAULT_THINK_MODEL, DEFAULT_THINK_EFFORT);
+  assert.equal(think.entry.id, "gpt-5.6-sol");
+  assert.equal(think.effort, "high");
+  const work = resolveQuickModelSelection(catalog, DEFAULT_WORK_MODEL, DEFAULT_WORK_EFFORT);
+  assert.equal(work.entry.id, "deepseek-v4-flash");
+  assert.equal(work.effort, "max");
+  assert.match(resolveQuickModelSelection(catalog, "missing", "high").error, /找不到可选模型/);
+  assert.match(resolveQuickModelSelection(catalog, "gpt-5.6-sol", "ultra").error, /可用档位/);
+  assert.equal(resolveQuickModelSelection(catalog, "", "").entry.id, "gpt-5.6-sol");
+  const lines = buildModelPresetLines(catalog, {
+    thinkModel: DEFAULT_THINK_MODEL,
+    thinkEffort: DEFAULT_THINK_EFFORT,
+    workModel: DEFAULT_WORK_MODEL,
+    workEffort: DEFAULT_WORK_EFFORT,
+  });
+  assert.match(lines, /思考模型预设：GPT-5\.6-Sol（gpt-5\.6-sol）\/ high/);
+  assert.match(lines, /执行模型预设：OC · DSV4 Flash（deepseek-v4-flash）\/ max/);
+  assert.match(buildModelPresetLines(catalog, {
+    thinkModel: "missing", workModel: DEFAULT_WORK_MODEL,
+  }), /思考模型预设：不可用/);
 });
 
 test("automatic title fallback validates the cached model after three failures", () => {
@@ -2006,6 +2059,10 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(config.reactions, true);
   assert.equal(config.titleModel, "auto");
   assert.equal(config.titleEffort, "auto");
+  assert.equal(config.thinkModel, DEFAULT_THINK_MODEL);
+  assert.equal(config.thinkEffort, DEFAULT_THINK_EFFORT);
+  assert.equal(config.workModel, DEFAULT_WORK_MODEL);
+  assert.equal(config.workEffort, DEFAULT_WORK_EFFORT);
   assert.equal(config.temperatureApiUrl, "http://127.0.0.1:8085/data.json");
   assert.equal("projectInstructions" in config, false);
   const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
@@ -2031,6 +2088,18 @@ test("buildConfig validates and exposes approval defaults", () => {
     CODEX_WORKDIR: process.cwd(),
     TEMPERATURE_API_URL: "http://127.0.0.1:9000/data.json",
   }).temperatureApiUrl, "http://127.0.0.1:9000/data.json");
+  const overridden = buildConfig({
+    FEISHU_ALLOWED_OPEN_IDS: "ou_test",
+    CODEX_WORKDIR: process.cwd(),
+    CODEX_THINK_MODEL: "deepseek-v4-pro",
+    CODEX_THINK_EFFORT: "low",
+    CODEX_WORK_MODEL: "deepseek-v4-flash-direct",
+    CODEX_WORK_EFFORT: "high",
+  });
+  assert.equal(overridden.thinkModel, "deepseek-v4-pro");
+  assert.equal(overridden.thinkEffort, "low");
+  assert.equal(overridden.workModel, "deepseek-v4-flash-direct");
+  assert.equal(overridden.workEffort, "high");
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "*" }), /不允许通配符/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_APPROVAL_MODE: "sometimes" }), /auto 或 manual/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_INTERJECTION_MODE: "sometimes" }), /guide 或 queue/);
