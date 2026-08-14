@@ -9,6 +9,7 @@ import {
   approvalsReviewer,
   approvalCardUpdateArgs,
   buildConfig,
+  buildFeishuPostContent,
   buildApprovalCard,
   buildTurnCollaborationMode,
   buildEffortCard,
@@ -276,20 +277,18 @@ test("splitLatexMarkdown does not treat Windows-path image links as bare formula
   ]);
 });
 
-test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
+test("latexImageUploadSpec uses an absolute image path for lark-cli", () => {
   const imagePath = resolve(".state", "latex", "formula.png");
   const upload = latexImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\formula.png");
-  assert.equal(upload.args.includes(imagePath), false);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], `image=${imagePath}`);
 });
 
 test("localImageUploadSpec shares the generic message-image upload shape", () => {
   const imagePath = resolve(".state", "images", "plot.png");
   const upload = localImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\plot.png");
-  assert.equal(upload.args.includes(imagePath), false);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], `image=${imagePath}`);
   assert.deepEqual(upload, latexImageUploadSpec(imagePath));
 });
 
@@ -340,6 +339,47 @@ test("extractMathJaxSvg handles plain SVG and rejects malformed output", () => {
   assert.equal(extractMathJaxSvg('<svg><g></g></svg>'), '<svg><g></g></svg>');
   assert.throws(() => extractMathJaxSvg("no svg here"), /未生成 SVG 公式/);
   assert.throws(() => extractMathJaxSvg("<svg><g></g>"), /公式不完整/);
+});
+
+test("buildFeishuPostContent renders every formula when uploads succeed", async () => {
+  const text = Array.from({ length: 33 }, (_, index) => `\\(x_${index}\\)`).join(" ");
+  let calls = 0;
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => `img_v_test_${calls += 1}`,
+  });
+  assert.equal(calls, 33);
+  assert.equal(built.mathTotal, 33);
+  assert.equal(built.mathFailed, 0);
+  const images = built.content.zh_cn.content.flat().filter((node) => node.tag === "img");
+  assert.equal(images.length, 33);
+  assert.equal(images[0].image_key, "img_v_test_1");
+});
+
+test("buildFeishuPostContent isolates a single failed formula", async () => {
+  const text = "\\(a\\) 与 \\(b\\) 及\n\n$$c$$\n\n";
+  let index = 0;
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => {
+      index += 1;
+      if (index === 2) throw new Error("upload failed");
+      return `img_v_${index}`;
+    },
+  });
+  assert.equal(built.mathTotal, 3);
+  assert.equal(built.mathFailed, 1);
+  const nodes = built.content.zh_cn.content.flat();
+  const images = nodes.filter((node) => node.tag === "img");
+  assert.equal(images.length, 2);
+  const texts = nodes.filter((node) => node.tag === "md").map((node) => node.text).join("");
+  assert.match(texts, /\\\(b\\\)/);
+});
+
+test("buildFeishuPostContent falls back to null when every formula fails", async () => {
+  const text = "\\(a\\) 与 $$b$$";
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => { throw new Error("all failed"); },
+  });
+  assert.equal(built, null);
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {

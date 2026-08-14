@@ -304,7 +304,7 @@ export function localImageUploadSpec(path) {
   const imagePath = resolve(path);
   return {
     args: [
-      "im", "images", "create", "--as", "bot", "--file", `image=.\\${basename(imagePath)}`,
+      "im", "images", "create", "--as", "bot", "--file", `image=${imagePath}`,
       "--data", JSON.stringify({ image_type: "message" }),
     ],
     cwd: dirname(imagePath),
@@ -405,6 +405,7 @@ export function extractMathJaxSvg(rendered) {
 async function renderLatexImage(formula, display = false) {
   mkdirSync(LATEX_DIR, { recursive: true });
   const outputPath = resolve(LATEX_DIR, `${randomUUID()}.png`);
+  let uploaded = false;
   try {
     const node = latexDocument.convert(formula, { display });
     const rendered = latexAdaptor.outerHTML(node);
@@ -429,9 +430,43 @@ async function renderLatexImage(formula, display = false) {
       left: layout.left,
       top: layout.top,
     }]).png().toFile(outputPath);
-    return uploadLocalImage(outputPath);
+    const imageKey = await uploadLocalImage(outputPath);
+    uploaded = true;
+    return imageKey;
+  } catch (error) {
+    if (existsSync(outputPath)) {
+      let fileState = "";
+      try {
+        fileState = `，文件 ${statSync(outputPath).size} 字节已保留`;
+      } catch {
+        // 保留失败时不再补记文件状态
+      }
+      console.warn(`[bridge] 公式图片上传失败${fileState}（${outputPath}）：${error.message}`);
+    }
+    throw error;
   } finally {
-    try { unlinkSync(outputPath); } catch { /* best effort cleanup */ }
+    if (uploaded) {
+      try { unlinkSync(outputPath); } catch { /* best effort cleanup */ }
+    }
+  }
+}
+
+function cleanupStaleLatexFiles(maxAgeMs = 24 * 60 * 60 * 1000) {
+  try {
+    if (!existsSync(LATEX_DIR)) return;
+    const now = Date.now();
+    for (const name of readdirSync(LATEX_DIR)) {
+      if (!name.toLowerCase().endsWith(".png")) continue;
+      try {
+        if (now - statSync(resolve(LATEX_DIR, name)).mtimeMs > maxAgeMs) {
+          unlinkSync(resolve(LATEX_DIR, name));
+        }
+      } catch {
+        // 单个残留文件清理失败不影响启动
+      }
+    }
+  } catch {
+    // 目录不可读时静默跳过
   }
 }
 
@@ -1318,14 +1353,20 @@ export function removeLocalImageMarkdown(text, { cwd = ROOT } = {}) {
     .trim();
 }
 
-export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = false } = {}) {
+export async function buildFeishuPostContent(
+  text,
+  { cwd = ROOT, embedImages = false, uploadImage = renderLatexImage } = {},
+) {
   const segments = splitFeishuMarkdown(text, { cwd });
-  const hasMath = segments.some((segment) => segment.type === "math");
+  const mathSegments = segments.filter((segment) => segment.type === "math");
+  const mathTotal = mathSegments.length;
+  const hasMath = mathTotal > 0;
   const hasImage = segments.some((segment) => segment.type === "image");
   if (!hasMath && (!embedImages || !hasImage)) return null;
   const paragraphs = [[]];
   const consumedImages = [];
   const uploadedImageKeys = new Map();
+  let mathFailed = 0;
   const pushText = (value) => {
     if (value) paragraphs.at(-1).push({ tag: "md", text: value });
   };
@@ -1356,13 +1397,21 @@ export async function buildFeishuPostContent(text, { cwd = ROOT, embedImages = f
       continue;
     }
     if (segment.type === "math") {
-      const imageKey = await renderLatexImage(segment.value, segment.display);
-      if (segment.display) pushBlockImage(imageKey);
-      else paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
+      try {
+        const imageKey = await uploadImage(segment.value, segment.display);
+        if (segment.display) pushBlockImage(imageKey);
+        else paragraphs.at(-1).push({ tag: "img", image_key: imageKey });
+      } catch (error) {
+        mathFailed += 1;
+        console.warn(`[bridge] 单个公式渲染失败，保留原文：${error.message}`);
+        if (segment.display) pushText(`$$\n${segment.value}\n$$`);
+        else pushText(`\\(${segment.value}\\)`);
+      }
     }
   }
+  if (mathTotal > 0 && mathFailed === mathTotal) return null;
   const content = paragraphs.filter((paragraph) => paragraph.length);
-  return { content: { zh_cn: { content } }, consumedImages };
+  return { content: { zh_cn: { content } }, consumedImages, mathTotal, mathFailed };
 }
 
 function fenced(value) {
@@ -2199,8 +2248,13 @@ export async function sendMessageCommon(commonArgs, eventKey, text, config, opti
       let postContent = null;
       try {
         postContent = await buildFeishuPostContent(chunks[index], { cwd, embedImages });
+        if (postContent?.mathFailed) {
+          console.warn(
+            `[bridge] 公式渲染部分失败：${postContent.mathFailed}/${postContent.mathTotal} 个公式保留原文，其余已渲染为图片`,
+          );
+        }
       } catch (error) {
-        console.warn(`[bridge] 飞书 post 渲染失败，保留源 Markdown：${error.message}`);
+        console.warn(`[bridge] 飞书 post 渲染失败，保留源 Markdown（公式渲染整体失败）：${error.message}`);
       }
       if (postContent) {
         try {
@@ -4536,6 +4590,7 @@ function startConsumer(state, config, runtime) {
 
 export async function main() {
   acquirePidFile();
+  cleanupStaleLatexFiles();
   const env = loadEnv();
   if (env.LARKSUITE_CLI_CONFIG_DIR?.trim()) process.env.LARKSUITE_CLI_CONFIG_DIR = resolve(env.LARKSUITE_CLI_CONFIG_DIR.trim());
   const config = buildConfig(env);
