@@ -12,7 +12,7 @@
 
 - Codex 可读取本机文件；
 - Codex 只可写当前 `/new 项目名或路径` 或 `/cd 项目名或路径` 选择的项目目录；
-- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的系统临时目录，本机文件仍可只读访问；
+- 无工作区对话（`/new` 无参）不绑定项目目录，只可写本会话专属的 `Documents\Codex\YYYY-MM-DD\UUID` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问；
 - `auto` 模式使用 App Server Auto-review 代为处理后续轮次的按需审批，不解除沙箱；
 - `manual` 模式把 Codex 的命令/文件审批转发到飞书；
 - 切换审批模式不处理已经发出的审批请求；
@@ -99,9 +99,10 @@ netstat -ano | Select-String ':45789'
 
 ## 飞书控制
 
-- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的系统临时目录（`%TEMP%\codex2larkAOI\standalone\<会话ID>`），本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；
+- `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的 `C:\Users\<用户>\Documents\Codex\YYYY-MM-DD\<UUID>` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；日期使用本地日期，UUID 永久保留，不使用标题命名目录；
 - `/new 分层名称或路径`：先从当前目录、再从 `CODEX_WORKDIR` 根目录逐层进行不区分大小写的精确、前缀、包含匹配；多个候选会要求用户明确选择；成功后立即在目标目录创建并选中新 thread；
 - `/cd 分层名称或路径`：使用与 `/new` 相同的匹配规则，但保留当前会话，仅把后续任务的工作目录切换到目标目录；运行中的任务继续在原目录完成；`/cd` 无参数显示当前工作目录；
+
 - `/plan`：持续进入计划模式；已有会话立即使用 App Server 的 `thread/settings/update` 更新模式，没有会话时会在创建下一会话后自动应用；
 - `/plan 任务描述`：先进入计划模式，再把任务描述作为新一轮消息交给 Codex；
 - `/default`：持续切回默认执行模式；不会恢复此前已经暂停的 Goal；
@@ -191,6 +192,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 - `planReviews`：计划确认卡片及其处理状态；
 - `workdirs`：聊天到当前项目目录；
 - `standaloneChats`：标记处于无工作区独立对话模式的聊天；
+- `standaloneCwdAliases`：旧 Temp 独立对话目录到新桌面端目录的绝对路径映射，恢复嵌套 cwd 时自动转换；
 - `pendingWorkdirQueries`：等待用户补充绝对目录位置的项目查询；
 - `approvalModes`：聊天到审批模式；
 - `interjectionModes`：聊天到插话模式；
@@ -223,4 +225,4 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 稳定内容由各机器拉取合并，依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
-Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。
+Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。

@@ -14,6 +14,29 @@ import { liteAdaptor } from "mathjax-full/js/adaptors/liteAdaptor.js";
 import { RegisterHTMLHandler } from "mathjax-full/js/handlers/html.js";
 import sharp from "sharp";
 import { CodexAppServer } from "./codex-app-server.js";
+import {
+  createStandaloneCwd,
+  ensureStandaloneCwd,
+  formatLocalDate,
+  isLegacyStandalonePath,
+  isStandalonePath,
+  legacyStandaloneRoot,
+  normalizeStandaloneCwdAliases,
+  resolveStandaloneCwdAlias,
+  standaloneRoot,
+} from "./standalone-cwds.js";
+
+export {
+  createStandaloneCwd,
+  ensureStandaloneCwd,
+  formatLocalDate,
+  isLegacyStandalonePath,
+  isStandalonePath,
+  legacyStandaloneRoot,
+  normalizeStandaloneCwdAliases,
+  resolveStandaloneCwdAlias,
+  standaloneRoot,
+} from "./standalone-cwds.js";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const STATE_DIR = resolve(ROOT, ".state");
@@ -772,40 +795,16 @@ export function statusDeepLink(threadId) {
   return `codex://threads/${String(threadId || "")}`;
 }
 
-export function standaloneRoot() {
-  return resolve(tmpdir(), "codex2larkAOI", "standalone");
-}
-
-export function isStandalonePath(cwd) {
-  const value = String(cwd || "").trim();
-  if (!value) return false;
-  const root = resolve(standaloneRoot()).toLocaleLowerCase();
-  const target = resolve(value).toLocaleLowerCase();
-  return target === root || target.startsWith(`${root}${sep}`);
-}
-
-export function createStandaloneCwd() {
-  const dir = resolve(standaloneRoot(), randomUUID());
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-export function ensureStandaloneCwd(cwd) {
-  const dir = resolve(cwd);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
 function threadCwdLabel(thread) {
   const cwd = threadCwd(thread);
   if (cwd === "目录未知") return cwd;
   return isStandalonePath(cwd) ? "独立对话（无工作区）" : basename(cwd);
 }
 
-function availableThreadCwd(thread) {
+function availableThreadCwd(thread, aliases = {}) {
   const cwd = threadCwd(thread);
   if (cwd === "目录未知") return "";
-  const resolved = resolve(cwd);
+  const resolved = resolveStandaloneCwdAlias(cwd, aliases);
   if (isStandalonePath(resolved)) return resolved;
   try {
     return existsSync(resolved) && statSync(resolved).isDirectory() ? resolved : "";
@@ -1514,6 +1513,7 @@ export function normalizePersistedState(value = {}) {
     sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
     workdirs: value.workdirs && typeof value.workdirs === "object" ? value.workdirs : {},
     standaloneChats: value.standaloneChats && typeof value.standaloneChats === "object" ? value.standaloneChats : {},
+    standaloneCwdAliases: normalizeStandaloneCwdAliases(value.standaloneCwdAliases),
     approvalModes: value.approvalModes && typeof value.approvalModes === "object" ? value.approvalModes : {},
     interjectionModes: value.interjectionModes && typeof value.interjectionModes === "object" ? value.interjectionModes : {},
     threadModes: value.threadModes && typeof value.threadModes === "object" ? value.threadModes : {},
@@ -2588,7 +2588,14 @@ class BridgeRuntime {
     for (const [chatId, threadId] of Object.entries(this.state.sessions || {})) {
       if (!threadId || this.loadedThreads.has(threadId)) continue;
       try {
-        await this.client.request("thread/resume", { threadId });
+        const storedCwd = this.state.workdirs?.[chatId];
+        const cwd = resolveStandaloneCwdAlias(storedCwd, this.state.standaloneCwdAliases);
+        if (cwd && cwd !== storedCwd) {
+          if (isStandalonePath(cwd)) ensureStandaloneCwd(cwd);
+          this.state.workdirs[chatId] = cwd;
+          saveState(this.state);
+        }
+        await this.client.request("thread/resume", { threadId, ...(cwd ? { cwd } : {}) });
         this.loadedThreads.add(threadId);
         console.log(`[bridge] subscribed bound thread ${threadId} for chat ${chatId}`);
       } catch (error) {
@@ -2639,15 +2646,22 @@ class BridgeRuntime {
 
   cwdFor(chatId) {
     const stored = this.state.workdirs[chatId];
+    const aliased = resolveStandaloneCwdAlias(stored, this.state.standaloneCwdAliases);
+    if (aliased && aliased !== stored) {
+      this.state.workdirs[chatId] = aliased;
+      saveState(this.state);
+    }
+    const current = aliased || stored;
     if (this.state.standaloneChats?.[chatId]) {
-      if (stored && isStandalonePath(stored)) return ensureStandaloneCwd(stored);
+      if (current && isStandalonePath(current)) return ensureStandaloneCwd(current);
+      if (current && isLegacyStandalonePath(current)) return resolve(current);
       const dir = createStandaloneCwd();
       this.state.workdirs[chatId] = dir;
       saveState(this.state);
       return dir;
     }
-    if (!stored) return this.config.rootDir;
-    const candidate = resolve(stored);
+    if (!current) return this.config.rootDir;
+    const candidate = resolve(current);
     try {
       return existsSync(candidate) && statSync(candidate).isDirectory() ? candidate : this.config.rootDir;
     } catch {
@@ -3628,17 +3642,20 @@ class BridgeRuntime {
     }
     const threadId = selected.thread.id;
     let historyThread;
+    let selectedCwd = "";
     const ownActive = this.activeThreads.has(threadId);
     if (threadId === this.state.sessions[event.chatId]) {
       await sendReply(event.messageId, `${event.eventId}-resume-current`,
         `已经在该会话中：${threadLabel(selected.thread)}\n工作目录：${this.cwdLabelFor(event.chatId)}`, this.config);
     } else {
-      const selectedCwd = availableThreadCwd(selected.thread);
+      selectedCwd = availableThreadCwd(selected.thread, this.state.standaloneCwdAliases);
       this.state.sessions[event.chatId] = threadId;
       this.#cancelDetachedApprovals(event.chatId, threadId);
       if (selectedCwd) {
         if (isStandalonePath(selectedCwd)) {
           ensureStandaloneCwd(selectedCwd);
+          this.state.standaloneChats[event.chatId] = true;
+        } else if (isLegacyStandalonePath(selectedCwd)) {
           this.state.standaloneChats[event.chatId] = true;
         } else {
           delete this.state.standaloneChats[event.chatId];
@@ -3653,7 +3670,10 @@ class BridgeRuntime {
     try {
       if (!ownActive) {
         // A minimal resume rejoins a running thread and subscribes this bridge to its live events.
-        const resumed = await this.client.request("thread/resume", { threadId });
+        const resumed = await this.client.request("thread/resume", {
+          threadId,
+          ...(selectedCwd ? { cwd: selectedCwd } : {}),
+        });
         if (resumed?.thread) historyThread = resumed.thread;
         this.loadedThreads.add(threadId);
       }
