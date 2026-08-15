@@ -11,7 +11,16 @@
 - 所有更新默认推送到 GitHub 远程仓库的 `beta` 分支；各机器的 Codex 自动化与用户本人均可推送、维护 `beta`。
 - 只能操作 `beta` 分支和 `main`，不能操作其他分支。
 - `main` 为稳定分支：只有用户明确指令时才合并到 `main`；自动化任务不主动推送 `main`。
-- 各机器从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`。
+
+### beta 分支更新
+
+- 所有机器从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`。
+
+### 合并到 main 的流程
+
+1. 在 `beta` 分支完成开发、测试、提交并推送 `origin/beta`。
+2. 用户明确指令合并到 `main` 后，执行：切到 `main` 拉取最新，合并 `beta`，解决冲突并验证，再推送 `origin/main`。
+3. 合并完成后，各机器拉取 `origin/main` 合并进 `beta`，避免后续合并冲突。
 
 ## AKA/AOI 双槽协作
 
