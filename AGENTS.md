@@ -8,22 +8,19 @@
 ## GitHub 同步
 
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
-- 本机（Songjx，game 机器）的所有更新提交后，统一推送到 GitHub 远程仓库的 `beta` 分支；本机的 Codex 自动化与用户本人均可推送、维护 `beta`。
-- noha 机器的所有更新提交后，统一推送到 GitHub 远程仓库的 `noha` 分支；noha 机器上的自动化任务只操作 `noha` 和 `main`，不得推送、改写或同步 `beta`。
-- 本机（Songjx）只能动自己的 `beta` 分支和 `main`，不能动其他分支（如 `noha`）。
-- noha 机器只能动自己的 `noha` 分支和 `main`，不能动其他分支（如 `beta`）。
-- `main` 分支的合并必须经机器主人审核：各机器把稳定改动推送到自己的分支后，由该机器主人确认无误再合并进 `main`；自动化任务不直接推送 `main`。
+- 所有更新默认推送到 GitHub 远程仓库的 `beta` 分支；各机器的 Codex 自动化与用户本人均可推送、维护 `beta`。
+- 只能操作 `beta` 分支和 `main`，不能操作其他分支。
+- `main` 为稳定分支：只有用户明确指令时才合并到 `main`；自动化任务不主动推送 `main`。
 
-### game 分支更新
+### beta 分支更新
 
-- 本机从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`；noha 机器以同样方式维护自己的 `noha` 分支。
+- 所有机器从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`。
 
-### 合并到 main 的通用流程（两机通用）
+### 合并到 main 的流程
 
-1. 在自己的分支（`beta` 或 `noha`）完成开发、测试、提交并推送。
-2. 由该机器主人审核分支内容，确认可以进入稳定版。
-3. 审核通过后，由机器主人执行：切到 `main` 拉取最新，合并自己的分支，解决冲突并验证，再推送 `origin/main`。
-4. 合并完成后，各机器拉取 `origin/main` 更新自己的分支，避免后续合并冲突。
+1. 在 `beta` 分支完成开发、测试、提交并推送 `origin/beta`。
+2. 用户明确指令合并到 `main` 后，执行：切到 `main` 拉取最新，合并 `beta`，解决冲突并验证，再推送 `origin/main`。
+3. 合并完成后，各机器拉取 `origin/main` 合并进 `beta`，避免后续合并冲突。
 
 ## AKA/AOI 双槽协作
 

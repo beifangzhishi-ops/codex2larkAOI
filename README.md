@@ -44,7 +44,7 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 与 `/cd 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
-- `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；
+- `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；本项目统一填 `beta`；
 - `CODEX_COMMAND`：仅用于启动预检的 `codex.exe` 绝对路径；留空时自动发现最新版 VS Code 扩展内置内核（与共享 app-server 一致）；实际连接走 `CODEX_APP_SERVER_WS_URL` 指定的共享 app-server，不要指向已删除的项目内旧版内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_THINK_MODEL`、`CODEX_THINK_EFFORT`：`/think` 快捷命令使用的思考模型和思考强度，默认 `gpt-5.6-sol` / `high`；模型需在 App Server `model/list` 中可用；
@@ -190,6 +190,8 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。同日新增 `/think` 与 `/work` 模型快捷命令：分别按 `.env` 的 `CODEX_THINK_MODEL/CODEX_THINK_EFFORT` 与 `CODEX_WORK_MODEL/CODEX_WORK_EFFORT` 切换思考/执行模型（默认 `gpt-5.6-sol` / `high` 与 `deepseek-v4-flash` / `max`），仅接受无参形式，`/status` 增加模型预设展示。同日所有以 `/` 开头的消息一律按命令处理，写错的命令直接回复“无效命令”提示，不再作为普通任务进入 Codex。2026-08-15 将 noha 分支的公式渲染修复（本地图片上传改用 stdin 直传并隔离单公式失败）、/think 与 /work 模型快捷命令、/branch 与 /compress 会话控制命令、所有斜杠消息一律按命令处理合入 main。
 
+2026-08-16 更新默认分支改为 `beta`：所有更新默认推送到 `beta`，只有用户明确指令才合并到 `main`；清理本地 `test/resume-runtime-status-726f536` 测试分支。
+
 状态保存在 `.state/sessions.json`：
 
 - `sessions`：聊天到 Codex thread；
@@ -218,18 +220,18 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
-每台机器维护自己的 GitHub 分支，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中，不提交仓库。各机器只能操作自己的分支和 `main`，不能操作其他机器的分支；`main` 为稳定汇合点，稳定改动经用户明确确认后由自动化任务合并、验证并推送。
+所有机器统一在 `beta` 分支开发：更新默认推送到 `beta`，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中（填 `beta`），不提交仓库。只能操作 `beta` 和 `main`，不能操作其他分支；`main` 为稳定分支，只有用户明确指令时才合并到 `main`，自动化任务不主动推送 `main`。
 
 首次部署：
 
 1. `git clone https://github.com/beifangzhishi-ops/codex2larkAOI.git`
 2. `cd codex2larkAOI`
 3. `npm install`（需要 Node.js >= 20）
-4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS`、`LOCAL_BRANCH` 等配置（`LOCAL_BRANCH` 填本机维护的分支名）
+4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS`、`LOCAL_BRANCH` 等配置（`LOCAL_BRANCH` 填 `beta`）
 5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
-6. 切换到本机分支（如 `git checkout <本机分支>` 或 `git pull origin <本机分支>`）；安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
+6. 切换到 `beta` 分支（`git checkout beta` 或 `git pull origin beta`）；安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
 
-日常更新：本机提交后推送到 GitHub 的本机分支（`git push origin HEAD:<本机分支>`，本机分支即 `.env` 中 `LOCAL_BRANCH` 的值）；`main` 作为稳定汇合点：稳定改动合并进 `main` 需由机器主人审核后执行，自动化不直接推送 `main`。各机器日常从 `origin/main` 拉取稳定内容合并进自己的分支（`git fetch origin` 后 `git merge origin/main` 并推送本机分支），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+日常更新：本机提交后推送到 `beta`（`git push origin HEAD:beta`）；`main` 为稳定分支，只有用户明确指令时才合并到 `main`，自动化任务不主动推送 `main`；各机器日常从 `origin/main` 拉取稳定内容合并进 `beta`（`git fetch origin` 后 `git merge origin/main` 并推送 `beta`），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
 
