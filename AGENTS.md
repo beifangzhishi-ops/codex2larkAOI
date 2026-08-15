@@ -8,12 +8,10 @@
 ## GitHub 同步
 
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
-- 本机（Songjx，game 机器）的所有更新提交后，统一推送到 GitHub 远程仓库的 `sjxgame` 分支。
-- noha 机器的所有更新提交后，统一推送到 GitHub 远程仓库的 `noha` 分支。
-- 本机（Songjx）只能动自己的 `sjxgame` 分支和 `main`，不能动其他分支（如 `noha`）。
-- noha 机器只能动自己的 `noha` 分支和 `main`，不能动其他分支（如 `sjxgame`）。
-- `main` 为稳定汇合点：稳定改动需经用户明确确认，由自动化任务合并、验证并推送；未获确认前自动化不推送 `main`。
-- `main` 的稳定内容由各机器自行拉取合并进自己的分支（`git fetch origin` 后 `git merge origin/main`，验证后推送本机分支）。
+- 所有更新默认推送到 GitHub 远程仓库的 `beta` 分支；各机器的 Codex 自动化与用户本人均可推送、维护 `beta`。
+- 只能操作 `beta` 分支和 `main`，不能操作其他分支。
+- `main` 为稳定分支：只有用户明确指令时才合并到 `main`；自动化任务不主动推送 `main`。
+- 各机器从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`。
 
 ## AKA/AOI 双槽协作
 
