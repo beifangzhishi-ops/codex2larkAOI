@@ -5,16 +5,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import {
+  applyForkBinding,
   approvalPolicy,
   approvalsReviewer,
   approvalCardUpdateArgs,
   buildConfig,
+  buildFeishuPostContent,
   buildApprovalCard,
   buildTurnCollaborationMode,
   buildEffortCard,
   buildHelpCard,
   buildModelCard,
   buildModelResultCard,
+  buildModelPresetLines,
   buildPlanReviewCard,
   splitPlanCardImages,
   buildTurnInput,
@@ -26,10 +29,16 @@ import {
   buildScreenshotPowerShellCommand,
   buildTitleThreadOptions,
   buildTitleTurnParams,
+  compactThreadRequest,
+  compactionBlockReason,
   chatIdsForThread,
   cleanHistoricalFinalText,
   createPendingTitleJob,
   DEFAULT_TITLE_MODEL,
+  DEFAULT_THINK_MODEL,
+  DEFAULT_THINK_EFFORT,
+  DEFAULT_WORK_MODEL,
+  DEFAULT_WORK_EFFORT,
   createRunningThreadAttachment,
   createConsumerReadiness,
   createStandaloneCwd,
@@ -47,9 +56,11 @@ import {
   formatLatestTurnReplay,
   formatRunningThreadReplay,
   formatThreadItem,
+  forkThreadRequest,
   idempotencyKey,
   initializeMarkdownDelivery,
   isAudioPath,
+  isContextCompactionCompleted,
   isImagePath,
   isMarkdownAttachment,
   isMarkdownValidationError,
@@ -57,6 +68,7 @@ import {
   isTransientCodexError,
   latexCanvasLayout,
   latexImageUploadSpec,
+  localImageUploadInvocation,
   localImageUploadSpec,
   loadResumeThreadStatuses,
   mergeRuntimeThreadStatuses,
@@ -83,10 +95,12 @@ import {
   queryTemperature,
   reactionArgs,
   reactionIdFromOutput,
+  registerPendingCompaction,
   removeLocalImageMarkdown,
   resumeThreadStatusLabel,
   resolveCodexCommand,
   resolveModelSelection,
+  resolveQuickModelSelection,
   resolveTitleFallbackAfterFailures,
   resolveStandaloneCwdAlias,
   selectLowestReasoningEffort,
@@ -107,6 +121,7 @@ import {
   snapshotTurnSettings,
   splitLatexMarkdown,
   statusDeepLink,
+  takePendingCompaction,
   ThreadTaskQueueManager,
   watchForStopRequest,
   hasCompleteTurnHistory,
@@ -282,21 +297,30 @@ test("splitLatexMarkdown does not treat Windows-path image links as bare formula
   ]);
 });
 
-test("latexImageUploadSpec uses a cwd-relative image path for lark-cli", () => {
+test("latexImageUploadSpec feeds the image through stdin", () => {
   const imagePath = resolve(".state", "latex", "formula.png");
   const upload = latexImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\formula.png");
-  assert.equal(upload.args.includes(imagePath), false);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=-");
 });
 
 test("localImageUploadSpec shares the generic message-image upload shape", () => {
   const imagePath = resolve(".state", "images", "plot.png");
   const upload = localImageUploadSpec(imagePath);
   assert.equal(upload.cwd, dirname(imagePath));
-  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=.\\plot.png");
-  assert.equal(upload.args.includes(imagePath), false);
+  assert.equal(upload.args[upload.args.indexOf("--file") + 1], "image=-");
   assert.deepEqual(upload, latexImageUploadSpec(imagePath));
+});
+
+test("localImageUploadInvocation reads the image bytes into stdin input", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex2lark-upload-"));
+  const imagePath = join(directory, "formula.png");
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  writeFileSync(imagePath, bytes);
+  const invocation = localImageUploadInvocation(imagePath);
+  assert.equal(invocation.cwd, directory);
+  assert.equal(invocation.args[invocation.args.indexOf("--file") + 1], "image=-");
+  assert.deepEqual(invocation.input, bytes);
 });
 
 test("latexCanvasLayout renders display formulas at a fixed canvas width", () => {
@@ -346,6 +370,47 @@ test("extractMathJaxSvg handles plain SVG and rejects malformed output", () => {
   assert.equal(extractMathJaxSvg('<svg><g></g></svg>'), '<svg><g></g></svg>');
   assert.throws(() => extractMathJaxSvg("no svg here"), /未生成 SVG 公式/);
   assert.throws(() => extractMathJaxSvg("<svg><g></g>"), /公式不完整/);
+});
+
+test("buildFeishuPostContent renders every formula when uploads succeed", async () => {
+  const text = Array.from({ length: 33 }, (_, index) => `\\(x_${index}\\)`).join(" ");
+  let calls = 0;
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => `img_v_test_${calls += 1}`,
+  });
+  assert.equal(calls, 33);
+  assert.equal(built.mathTotal, 33);
+  assert.equal(built.mathFailed, 0);
+  const images = built.content.zh_cn.content.flat().filter((node) => node.tag === "img");
+  assert.equal(images.length, 33);
+  assert.equal(images[0].image_key, "img_v_test_1");
+});
+
+test("buildFeishuPostContent isolates a single failed formula", async () => {
+  const text = "\\(a\\) 与 \\(b\\) 及\n\n$$c$$\n\n";
+  let index = 0;
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => {
+      index += 1;
+      if (index === 2) throw new Error("upload failed");
+      return `img_v_${index}`;
+    },
+  });
+  assert.equal(built.mathTotal, 3);
+  assert.equal(built.mathFailed, 1);
+  const nodes = built.content.zh_cn.content.flat();
+  const images = nodes.filter((node) => node.tag === "img");
+  assert.equal(images.length, 2);
+  const texts = nodes.filter((node) => node.tag === "md").map((node) => node.text).join("");
+  assert.match(texts, /\\\(b\\\)/);
+});
+
+test("buildFeishuPostContent falls back to null when every formula fails", async () => {
+  const text = "\\(a\\) 与 $$b$$";
+  const built = await buildFeishuPostContent(text, {
+    uploadImage: async () => { throw new Error("all failed"); },
+  });
+  assert.equal(built, null);
 });
 
 test("watchForStopRequest invokes the stop callback once", async () => {
@@ -790,6 +855,10 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/stop"), { type: "stop" });
   assert.deepEqual(parseControlCommand("/resume Fix tests"), { type: "resume", query: "Fix tests" });
   assert.deepEqual(parseControlCommand("/resume"), { type: "resume", query: "" });
+  assert.deepEqual(parseControlCommand("/compress"), { type: "compress" });
+  assert.deepEqual(parseControlCommand("/compact"), { type: "compress" });
+  assert.deepEqual(parseControlCommand("/branch"), { type: "branch" });
+  assert.deepEqual(parseControlCommand("/fork"), { type: "branch" });
   assert.deepEqual(parseControlCommand("/rename 发布前检查"), { type: "rename", name: "发布前检查" });
   assert.deepEqual(parseControlCommand("/new"), { type: "new", query: "" });
   assert.deepEqual(parseControlCommand("/new Demo"), { type: "new", query: "Demo" });
@@ -801,23 +870,99 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high"), {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
   });
-  assert.equal(parseControlCommand("/approval"), null);
-  assert.equal(parseControlCommand("/interject pause"), null);
-  assert.equal(parseControlCommand("/screen now"), null);
-  assert.equal(parseControlCommand("/temperature now"), null);
-  assert.equal(parseControlCommand("/temp"), null);
-  assert.equal(parseControlCommand("/model gpt-5.6-sol high extra"), null);
-  assert.equal(parseControlCommand("/rename"), null);
+  assert.deepEqual(parseControlCommand("/"), { type: "invalid", raw: "/" });
+  assert.deepEqual(parseControlCommand("/ "), { type: "invalid", raw: "/" });
+  assert.deepEqual(parseControlCommand("/foo"), { type: "invalid", raw: "/foo" });
+  assert.deepEqual(parseControlCommand("/stop now"), { type: "invalid", raw: "/stop now" });
+  assert.deepEqual(parseControlCommand("/approval"), { type: "invalid", raw: "/approval" });
+  assert.deepEqual(parseControlCommand("/compress now"), { type: "invalid", raw: "/compress now" });
+  assert.deepEqual(parseControlCommand("/compact now"), { type: "invalid", raw: "/compact now" });
+  assert.deepEqual(parseControlCommand("/branch now"), { type: "invalid", raw: "/branch now" });
+  assert.deepEqual(parseControlCommand("/fork now"), { type: "invalid", raw: "/fork now" });
+  assert.deepEqual(parseControlCommand("/interject pause"), { type: "invalid", raw: "/interject pause" });
+  assert.deepEqual(parseControlCommand("/screen now"), { type: "invalid", raw: "/screen now" });
+  assert.deepEqual(parseControlCommand("/temperature now"), { type: "invalid", raw: "/temperature now" });
+  assert.deepEqual(parseControlCommand("/temp"), { type: "invalid", raw: "/temp" });
+  assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high extra"), { type: "invalid", raw: "/model gpt-5.6-sol high extra" });
+  assert.deepEqual(parseControlCommand("/rename"), { type: "invalid", raw: "/rename" });
   assert.deepEqual(parseControlCommand("/model default high"), {
     type: "model", modelId: "default", effort: "high",
   });
-  assert.equal(parseControlCommand("/mode auto"), null);
-  assert.equal(parseControlCommand("/reject"), null);
+  assert.deepEqual(parseControlCommand("/think"), { type: "think" });
+  assert.deepEqual(parseControlCommand("/work"), { type: "work" });
+  assert.deepEqual(parseControlCommand("/think gpt-5.6-sol"), { type: "invalid", raw: "/think gpt-5.6-sol" });
+  assert.deepEqual(parseControlCommand("/work deepseek-v4-flash"), { type: "invalid", raw: "/work deepseek-v4-flash" });
+  assert.deepEqual(parseControlCommand("/mode auto"), { type: "invalid", raw: "/mode auto" });
+  assert.deepEqual(parseControlCommand("/reject"), { type: "invalid", raw: "/reject" });
   assert.equal(parseControlCommand("改为自动审批"), null);
   assert.equal(parseControlCommand("停止当前操作"), null);
   assert.equal(parseControlCommand("同意执行"), null);
   assert.equal(parseControlCommand("切换到 Demo 项目"), null);
   assert.equal(parseControlCommand("请分析自动审批的风险"), null);
+});
+
+test("fork and compaction helpers build official App Server requests", () => {
+  assert.deepEqual(forkThreadRequest("thr_1"), {
+    method: "thread/fork",
+    params: { threadId: "thr_1" },
+  });
+  assert.deepEqual(compactThreadRequest("thr_1"), {
+    method: "thread/compact/start",
+    params: { threadId: "thr_1" },
+  });
+  assert.equal(isContextCompactionCompleted({
+    method: "item/completed",
+    params: { item: { type: "contextCompaction" } },
+  }), true);
+  assert.equal(isContextCompactionCompleted({
+    method: "item/started",
+    params: { item: { type: "contextCompaction" } },
+  }), false);
+});
+
+test("fork binding preserves chat settings and prepares auto title for the new thread", () => {
+  const state = {
+    sessions: { oc_1: "thr_src" },
+    workdirs: { oc_1: "C:/work" },
+    standaloneChats: {},
+    threadModes: { thr_src: "plan" },
+    pendingTitleJobs: { thr_src: { state: "awaitingFirstTurn", attempts: 0 } },
+  };
+  applyForkBinding(state, "oc_1", "thr_src", "thr_new", "C:/work", { discardSourceTitle: true });
+  assert.equal(state.sessions.oc_1, "thr_new");
+  assert.equal(state.workdirs.oc_1, "C:/work");
+  assert.equal(state.threadModes.thr_new, "plan");
+  assert.equal(state.pendingTitleJobs.thr_src, undefined);
+  assert.equal(state.pendingTitleJobs.thr_new.state, "awaitingFirstTurn");
+
+  const standalone = {
+    sessions: { oc_2: "thr_src2" },
+    workdirs: { oc_2: "C:/standalone" },
+    standaloneChats: { oc_2: true },
+    threadModes: {},
+    pendingTitleJobs: {},
+  };
+  applyForkBinding(standalone, "oc_2", "thr_src2", "thr_new2", "C:/standalone");
+  assert.equal(standalone.sessions.oc_2, "thr_new2");
+  assert.equal(standalone.standaloneChats.oc_2, true);
+  assert.equal(standalone.pendingTitleJobs.thr_new2.state, "awaitingFirstTurn");
+});
+
+test("compaction guard rejects missing, running, queued, and already compacting threads", () => {
+  assert.match(compactionBlockReason("", {}), /当前没有可压缩的会话/);
+  assert.match(compactionBlockReason("thr_1", { active: true }), /任务运行或排队/);
+  assert.match(compactionBlockReason("thr_1", { queued: true }), /任务运行或排队/);
+  assert.match(compactionBlockReason("thr_1", { compacting: true }), /任务运行或排队/);
+  assert.equal(compactionBlockReason("thr_1", {}), "");
+});
+
+test("compaction tracking registers once and takes at most one completion", () => {
+  const pendingCompactions = new Map();
+  const pending = { chatId: "oc_1", eventId: "evt_1", messageId: "om_1" };
+  registerPendingCompaction(pendingCompactions, "thr_1", pending);
+  assert.equal(pendingCompactions.get("thr_1"), pending);
+  assert.equal(takePendingCompaction(pendingCompactions, "thr_1"), pending);
+  assert.equal(takePendingCompaction(pendingCompactions, "thr_1"), undefined);
 });
 
 test("plan review cards carry one typed action pair and hide actions once processed", () => {
@@ -1089,7 +1234,11 @@ test("help card exposes common conversation controls and the opposite mode for b
   assert.match(card.elements[0].content, /\/new 项目名或路径/);
   assert.match(card.elements[0].content, /\/cd 项目名或路径/);
   assert.match(card.elements[0].content, /\/model/);
+  assert.match(card.elements[0].content, /\/think/);
+  assert.match(card.elements[0].content, /\/work/);
   assert.match(card.elements[0].content, /\/rename/);
+  assert.match(card.elements[0].content, /\/branch/);
+  assert.match(card.elements[0].content, /\/compress/);
   assert.match(card.elements[0].content, /\/plan/);
   assert.match(card.elements[0].content, /\/default/);
   assert.match(card.elements[0].content, /\/goal pause\|resume\|clear/);
@@ -1343,6 +1492,47 @@ test("model catalog and selection use only server-supported model efforts", () =
   assert.equal(deployment.entry.id, "terra");
   assert.equal(deployment.source, "部署默认");
   assert.match(resolveModelSelection([{ ...catalog[1], isDefault: false }]).error, /默认模型/);
+});
+
+test("quick model presets resolve strictly and render status lines", () => {
+  const catalog = normalizeModelCatalog({ data: [
+    {
+      id: "gpt-5.6-sol", model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+    },
+    {
+      id: "deepseek-v4-flash", model: "deepseek-v4-flash", displayName: "OC · DSV4 Flash",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "max" },
+      ],
+    },
+  ] });
+  assert.equal(DEFAULT_THINK_MODEL, "gpt-5.6-sol");
+  assert.equal(DEFAULT_THINK_EFFORT, "high");
+  assert.equal(DEFAULT_WORK_MODEL, "deepseek-v4-flash");
+  assert.equal(DEFAULT_WORK_EFFORT, "max");
+  const think = resolveQuickModelSelection(catalog, DEFAULT_THINK_MODEL, DEFAULT_THINK_EFFORT);
+  assert.equal(think.entry.id, "gpt-5.6-sol");
+  assert.equal(think.effort, "high");
+  const work = resolveQuickModelSelection(catalog, DEFAULT_WORK_MODEL, DEFAULT_WORK_EFFORT);
+  assert.equal(work.entry.id, "deepseek-v4-flash");
+  assert.equal(work.effort, "max");
+  assert.match(resolveQuickModelSelection(catalog, "missing", "high").error, /找不到可选模型/);
+  assert.match(resolveQuickModelSelection(catalog, "gpt-5.6-sol", "ultra").error, /可用档位/);
+  assert.equal(resolveQuickModelSelection(catalog, "", "").entry.id, "gpt-5.6-sol");
+  const lines = buildModelPresetLines(catalog, {
+    thinkModel: DEFAULT_THINK_MODEL,
+    thinkEffort: DEFAULT_THINK_EFFORT,
+    workModel: DEFAULT_WORK_MODEL,
+    workEffort: DEFAULT_WORK_EFFORT,
+  });
+  assert.match(lines, /思考模型预设：GPT-5\.6-Sol（gpt-5\.6-sol）\/ high/);
+  assert.match(lines, /执行模型预设：OC · DSV4 Flash（deepseek-v4-flash）\/ max/);
+  assert.match(buildModelPresetLines(catalog, {
+    thinkModel: "missing", workModel: DEFAULT_WORK_MODEL,
+  }), /思考模型预设：不可用/);
 });
 
 test("automatic title fallback validates the cached model after three failures", () => {
@@ -2136,6 +2326,10 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(config.reactions, true);
   assert.equal(config.titleModel, "auto");
   assert.equal(config.titleEffort, "auto");
+  assert.equal(config.thinkModel, DEFAULT_THINK_MODEL);
+  assert.equal(config.thinkEffort, DEFAULT_THINK_EFFORT);
+  assert.equal(config.workModel, DEFAULT_WORK_MODEL);
+  assert.equal(config.workEffort, DEFAULT_WORK_EFFORT);
   assert.equal(config.temperatureApiUrl, "http://127.0.0.1:8085/data.json");
   assert.equal("projectInstructions" in config, false);
   const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
@@ -2143,7 +2337,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/model、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/branch、\/compress、\/model、\/think、\/work、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
@@ -2161,6 +2355,18 @@ test("buildConfig validates and exposes approval defaults", () => {
     CODEX_WORKDIR: process.cwd(),
     TEMPERATURE_API_URL: "http://127.0.0.1:9000/data.json",
   }).temperatureApiUrl, "http://127.0.0.1:9000/data.json");
+  const overridden = buildConfig({
+    FEISHU_ALLOWED_OPEN_IDS: "ou_test",
+    CODEX_WORKDIR: process.cwd(),
+    CODEX_THINK_MODEL: "deepseek-v4-pro",
+    CODEX_THINK_EFFORT: "low",
+    CODEX_WORK_MODEL: "deepseek-v4-flash-direct",
+    CODEX_WORK_EFFORT: "high",
+  });
+  assert.equal(overridden.thinkModel, "deepseek-v4-pro");
+  assert.equal(overridden.thinkEffort, "low");
+  assert.equal(overridden.workModel, "deepseek-v4-flash-direct");
+  assert.equal(overridden.workEffort, "high");
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "*" }), /不允许通配符/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_APPROVAL_MODE: "sometimes" }), /auto 或 manual/);
   assert.throws(() => buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_INTERJECTION_MODE: "sometimes" }), /guide 或 queue/);
