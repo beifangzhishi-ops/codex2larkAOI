@@ -91,6 +91,7 @@ import {
   parseControlCardAction,
   parseUserInputCardAction,
   parseDotEnv,
+  resolveConfiguredModelPreset,
   promoteLocalImageLinks,
   queryTemperature,
   reactionArgs,
@@ -119,6 +120,7 @@ import {
   splitFeishuMarkdown,
   splitLocalImageMarkdown,
   snapshotTurnSettings,
+  updateDotEnvText,
   splitLatexMarkdown,
   statusDeepLink,
   takePendingCompaction,
@@ -139,6 +141,20 @@ import { CodexAppServer } from "../src/codex-app-server.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
+});
+
+test("updateDotEnvText changes only requested model preset values and preserves comments", () => {
+  const source = "# comment\r\nCODEX_THINK_MODEL=old\r\nOTHER=value\r\n";
+  const updated = updateDotEnvText(source, {
+    CODEX_THINK_MODEL: "gpt-5.6-sol",
+    CODEX_THINK_EFFORT: "high",
+  });
+  assert.equal(updated, "# comment\r\nCODEX_THINK_MODEL=gpt-5.6-sol\r\nOTHER=value\r\nCODEX_THINK_EFFORT=high");
+  assert.deepEqual(parseDotEnv(updated), {
+    CODEX_THINK_MODEL: "gpt-5.6-sol",
+    CODEX_THINK_EFFORT: "high",
+    OTHER: "value",
+  });
 });
 
 test("project env pins slot-specific values over inherited process values", () => {
@@ -870,6 +886,12 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high"), {
     type: "model", modelId: "gpt-5.6-sol", effort: "high",
   });
+  assert.deepEqual(parseControlCommand("/thinkmodel"), {
+    type: "presetModel", slot: "think", modelId: "", effort: "",
+  });
+  assert.deepEqual(parseControlCommand("/workmodel deepseek-v4-flash max"), {
+    type: "presetModel", slot: "work", modelId: "deepseek-v4-flash", effort: "max",
+  });
   assert.deepEqual(parseControlCommand("/"), { type: "invalid", raw: "/" });
   assert.deepEqual(parseControlCommand("/ "), { type: "invalid", raw: "/" });
   assert.deepEqual(parseControlCommand("/foo"), { type: "invalid", raw: "/foo" });
@@ -885,8 +907,11 @@ test("parseControlCommand only recognizes complete slash commands", () => {
   assert.deepEqual(parseControlCommand("/temp"), { type: "invalid", raw: "/temp" });
   assert.deepEqual(parseControlCommand("/model gpt-5.6-sol high extra"), { type: "invalid", raw: "/model gpt-5.6-sol high extra" });
   assert.deepEqual(parseControlCommand("/rename"), { type: "invalid", raw: "/rename" });
-  assert.deepEqual(parseControlCommand("/model default high"), {
-    type: "model", modelId: "default", effort: "high",
+  assert.deepEqual(parseControlCommand("/model default"), { type: "invalid", raw: "/model default" });
+  assert.deepEqual(parseControlCommand("/model default high"), { type: "invalid", raw: "/model default high" });
+  assert.deepEqual(parseControlCommand("/thinkmodel default"), { type: "invalid", raw: "/thinkmodel default" });
+  assert.deepEqual(parseControlCommand("/workmodel deepseek-v4-flash max extra"), {
+    type: "invalid", raw: "/workmodel deepseek-v4-flash max extra",
   });
   assert.deepEqual(parseControlCommand("/think"), { type: "think" });
   assert.deepEqual(parseControlCommand("/work"), { type: "work" });
@@ -1533,6 +1558,12 @@ test("quick model presets resolve strictly and render status lines", () => {
   assert.match(buildModelPresetLines(catalog, {
     thinkModel: "missing", workModel: DEFAULT_WORK_MODEL,
   }), /思考模型预设：不可用/);
+  const configured = resolveConfiguredModelPreset(catalog, {
+    thinkModel: "gpt-5.6-sol", thinkEffort: "high",
+    workModel: "deepseek-v4-flash", workEffort: "max",
+  }, "think");
+  assert.equal(configured.entry.id, "gpt-5.6-sol");
+  assert.equal(configured.source, "项目 .env");
 });
 
 test("automatic title fallback validates the cached model after three failures", () => {
@@ -1586,6 +1617,7 @@ test("model cards keep model and effort selection in separate validated steps", 
   const firstActions = firstPage.elements.filter((element) => element.tag === "action")
     .flatMap((element) => element.actions);
   assert.equal(firstActions.filter((button) => button.value.action === "modelPick").length, 5);
+  assert.equal(firstActions.some((button) => button.value.action === "modelDefault"), false);
   assert.equal(firstActions.at(-1).value.action, "modelPage");
   assert.equal(firstActions.at(-1).value.pageStart, 5);
   assert.match(firstPage.elements[0].content, /设置来源：Codex 默认/);
@@ -1593,6 +1625,14 @@ test("model cards keep model and effort selection in separate validated steps", 
   const effortCard = buildEffortCard(entries[0]);
   assert.deepEqual(effortCard.elements[1].actions.map((button) => button.value.effort), ["low", "high", "max"]);
   assert.match(buildModelResultCard({ ...selection, effort: "high", source: "聊天指定" }).elements[0].content, /后续轮次/);
+
+  const presetPage = buildModelCard(entries, selection, 0, "think");
+  const presetButton = presetPage.elements.find((element) => element.tag === "action").actions[0];
+  assert.equal(presetButton.value.presetSlot, "think");
+  assert.match(presetPage.header.title.content, /选择思考模型/);
+  const presetEffort = buildEffortCard(entries[0], "work");
+  assert.equal(presetEffort.elements[1].actions[0].value.presetSlot, "work");
+  assert.match(buildModelResultCard({ ...selection, effort: "high", source: "项目 .env" }, "think").elements[0].content, /写入项目 \.env/);
 });
 
 test("resume cards show five sessions plus only the available page controls", () => {
@@ -1677,11 +1717,11 @@ test("control card callbacks accept only the supported typed actions", () => {
   assert.deepEqual(parseControlCardAction({
     ...raw,
     action_value: JSON.stringify({
-      kind: "codex2lark_control", action: "modelEffort", modelId: "sol", effort: "high",
+      kind: "codex2lark_control", action: "modelEffort", modelId: "sol", effort: "high", presetSlot: "think",
     }),
   }), {
     type: "control", eventId: "evt_control", chatId: "oc_1", messageId: "om_1",
-    operatorId: "ou_1", token: "token_1", action: "modelEffort", modelId: "sol", effort: "high",
+    operatorId: "ou_1", token: "token_1", action: "modelEffort", presetSlot: "think", modelId: "sol", effort: "high",
   });
   assert.equal(parseCardAction({
     ...raw,
@@ -1690,6 +1730,14 @@ test("control card callbacks accept only the supported typed actions", () => {
   assert.equal(parseCardAction({
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "deleteEverything" }),
+  }), null);
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "model", presetSlot: "invalid" }),
+  }), null);
+  assert.equal(parseControlCardAction({
+    ...raw,
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "modelDefault" }),
   }), null);
 });
 
@@ -2337,7 +2385,7 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
   assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
   assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/branch、\/compress、\/model、\/think、\/work、\/screen、\/temperature/);
+  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/branch、\/compress、\/model、\/thinkmodel、\/workmodel、\/think、\/work、\/screen、\/temperature/);
   assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",

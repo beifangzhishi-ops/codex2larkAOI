@@ -39,12 +39,31 @@ export {
 } from "./standalone-cwds.js";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const ENV_FILE = resolve(ROOT, ".env");
 const STATE_DIR = resolve(ROOT, ".state");
 const STATE_FILE = resolve(STATE_DIR, "sessions.json");
 const PID_FILE = resolve(STATE_DIR, "bridge.pid");
 const STOP_FILE = resolve(STATE_DIR, "stop-requested");
 const LATEX_DIR = resolve(STATE_DIR, "latex");
 const UPLOAD_DIR = resolve(STATE_DIR, "uploads");
+const MODEL_PRESET_FIELDS = Object.freeze({
+  think: Object.freeze({
+    model: "thinkModel",
+    effort: "thinkEffort",
+    envModel: "CODEX_THINK_MODEL",
+    envEffort: "CODEX_THINK_EFFORT",
+    label: "思考模型",
+    command: "/think",
+  }),
+  work: Object.freeze({
+    model: "workModel",
+    effort: "workEffort",
+    envModel: "CODEX_WORK_MODEL",
+    envEffort: "CODEX_WORK_EFFORT",
+    label: "执行模型",
+    command: "/work",
+  }),
+});
 const MAX_PENDING_IMAGES = 9;
 const MARKDOWN_FOLDER_NAME = "codex";
 const LATEX_CANVAS_WIDTH = 1200;
@@ -63,7 +82,7 @@ const latexDocument = mathjax.document("", {
 const AOI_FEISHU_TURN_INSTRUCTIONS = [
   "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
   "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/think、/work、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
+  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/thinkmodel、/workmodel、/think、/work、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
   "任何以 / 开头的消息都按命令处理；写错的命令会收到“无效命令”提示，不会进入 Codex。",
 ].join("\n");
 const AOI_FEISHU_TURN_CONTEXT = {
@@ -90,6 +109,34 @@ export function parseDotEnv(text) {
 }
 export function mergeProjectEnv(processValues, fileValues) {
   return { ...processValues, ...fileValues };
+}
+
+export function updateDotEnvText(text, updates = {}) {
+  const source = String(text ?? "");
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  const lines = source.split(/\r?\n/);
+  const found = new Set();
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    if (!match || line.trimStart().startsWith("#") || !Object.prototype.hasOwnProperty.call(updates, match[2])) {
+      return line;
+    }
+    found.add(match[2]);
+    return `${match[1]}${match[2]}${match[3]}${String(updates[match[2]])}`;
+  });
+  const missing = Object.keys(updates).filter((key) => !found.has(key));
+  if (missing.length) {
+    let result = nextLines.join(newline);
+    if (result && !result.endsWith(newline)) result += newline;
+    result += missing.map((key) => `${key}=${String(updates[key])}`).join(newline);
+    return result;
+  }
+  return nextLines.join(newline);
+}
+
+function updateProjectDotEnv(updates, envFile = ENV_FILE) {
+  const current = readFileSync(envFile, "utf8");
+  writeFileSync(envFile, updateDotEnvText(current, updates), "utf8");
 }
 
 export function splitReply(text, maxChars) {
@@ -573,8 +620,23 @@ export function parseControlCommand(text) {
   if (lower === "/temperature") return { type: "temperature" };
   if (lower === "/think") return { type: "think" };
   if (lower === "/work") return { type: "work" };
+  const presetModel = value.match(/^\/(thinkmodel|workmodel)(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
+  if (presetModel) {
+    const modelId = (presetModel[2] || "").trim();
+    if (modelId.toLowerCase() === "default") return { type: "invalid", raw: value };
+    return {
+      type: "presetModel",
+      slot: presetModel[1].toLowerCase() === "thinkmodel" ? "think" : "work",
+      modelId,
+      effort: (presetModel[3] || "").trim(),
+    };
+  }
   const model = value.match(/^\/model(?:\s+([^\s]+)(?:\s+([^\s]+))?)?$/i);
-  if (model) return { type: "model", modelId: (model[1] || "").trim(), effort: (model[2] || "").trim() };
+  if (model) {
+    const modelId = (model[1] || "").trim();
+    if (modelId.toLowerCase() === "default") return { type: "invalid", raw: value };
+    return { type: "model", modelId, effort: (model[2] || "").trim() };
+  }
   const newCommand = value.match(/^\/new(?:\s+(.+))?$/i);
   if (newCommand) return { type: "new", query: (newCommand[1] || "").trim() };
   const cdCommand = value.match(/^\/cd(?:\s+(.+))?$/i);
@@ -796,7 +858,7 @@ function threadTimestamp(thread) {
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline"]);
 const CONTROL_CARD_ACTIONS = new Set([
   "resume", "resumePage", "approvalMode", "interjectionMode", "status", "stop", "help", "screen",
-  "model", "modelPage", "modelPick", "modelEffort", "modelDefault", "planReject", "planAccept",
+  "model", "modelPage", "modelPick", "modelEffort", "planReject", "planAccept",
   "statusCopy",
 ]);
 const STATUS_COPY_TARGETS = new Set(["id", "name", "cwd", "deepLink", "md"]);
@@ -839,6 +901,10 @@ export function parseControlCardAction(value) {
       (!Number.isInteger(actionValue.pageStart) || actionValue.pageStart < 0)) return null;
   if (actionValue.action === "modelPage" &&
       (!Number.isInteger(actionValue.pageStart) || actionValue.pageStart < 0)) return null;
+  if (actionValue.presetSlot !== undefined &&
+      !["think", "work"].includes(actionValue.presetSlot)) return null;
+  if (actionValue.presetSlot !== undefined &&
+      !["model", "modelPage", "modelPick", "modelEffort"].includes(actionValue.action)) return null;
   if ((actionValue.action === "modelPick" || actionValue.action === "modelEffort") &&
       (typeof actionValue.modelId !== "string" || !actionValue.modelId)) return null;
   if (actionValue.action === "modelEffort" &&
@@ -857,6 +923,7 @@ export function parseControlCardAction(value) {
     ...(actionValue.target !== undefined ? { target: actionValue.target } : {}),
     ...(actionValue.threadId !== undefined ? { threadId: actionValue.threadId } : {}),
     ...(actionValue.pageStart !== undefined ? { pageStart: actionValue.pageStart } : {}),
+    ...(actionValue.presetSlot !== undefined ? { presetSlot: actionValue.presetSlot } : {}),
     ...(actionValue.modelId !== undefined ? { modelId: actionValue.modelId } : {}),
     ...(actionValue.effort !== undefined ? { effort: actionValue.effort } : {}),
     ...(actionValue.planItemId !== undefined ? { planItemId: actionValue.planItemId } : {}),
@@ -2211,6 +2278,14 @@ export function resolveQuickModelSelection(catalog, model = "", effort = "") {
   return { entry, effort: targetEffort };
 }
 
+export function resolveConfiguredModelPreset(catalog, config = {}, slot) {
+  const fields = MODEL_PRESET_FIELDS[slot];
+  if (!fields) return { error: `未知模型预设：${slot}` };
+  const resolved = resolveQuickModelSelection(catalog, config[fields.model], config[fields.effort]);
+  if (resolved.error) return resolved;
+  return { ...resolved, source: "项目 .env" };
+}
+
 export function buildModelPresetLines(catalog, config = {}) {
   const think = resolveQuickModelSelection(catalog, config.thinkModel, config.thinkEffort);
   const work = resolveQuickModelSelection(catalog, config.workModel, config.workEffort);
@@ -2285,6 +2360,7 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
         "`/resume` 继续历史对话 · `/stop` 停止当前操作",
         "`/branch` 保留当前历史创建新会话 · `/compress` 压缩当前上下文",
         "`/model [模型] [思考强度]` 设置后续轮次模型",
+        "`/thinkmodel [模型] [思考强度]` 设置 .env 思考模型预设 · `/workmodel [模型] [思考强度]` 设置 .env 执行模型预设",
         "`/think` 切换思考模型 · `/work` 切换执行模型",
         "`/plan [任务]` 进入计划模式并开始新一轮 · `/default` 切回默认执行模式",
         "`/goal 目标` 启动 Goal · `/goal` 查看 Goal",
@@ -2313,11 +2389,17 @@ export function buildHelpCard(approvalMode = "auto", interjectionMode = "guide")
   };
 }
 
-export function buildModelCard(catalog, selection, pageStart = 0) {
+function modelPresetLabel(slot) {
+  return MODEL_PRESET_FIELDS[slot]?.label || "模型";
+}
+
+export function buildModelCard(catalog, selection, pageStart = 0, presetSlot = "") {
   const pageSize = 5;
   const page = catalog.slice(pageStart, pageStart + pageSize);
+  const label = modelPresetLabel(presetSlot);
+  const actionContext = presetSlot ? { presetSlot } : {};
   const elements = [
-    { tag: "markdown", content: selection ? `当前设置：\n${modelSummary(selection)}` : "请选择后续轮次使用的模型。" },
+    { tag: "markdown", content: selection ? `当前${label}设置：\n${modelSummary(selection)}` : `请选择${label}。` },
   ];
   for (const entry of page) {
     elements.push({
@@ -2325,17 +2407,18 @@ export function buildModelCard(catalog, selection, pageStart = 0) {
       actions: [controlButton(
         `${entry.displayName}${entry.isDefault ? "（默认）" : ""}`,
         entry.id === selection?.entry?.id ? "primary" : "default",
-        "modelPick", { modelId: entry.id },
+        "modelPick", { modelId: entry.id, ...actionContext },
       )],
     });
   }
-  elements.push({ tag: "action", actions: [controlButton("恢复默认设置", "default", "modelDefault")] });
   const navigation = [];
   if (pageStart > 0) navigation.push(controlButton("上一页", "default", "modelPage", {
     pageStart: Math.max(0, pageStart - pageSize),
+    ...actionContext,
   }));
   if (pageStart + pageSize < catalog.length) navigation.push(controlButton("下一页", "default", "modelPage", {
     pageStart: pageStart + pageSize,
+    ...actionContext,
   }));
   if (navigation.length) elements.push({ tag: "action", actions: navigation });
   elements.push({ tag: "note", elements: [{
@@ -2344,12 +2427,13 @@ export function buildModelCard(catalog, selection, pageStart = 0) {
   }] });
   return {
     config: { wide_screen_mode: true },
-    header: { template: "blue", title: { tag: "plain_text", content: "选择模型" } },
+    header: { template: "blue", title: { tag: "plain_text", content: `选择${label}` } },
     elements,
   };
 }
 
-export function buildEffortCard(entry) {
+export function buildEffortCard(entry, presetSlot = "") {
+  const actionContext = presetSlot ? { presetSlot } : {};
   const rows = [];
   for (let index = 0; index < entry.supportedReasoningEfforts.length; index += 3) {
     rows.push({
@@ -2357,13 +2441,13 @@ export function buildEffortCard(entry) {
       actions: entry.supportedReasoningEfforts.slice(index, index + 3).map((item) => controlButton(
         `${item.reasoningEffort}${item.reasoningEffort === entry.defaultReasoningEffort ? "（默认）" : ""}`,
         item.reasoningEffort === entry.defaultReasoningEffort ? "primary" : "default",
-        "modelEffort", { modelId: entry.id, effort: item.reasoningEffort },
+        "modelEffort", { modelId: entry.id, effort: item.reasoningEffort, ...actionContext },
       )),
     });
   }
   return {
     config: { wide_screen_mode: true },
-    header: { template: "blue", title: { tag: "plain_text", content: "选择思考强度" } },
+    header: { template: "blue", title: { tag: "plain_text", content: `${presetSlot ? `${modelPresetLabel(presetSlot)}的` : ""}选择思考强度` } },
     elements: [
       { tag: "markdown", content: `模型：${entry.displayName}（${entry.model}）` },
       ...rows,
@@ -2371,11 +2455,15 @@ export function buildEffortCard(entry) {
   };
 }
 
-export function buildModelResultCard(selection) {
+export function buildModelResultCard(selection, presetSlot = "") {
+  const label = modelPresetLabel(presetSlot);
+  const presetText = presetSlot
+    ? `已写入项目 .env；后续发送 ${MODEL_PRESET_FIELDS[presetSlot].command} 后生效`
+    : "生效范围：后续轮次";
   return {
     config: { wide_screen_mode: true },
-    header: { template: "green", title: { tag: "plain_text", content: "模型设置已更新" } },
-    elements: [{ tag: "markdown", content: `${modelSummary(selection)}\n生效范围：后续轮次` }],
+    header: { template: "green", title: { tag: "plain_text", content: `${label}设置已更新` } },
+    elements: [{ tag: "markdown", content: `${modelSummary(selection)}\n${presetText}` }],
   };
 }
 
@@ -3376,7 +3464,7 @@ class BridgeRuntime {
       } catch (error) {
         console.warn(`[bridge] help card failed; using text fallback: ${error.message}`);
         await sendReply(event.messageId, `${event.eventId}-help-text`,
-          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/branch` 保留当前历史创建新会话\n`/compress` 压缩当前上下文\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/plan [任务]` 进入计划模式并开始新一轮\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
+          "直接发送任务即可。\n\n`/new` 进入无工作区对话\n`/new 项目名或路径` 切换工作目录\n`/resume` 继续历史对话\n`/branch` 保留当前历史创建新会话\n`/compress` 压缩当前上下文\n`/model [模型] [思考强度]` 设置后续轮次模型\n`/thinkmodel [模型] [思考强度]` 设置 .env 思考模型预设\n`/workmodel [模型] [思考强度]` 设置 .env 执行模型预设\n`/plan [任务]` 进入计划模式并开始新一轮\n`/default` 切回默认执行模式\n`/goal 目标` 启动 Goal\n`/goal` 查看当前 Goal\n`/goal pause|resume|clear` 暂停、恢复或清除 Goal\n`/screen` 截取桥接主机屏幕\n`/temperature` 查询本机温度\n`/stop` 停止当前操作\n`/approval auto|manual` 切换审批模式\n`/interject guide|queue` 切换插话模式\n`/status` 查看状态", this.config);
       }
       return;
     }
@@ -3410,6 +3498,15 @@ class BridgeRuntime {
       } catch (error) {
         await sendReply(event.messageId, `${event.eventId}-model-card-error`,
           `模型设置失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+      }
+      return;
+    }
+    if (command?.type === "presetModel") {
+      try {
+        await this.#handlePresetModelCommand(event, command);
+      } catch (error) {
+        await sendReply(event.messageId, `${event.eventId}-${command.slot}-model-error`,
+          `${MODEL_PRESET_FIELDS[command.slot]?.label || "模型"}预设设置失败：${String(error.message || error).slice(0, 1500)}`, this.config);
       }
       return;
     }
@@ -3809,9 +3906,8 @@ class BridgeRuntime {
   }
 
   async #handleQuickModelCommand(event, slot) {
-    const preset = slot === "think"
-      ? { model: this.config.thinkModel, effort: this.config.thinkEffort, label: "思考模型" }
-      : { model: this.config.workModel, effort: this.config.workEffort, label: "执行模型" };
+    const fields = MODEL_PRESET_FIELDS[slot];
+    const preset = { model: this.config[fields.model], effort: this.config[fields.effort], label: fields.label };
     const catalog = await this.#listModels();
     const resolved = resolveQuickModelSelection(catalog, preset.model, preset.effort);
     if (resolved.error) throw new Error(resolved.error);
@@ -3825,21 +3921,41 @@ class BridgeRuntime {
       `已切换${preset.label}。\n${resolved.entry.displayName}（${resolved.entry.model}）\n思考强度：${resolved.effort}\n生效范围：后续轮次`, this.config);
   }
 
+  #persistModelPreset(slot, entry, effort) {
+    const fields = MODEL_PRESET_FIELDS[slot];
+    if (!fields) throw new Error(`未知模型预设：${slot}`);
+    updateProjectDotEnv({
+      [fields.envModel]: entry.model,
+      [fields.envEffort]: effort,
+    });
+    this.config[fields.model] = entry.model;
+    this.config[fields.effort] = effort;
+    process.env[fields.envModel] = entry.model;
+    process.env[fields.envEffort] = effort;
+  }
+
+  async #handlePresetModelCommand(event, command) {
+    const fields = MODEL_PRESET_FIELDS[command.slot];
+    if (!fields) throw new Error(`未知模型预设：${command.slot}`);
+    const catalog = await this.#listModels();
+    if (!command.modelId) {
+      const resolved = resolveConfiguredModelPreset(catalog, this.config, command.slot);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-${command.slot}-model`,
+        buildModelCard(catalog, resolved.error ? null : resolved, 0, command.slot));
+      return;
+    }
+    const resolved = resolveQuickModelSelection(catalog, command.modelId, command.effort);
+    if (resolved.error) throw new Error(resolved.error);
+    this.#persistModelPreset(command.slot, resolved.entry, resolved.effort);
+    await sendReply(event.messageId, `${event.eventId}-${command.slot}-model`,
+      `已更新${fields.label}预设。\n${resolved.entry.displayName}（${resolved.entry.model}）\n思考强度：${resolved.effort}\n已写入项目 .env；后续发送 ${fields.command} 后生效。`, this.config);
+  }
+
   async #handleModelCommand(event, command) {
     const { catalog, selection } = await this.#selectionFor(event.chatId);
     this.#repairModelSetting(event.chatId, selection);
     if (!command.modelId) {
       await sendInteractiveCard(event.messageId, `${event.eventId}-model`, buildModelCard(catalog, selection));
-      return;
-    }
-    if (command.modelId.toLowerCase() === "default") {
-      if (command.effort) throw new Error("`/model default` 不接受思考强度参数。");
-      this.state.modelSettings[event.chatId] = { mode: "default" };
-      saveState(this.state);
-      const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
-      if (resolved.error) throw new Error(resolved.error);
-      await sendReply(event.messageId, `${event.eventId}-model-default`,
-        `已恢复部署/Codex 默认。\n${modelSummary(resolved)}\n生效范围：后续轮次`, this.config);
       return;
     }
     const entry = catalog.find((item) => item.id === command.modelId);
@@ -3856,32 +3972,40 @@ class BridgeRuntime {
   }
 
   async #handleModelCard(event) {
-    const { catalog, selection } = await this.#selectionFor(event.chatId);
-    this.#repairModelSetting(event.chatId, selection);
+    const presetSlot = event.presetSlot || "";
+    const catalog = await this.#listModels();
+    let selection;
+    if (presetSlot) {
+      const resolved = resolveConfiguredModelPreset(catalog, this.config, presetSlot);
+      selection = resolved.error ? null : resolved;
+    } else {
+      selection = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
+      if (selection.error) throw new Error(selection.error);
+      this.#repairModelSetting(event.chatId, selection);
+    }
     if (event.action === "model" || event.action === "modelPage") {
       const lastStart = Math.max(0, Math.floor((Math.max(1, catalog.length) - 1) / 5) * 5);
       const pageStart = event.action === "modelPage" ? Math.min(event.pageStart, lastStart) : 0;
       await sendInteractiveCard(event.messageId, `${event.eventId}-model-page-${pageStart}`,
-        buildModelCard(catalog, selection, pageStart));
-      return;
-    }
-    if (event.action === "modelDefault") {
-      this.state.modelSettings[event.chatId] = { mode: "default" };
-      saveState(this.state);
-      const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
-      if (resolved.error) throw new Error(resolved.error);
-      await sendInteractiveCard(event.messageId, `${event.eventId}-model-default`, buildModelResultCard(resolved));
+        buildModelCard(catalog, selection, pageStart, presetSlot));
       return;
     }
     const entry = catalog.find((item) => item.id === event.modelId);
-    if (!entry) throw new Error("所选模型已不可用，请重新打开 /model。");
+    if (!entry) throw new Error(`所选模型已不可用，请重新打开 ${presetSlot ? `/${presetSlot === "think" ? "thinkmodel" : "workmodel"}` : "/model"}。`);
     if (event.action === "modelPick") {
       if (!entry.supportedReasoningEfforts.length) throw new Error(`模型 ${entry.displayName} 没有可选思考强度。`);
-      await sendInteractiveCard(event.messageId, `${event.eventId}-model-effort-${entry.id}`, buildEffortCard(entry));
+      await sendInteractiveCard(event.messageId, `${event.eventId}-model-effort-${entry.id}`,
+        buildEffortCard(entry, presetSlot));
       return;
     }
     const supported = new Set(entry.supportedReasoningEfforts.map((item) => item.reasoningEffort));
-    if (!supported.has(event.effort)) throw new Error("所选思考强度已不可用，请重新打开 /model。");
+    if (!supported.has(event.effort)) throw new Error(`所选思考强度已不可用，请重新打开 ${presetSlot ? `/${presetSlot === "think" ? "thinkmodel" : "workmodel"}` : "/model"}。`);
+    if (presetSlot) {
+      this.#persistModelPreset(presetSlot, entry, event.effort);
+      await sendInteractiveCard(event.messageId, `${event.eventId}-${presetSlot}-model-result`,
+        buildModelResultCard({ entry, effort: event.effort, source: "项目 .env" }, presetSlot));
+      return;
+    }
     this.state.modelSettings[event.chatId] = { mode: "explicit", modelId: entry.id, effort: event.effort };
     saveState(this.state);
     const resolved = resolveModelSelection(catalog, this.state.modelSettings[event.chatId], this.config.model);
@@ -4044,7 +4168,7 @@ class BridgeRuntime {
 
   handleCardAction(event) {
     if (event.type === "control") {
-      if (["model", "modelPage", "modelPick", "modelEffort", "modelDefault"].includes(event.action)) {
+      if (["model", "modelPage", "modelPick", "modelEffort"].includes(event.action)) {
         this.route(event, { ...event, type: "modelCard" });
         return;
       }
