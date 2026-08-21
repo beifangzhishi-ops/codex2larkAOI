@@ -1207,6 +1207,7 @@ export function createRunningThreadAttachment(event, threadId, thread = {}) {
     external: true,
     progressKeys: new Set(),
     sendQueue: Promise.resolve(),
+    pendingAgent: null,
   };
 }
 
@@ -1707,6 +1708,14 @@ export function formatThreadItem(item, stage = "completed") {
   }
   if (item.type === "reasoning") return "";
   return "";
+}
+
+export function classifyAgentMessage(item) {
+  const text = String(item?.text || "").trim();
+  if (!item || item.type !== "agentMessage" || !text) return null;
+  if (item.phase === "commentary") return { kind: "progress", text };
+  if (item.phase === "final_answer") return { kind: "final", text };
+  return { kind: "pending", text };
 }
 
 export function extractUserMessageText(item) {
@@ -4577,6 +4586,7 @@ class BridgeRuntime {
     const active = {
       chatId: event.chatId, threadId, turnId: "", event, approvalMode, stopRequested: false, interruptSent: false,
       finalMessages: [], progressKeys: new Set(), sendQueue: Promise.resolve(), resolveDone, rejectDone,
+      pendingAgent: null,
     };
     task.startedTurn = true;
     this.activeThreads.set(threadId, active);
@@ -4707,6 +4717,40 @@ class BridgeRuntime {
           })
         : undefined)
       .catch((error) => console.error(`[bridge] progress reply failed: ${error.message}`));
+  }
+
+  #queuePendingAgent(active) {
+    if (!active?.pendingAgent) return;
+    const pending = active.pendingAgent;
+    active.pendingAgent = null;
+    const text = formatThreadItem({ type: "agentMessage", phase: "commentary", text: pending.text }, "completed");
+    if (text) this.#queueProgress(active, `item-pending-${active.turnId}-${pending.id}`, text);
+  }
+
+  #setPendingAgent(active, item) {
+    const text = String(item?.text || "").trim();
+    if (!text) return;
+    this.#queuePendingAgent(active);
+    active.pendingAgent = { id: String(item?.id || "legacy"), text };
+  }
+
+  #finalizePendingAgent(active, turn) {
+    if (!active?.pendingAgent) return;
+    const pending = active.pendingAgent;
+    active.pendingAgent = null;
+    if (active.external) {
+      this.#queueProgress(active, `item-final-${active.turnId}-${pending.id}`,
+        turn?.status === "completed" ? pending.text : formatThreadItem(
+          { type: "agentMessage", phase: "commentary", text: pending.text }, "completed",
+        ));
+      return;
+    }
+    if (turn?.status === "completed") {
+      active.finalMessages.push(pending.text);
+    } else {
+      const text = formatThreadItem({ type: "agentMessage", phase: "commentary", text: pending.text }, "completed");
+      this.#queueProgress(active, `item-pending-end-${active.turnId}-${pending.id}`, text);
+    }
   }
 
   #ensureDesktopMirror(threadId, turnId) {
@@ -5011,28 +5055,48 @@ class BridgeRuntime {
     }
     const active = this.activeThreads.get(eventThreadId) || this.attachedThreads.get(eventThreadId);
     if (!active) return;
-    if (message.method === "turn/started" && params.turn?.id) active.turnId = params.turn.id;
+    if (message.method === "turn/started" && params.turn?.id) {
+      active.turnId = params.turn.id;
+      active.pendingAgent = null;
+    }
     if (message.method === "item/started") {
+      if (params.item?.type && params.item.type !== "userMessage") this.#queuePendingAgent(active);
       const text = formatThreadItem(params.item, "started");
       this.#queueProgress(active, `item-start-${active.turnId}-${params.item?.id}`, text);
     }
     if (message.method === "item/completed") {
       const item = params.item;
-      if (item?.type === "plan" && item.text?.trim() &&
-          this.collaborationModeFor(active.chatId, active.threadId) === "plan") {
-        this.#queuePlanReview(active, item);
-      } else if (item?.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim()) {
-        if (active.external) {
-          this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, item.text.trim());
+      const classified = classifyAgentMessage(item);
+      if (classified) {
+        if (classified.kind === "progress") {
+          this.#queuePendingAgent(active);
+          this.#queueProgress(active, `item-commentary-${active.turnId}-${item.id}`,
+            formatThreadItem(item, "completed"));
+        } else if (classified.kind === "final") {
+          this.#queuePendingAgent(active);
+          if (active.external) {
+            this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, classified.text);
+          } else {
+            active.finalMessages.push(classified.text);
+          }
         } else {
-          active.finalMessages.push(item.text.trim());
+          this.#setPendingAgent(active, item);
         }
       } else {
+        this.#queuePendingAgent(active);
+        if (item?.type === "plan" && item.text?.trim() &&
+            this.collaborationModeFor(active.chatId, active.threadId) === "plan") {
+          this.#queuePlanReview(active, item);
+          return;
+        }
         const text = formatThreadItem(item, "completed");
         this.#queueProgress(active, `item-complete-${active.turnId}-${item?.id}`, text);
       }
     }
-    if (message.method === "turn/completed" && !active.external) active.resolveDone(params.turn || { status: "completed" });
+    if (message.method === "turn/completed") {
+      this.#finalizePendingAgent(active, params.turn || { status: "completed" });
+      if (!active.external) active.resolveDone(params.turn || { status: "completed" });
+    }
     if (message.method === "error") {
       if (transientError) {
         this.#queueProgress(active, `reconnecting-${active.turnId}-${errorMessage}`, `连接中断，正在重试：${errorMessage}`);

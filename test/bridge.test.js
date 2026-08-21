@@ -32,6 +32,7 @@ import {
   compactThreadRequest,
   compactionBlockReason,
   chatIdsForThread,
+  classifyAgentMessage,
   cleanHistoricalFinalText,
   createPendingTitleJob,
   DEFAULT_TITLE_MODEL,
@@ -1466,6 +1467,7 @@ test("Goal attachment is ready before its asynchronous turn starts", () => {
   assert.equal(attachment.turnId, "");
   assert.equal(attachment.external, true);
   assert.equal(attachment.progressKeys.size, 0);
+  assert.equal(attachment.pendingAgent, null);
 });
 
 test("resume status loader degrades one failed history read without blocking the card", async () => {
@@ -2219,6 +2221,28 @@ test("formatThreadItem renders readable progress but suppresses tool calls", () 
   assert.equal(formatThreadItem({ type: "reasoning", summary: [{ text: "已确认根因。" }] }), "");
   assert.equal(formatThreadItem({ type: "commandExecution", command: "npm test" }, "started"), "");
   assert.equal(formatThreadItem({ type: "mcpToolCall", server: "docs", tool: "search" }, "started"), "");
+});
+
+test("classifyAgentMessage keeps progress and final phases apart while staging phase-null messages", () => {
+  assert.equal(classifyAgentMessage(null), null);
+  assert.equal(classifyAgentMessage({ type: "commandExecution", command: "dir" }), null);
+  assert.equal(classifyAgentMessage({ type: "agentMessage", phase: "commentary", text: "  " }), null);
+  assert.deepEqual(
+    classifyAgentMessage({ type: "agentMessage", phase: "commentary", text: "正在检查。" }),
+    { kind: "progress", text: "正在检查。" },
+  );
+  assert.deepEqual(
+    classifyAgentMessage({ type: "agentMessage", phase: "final_answer", text: "完成。" }),
+    { kind: "final", text: "完成。" },
+  );
+  assert.deepEqual(
+    classifyAgentMessage({ type: "agentMessage", phase: null, text: "先确认一下。" }),
+    { kind: "pending", text: "先确认一下。" },
+  );
+  assert.deepEqual(
+    classifyAgentMessage({ type: "agentMessage", text: "旧内核最终答复" }),
+    { kind: "pending", text: "旧内核最终答复" },
+  );
 });
 
 test("extractUserMessageText joins text inputs and marks non-text placeholders", () => {
