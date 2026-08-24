@@ -66,6 +66,7 @@ const MODEL_PRESET_FIELDS = Object.freeze({
 });
 const MAX_PENDING_IMAGES = 9;
 const MARKDOWN_FOLDER_NAME = "codex";
+const PLAN_CARD_PREVIEW_CHARS = 1200;
 const LATEX_CANVAS_WIDTH = 1200;
 const LATEX_CANVAS_PADDING_X = 60;
 const LATEX_CANVAS_PADDING_Y = 28;
@@ -2476,6 +2477,15 @@ export function buildModelResultCard(selection, presetSlot = "") {
   };
 }
 
+export function formatPlanDocumentTitle(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("无效的计划文档日期");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `Codex 计划 ${formatLocalDate(date)} ${hours}${minutes}${seconds}`;
+}
+
 export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, totalCount = threads.length) {
   const elements = [];
   if (!threads.length) {
@@ -2734,17 +2744,32 @@ export function splitPlanCardImages(text, { cwd = ROOT } = {}) {
   return { text: cleaned.replace(/\n{3,}/g, "\n\n").trim(), images };
 }
 
-export function buildPlanReviewCard(plan, planItemId, status = "pending", images = []) {
+function planCardPreview(text) {
+  const value = String(text ?? "").trim();
+  if (value.length <= PLAN_CARD_PREVIEW_CHARS) return { text: value, truncated: false };
+  return {
+    text: `${value.slice(0, PLAN_CARD_PREVIEW_CHARS - 1).trimEnd()}…`,
+    truncated: true,
+  };
+}
+
+export function buildPlanReviewCard(plan, planItemId, status = "pending", images = [], documentUrl = "") {
   const processed = status !== "pending";
   const statusText = status === "accepted" ? "已接受，正在切换到默认执行模式。"
     : status === "rejected" ? "已否决，保持计划模式，等待修改意见。"
       : "请确认是否执行此计划。";
   const safePlan = sanitizePlanCardMarkdown(plan);
+  const document = String(documentUrl || "").trim();
+  const preview = document ? planCardPreview(safePlan) : { text: safePlan, truncated: false };
+  const planLines = [preview.text || "计划正文为空。"];
+  if (document && preview.truncated) planLines.push("计划较长，完整内容请打开云文档。");
+  if (document) planLines.push(`[打开完整计划](${document})`);
+  planLines.push(statusText);
   return {
     config: { wide_screen_mode: true },
     header: { template: processed ? "grey" : "blue", title: { tag: "plain_text", content: "计划确认" } },
     elements: [
-      { tag: "markdown", content: `${safePlan}\n\n${statusText}` },
+      { tag: "markdown", content: planLines.join("\n\n") },
       ...images.map((image) => ({
         tag: "img",
         img_key: image.imageKey,
@@ -2870,17 +2895,21 @@ function queueMarkdownCreation(task) {
   return queued;
 }
 
-async function uploadMarkdownDocument(path, config) {
-  const folder = config.markdownDelivery;
+export async function createMarkdownDocument(path, content, folder, execute = runCommand) {
   if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
   return queueMarkdownCreation(async () => {
-    const content = readFileSync(path, "utf8");
     const spec = markdownDocumentCreateSpec(path, folder.folderToken, content);
-    const { stdout } = await runCommand("lark-cli", spec.args, {
+    const { stdout } = await execute("lark-cli", spec.args, {
       cwd: spec.cwd, input: spec.input, timeoutMs: 120_000,
     });
     return { ...markdownDocumentFromCreateOutput(stdout), title: spec.title, folderUrl: folder.folderUrl };
   });
+}
+
+async function uploadMarkdownDocument(path, config) {
+  const folder = config.markdownDelivery;
+  if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
+  return createMarkdownDocument(path, readFileSync(path, "utf8"), folder);
 }
 
 async function sendAttachment(event, directive, config, index) {
@@ -3834,18 +3863,11 @@ class BridgeRuntime {
 
   async #deliverStatusMarkdown(event, snapshot) {
     const folder = this.config.markdownDelivery;
-    if (!folder?.folderToken) throw new Error("Markdown 云文档目录尚未就绪。");
     const safeName = String(snapshot.threadName || "").replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 40) || "未命名";
     const title = `Codex 状态 ${safeName}`;
     const path = resolve(tmpdir(), `${title}.md`);
     const content = `# ${title}\n\n${snapshot.statusText}`;
-    const created = await queueMarkdownCreation(async () => {
-      const spec = markdownDocumentCreateSpec(path, folder.folderToken, content);
-      const { stdout } = await runCommand("lark-cli", spec.args, {
-        cwd: spec.cwd, input: spec.input, timeoutMs: 120_000,
-      });
-      return { ...markdownDocumentFromCreateOutput(stdout), title: spec.title, folderUrl: folder.folderUrl };
-    });
+    const created = await createMarkdownDocument(path, content, folder);
     await sendReply(event.messageId, `${event.eventId}-statusCopy-md`,
       markdownDeliveryReply(created.title, created.documentUrl, created.folderUrl), this.config);
   }
@@ -4041,6 +4063,7 @@ class BridgeRuntime {
         command.planItemId,
         review.status,
         review.images || [],
+        review.documentUrl || "",
       ));
     } catch (error) {
       console.warn(`[bridge] cannot update plan review card: ${error.message}`);
@@ -4904,9 +4927,27 @@ class BridgeRuntime {
     saveState(this.state);
     active.sendQueue = active.sendQueue.then(async () => {
       if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
-      const cardPlan = plan.length > this.config.replyChars ? "计划正文已另行发送。" : plan;
-      if (cardPlan !== plan) await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
-      const split = splitPlanCardImages(cardPlan, { cwd: this.cwdFor(active.chatId) });
+      const split = splitPlanCardImages(plan, { cwd: this.cwdFor(active.chatId) });
+      const cleanedPlan = sanitizePlanCardMarkdown(plan);
+      const documentTitle = formatPlanDocumentTitle(new Date());
+      const documentPath = resolve(tmpdir(), `${documentTitle}.md`);
+      let cloudDocument = null;
+      try {
+        cloudDocument = await createMarkdownDocument(
+          documentPath,
+          `# ${documentTitle}\n\n${cleanedPlan}`,
+          this.config.markdownDelivery,
+        );
+      } catch (error) {
+        console.warn(`[bridge] plan Markdown cloud delivery failed; using card fallback: ${error.message}`);
+      }
+
+      const cardPlan = cloudDocument
+        ? split.text
+        : plan.length > this.config.replyChars ? "计划正文已另行发送。" : split.text;
+      if (!cloudDocument && plan.length > this.config.replyChars) {
+        await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
+      }
       const uploadedImages = [];
       for (const image of split.images) {
         try {
@@ -4917,17 +4958,32 @@ class BridgeRuntime {
       }
       const entry = this.state.planReviews[planItemId];
       if (entry) {
-        entry.cardText = split.text;
+        entry.cardText = cardPlan;
         entry.images = uploadedImages;
+        if (cloudDocument) {
+          entry.documentTitle = cloudDocument.title;
+          entry.documentUrl = cloudDocument.documentUrl;
+          entry.documentFolderUrl = cloudDocument.folderUrl;
+        }
         saveState(this.state);
       }
       await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
-        buildPlanReviewCard(split.text, planItemId, "pending", uploadedImages));
+        buildPlanReviewCard(
+          cardPlan,
+          planItemId,
+          "pending",
+          uploadedImages,
+          cloudDocument?.documentUrl || "",
+        ));
     }).catch(async (error) => {
       console.error(`[bridge] plan review card failed: ${error.message}`);
       try {
+        const review = this.state.planReviews[planItemId];
+        const documentLink = review?.documentUrl
+          ? `\n\n${markdownDeliveryReply(review.documentTitle || "Codex 计划", review.documentUrl, review.documentFolderUrl)}`
+          : "";
         await sendReply(active.event.messageId, `${active.event.eventId}-plan-fallback-${planItemId}`,
-          `确认卡片发送失败，请直接回复同意或修改意见。\n\n${sanitizePlanCardMarkdown(plan)}`, this.config);
+          `确认卡片发送失败，请直接回复同意或修改意见。\n\n${sanitizePlanCardMarkdown(plan)}${documentLink}`, this.config);
       } catch (fallbackError) {
         console.error(`[bridge] plan review fallback failed: ${fallbackError.message}`);
       }

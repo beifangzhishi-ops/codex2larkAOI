@@ -43,6 +43,7 @@ import {
   createRunningThreadAttachment,
   createConsumerReadiness,
   createStandaloneCwd,
+  createMarkdownDocument,
   desktopMirrorCwd,
   ensureStandaloneCwd,
   formatLocalDate,
@@ -53,6 +54,7 @@ import {
   extractReplayMedia,
   attachmentUploadChannel,
   formatTemperatureReport,
+  formatPlanDocumentTitle,
   formatResumeThreads,
   formatLatestTurnReplay,
   formatRunningThreadReplay,
@@ -997,6 +999,26 @@ test("plan review cards carry one typed action pair and hide actions once proces
   assert.deepEqual(buttons.map((button) => button.value.action), ["planReject", "planAccept"]);
   assert.ok(buttons.every((button) => button.value.planItemId === "plan_1"));
   assert.equal(buildPlanReviewCard("计划", "plan_1", "accepted").elements.some((item) => item.tag === "action"), false);
+});
+
+test("plan review cards show a bounded preview and cloud-document link", () => {
+  const plan = `${"计划内容 ".repeat(350)}计划末尾`;
+  const card = buildPlanReviewCard(plan, "plan_1", "pending", [], "https://example/docx/plan");
+  const content = card.elements.find((item) => item.tag === "markdown").content;
+  const preview = content.split("\n\n")[0];
+  assert.ok(preview.length <= 1200);
+  assert.match(preview, /…$/u);
+  assert.match(content, /计划较长，完整内容请打开云文档。/u);
+  assert.match(content, /\[打开完整计划\]\(https:\/\/example\/docx\/plan\)/u);
+  assert.doesNotMatch(content, /计划末尾/u);
+});
+
+test("legacy plan review cards keep the full text when no document link exists", () => {
+  const plan = `${"计划内容 ".repeat(350)}计划末尾`;
+  const card = buildPlanReviewCard(plan, "plan_legacy");
+  const content = card.elements.find((item) => item.tag === "markdown").content;
+  assert.match(content, /计划末尾/u);
+  assert.doesNotMatch(content, /打开完整计划/u);
 });
 
 test("plan review cards strip Markdown image syntax before rendering", () => {
@@ -2186,6 +2208,36 @@ test("Markdown document creation uses stdin and removes a duplicate filename tit
     ok: true,
     data: { document: { document_id: "docx_1", url: "https://example/docx/docx_1" } },
   })), { documentId: "docx_1", documentUrl: "https://example/docx/docx_1" });
+});
+
+test("plan document titles use a filesystem-safe local timestamp", () => {
+  assert.equal(formatPlanDocumentTitle(new Date(2026, 7, 24, 3, 4, 5)), "Codex 计划 2026-08-24 030405");
+});
+
+test("createMarkdownDocument shares the Markdown cloud-document flow", async () => {
+  const calls = [];
+  const created = await createMarkdownDocument(
+    "C:\\work\\Codex 计划 2026-08-24 030405.md",
+    "# Codex 计划 2026-08-24 030405\n\n正文",
+    { folderToken: "fld_codex", folderUrl: "https://example/folder" },
+    async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: JSON.stringify({
+        ok: true,
+        data: { document: { document_id: "docx_plan", url: "https://example/docx/plan" } },
+      }) };
+    },
+  );
+  assert.deepEqual(created, {
+    documentId: "docx_plan",
+    documentUrl: "https://example/docx/plan",
+    title: "Codex 计划 2026-08-24 030405",
+    folderUrl: "https://example/folder",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "lark-cli");
+  assert.equal(calls[0].options.cwd, "C:\\work");
+  assert.equal(calls[0].options.input, "正文");
 });
 
 test("Markdown delivery reply links both the document and shared folder", () => {
