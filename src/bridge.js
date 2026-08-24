@@ -65,6 +65,7 @@ const MODEL_PRESET_FIELDS = Object.freeze({
   }),
 });
 const MAX_PENDING_IMAGES = 9;
+const RESUME_PAGE_SIZE = 5;
 const MARKDOWN_FOLDER_NAME = "codex";
 const PLAN_CARD_PREVIEW_CHARS = 1200;
 const LATEX_CANVAS_WIDTH = 1200;
@@ -2486,7 +2487,12 @@ export function formatPlanDocumentTitle(value = new Date()) {
   return `Codex 计划 ${formatLocalDate(date)} ${hours}${minutes}${seconds}`;
 }
 
-export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, totalCount = threads.length) {
+export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, pageInfo = threads.length) {
+  const legacyTotalCount = typeof pageInfo === "number" ? pageInfo : null;
+  const hasNextPage = legacyTotalCount === null
+    ? Boolean(pageInfo?.hasNextPage)
+    : pageStart + threads.length < legacyTotalCount;
+  const pageNumber = Math.floor(pageStart / RESUME_PAGE_SIZE) + 1;
   const elements = [];
   if (!threads.length) {
     elements.push({ tag: "markdown", content: "没有可恢复的历史会话。" });
@@ -2511,15 +2517,19 @@ export function buildResumeCard(threads, currentThreadId = "", pageStart = 0, to
   }
   const navigation = [];
   if (pageStart > 0) navigation.push(controlButton("上一页", "default", "resumePage", {
-    pageStart: Math.max(0, pageStart - 5),
+    pageStart: Math.max(0, pageStart - RESUME_PAGE_SIZE),
   }));
-  if (pageStart + threads.length < totalCount) navigation.push(controlButton("下一页", "default", "resumePage", {
-    pageStart: pageStart + 5,
+  if (hasNextPage) navigation.push(controlButton("下一页", "default", "resumePage", {
+    pageStart: pageStart + RESUME_PAGE_SIZE,
   }));
   if (navigation.length) elements.push({ tag: "action", actions: navigation });
   elements.push({ tag: "note", elements: [{
     tag: "plain_text",
-    content: threads.length ? `第 ${Math.floor(pageStart / 5) + 1} 页 · 共 ${totalCount} 个会话` : "也可稍后再次发送 /resume",
+    content: threads.length
+      ? legacyTotalCount === null
+        ? `第 ${pageNumber} 页`
+        : `第 ${pageNumber} 页 · 共 ${legacyTotalCount} 个会话`
+      : "也可稍后再次发送 /resume",
   }] });
   return {
     config: { wide_screen_mode: true },
@@ -3572,7 +3582,7 @@ class BridgeRuntime {
     }
     if (command?.type === "resume") {
       try {
-        await this.#handleResume(event, command.query);
+        await this.#handleResume(event, command.query, command.threadId || "");
       } catch (error) {
         await sendReply(event.messageId, `${event.eventId}-resume-failed`,
           `历史会话操作失败：${String(error.message || error).slice(0, 1500)}`, this.config);
@@ -3670,26 +3680,19 @@ class BridgeRuntime {
     };
   }
 
-  async #listResumeThreads(chatId) {
-    const threads = [];
-    const seenCursors = new Set();
-    let cursor;
-    do {
-      const result = await this.client.request("thread/list", {
-        ...(cursor ? { cursor } : {}),
-        limit: 100,
-        sortKey: "updated_at",
-        sortDirection: "desc",
-        archived: false,
-        sourceKinds: ["appServer", "cli", "vscode"],
-      });
-      if (Array.isArray(result?.data)) threads.push(...result.data);
-      const nextCursor = typeof result?.nextCursor === "string" ? result.nextCursor : "";
-      if (!nextCursor || seenCursors.has(nextCursor)) break;
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
-    } while (cursor);
-    return threads;
+  async #listResumeThreads(chatId, cursor = "") {
+    const result = await this.client.request("thread/list", {
+      ...(cursor ? { cursor } : {}),
+      limit: RESUME_PAGE_SIZE,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+      archived: false,
+      sourceKinds: ["appServer", "cli", "vscode"],
+    });
+    return {
+      threads: Array.isArray(result?.data) ? result.data : [],
+      nextCursor: typeof result?.nextCursor === "string" ? result.nextCursor : "",
+    };
   }
 
   async #listModels() {
@@ -3716,18 +3719,31 @@ class BridgeRuntime {
     return entries;
   }
 
-  async #loadResumePage(candidates, pageStart, pageSize) {
-    const page = candidates.threads.slice(pageStart, pageStart + pageSize);
-    const runtimeThreadIds = new Set([
+  async #loadResumePage(candidates, pageStart, pageSize = RESUME_PAGE_SIZE) {
+    const normalizedStart = Math.max(0, Math.floor(pageStart / pageSize) * pageSize);
+    if (candidates.pages.has(normalizedStart)) {
+      candidates.pageStart = normalizedStart;
+      candidates.page = [...candidates.pages.get(normalizedStart)];
+      return mergeRuntimeThreadStatuses(candidates.page, new Set([
+        ...this.activeThreads.keys(),
+        ...this.attachedThreads.keys(),
+      ]));
+    }
+    const cursor = candidates.cursors.get(normalizedStart);
+    if (cursor === undefined) throw new Error(`缺少第 ${normalizedStart / pageSize + 1} 页会话游标`);
+    const loaded = await this.#listResumeThreads(candidates.chatId, cursor);
+    candidates.pages.set(normalizedStart, loaded.threads);
+    candidates.threads = [...candidates.pages.entries()]
+      .sort(([left], [right]) => left - right)
+      .flatMap(([, page]) => page);
+    if (loaded.nextCursor) candidates.cursors.set(normalizedStart + pageSize, loaded.nextCursor);
+    candidates.nextCursors.set(normalizedStart, loaded.nextCursor);
+    candidates.pageStart = normalizedStart;
+    candidates.page = [...loaded.threads];
+    return mergeRuntimeThreadStatuses(loaded.threads, new Set([
       ...this.activeThreads.keys(),
       ...this.attachedThreads.keys(),
-    ]);
-    const loaded = await loadResumeThreadStatuses(this.client,
-      mergeRuntimeThreadStatuses(page, runtimeThreadIds), (error, thread) => {
-      console.warn(`[codex] cannot read resume status for ${thread.id}: ${error.message}`);
-    });
-    candidates.threads.splice(pageStart, loaded.length, ...loaded);
-    return loaded;
+    ]));
   }
 
   async #selectionFor(chatId) {
@@ -4211,7 +4227,7 @@ class BridgeRuntime {
       const command = event.action === "approvalMode" || event.action === "interjectionMode"
         ? { type: event.action, mode: event.mode }
         : event.action === "resume"
-          ? { type: "resume", query: event.threadId || "" }
+          ? { type: "resume", query: event.threadId || "", threadId: event.threadId || "" }
           : event.action === "resumePage"
             ? { type: "resumePage", pageStart: event.pageStart }
             : event.action === "statusCopy"
@@ -4303,42 +4319,68 @@ class BridgeRuntime {
     }
   }
 
-  async #handleResume(event, query) {
-    const pageSize = 5;
+  async #handleResume(event, query, directThreadId = "") {
     const isNext = /^(?:next|more|下一页|更多)$/i.test(query);
     const isPrevious = /^(?:prev|previous|上一页)$/i.test(query);
     if (!query) {
-      const threads = await this.#listResumeThreads(event.chatId);
-      const candidates = { threads, pageStart: 0 };
+      const candidates = {
+        chatId: event.chatId,
+        cursors: new Map([[0, ""]]),
+        nextCursors: new Map(),
+        pages: new Map(),
+        threads: [],
+        page: [],
+        pageStart: 0,
+      };
       this.resumeCandidates.set(event.chatId, candidates);
-      const page = await this.#loadResumePage(candidates, 0, pageSize);
+      const page = await this.#loadResumePage(candidates, 0);
       await sendInteractiveCard(event.messageId, `${event.eventId}-resume-list`,
-        buildResumeCard(page, this.state.sessions[event.chatId], 0, threads.length));
+        buildResumeCard(page, this.state.sessions[event.chatId], 0, {
+          hasNextPage: Boolean(candidates.nextCursors.get(0)),
+        }));
       return;
     }
     let candidates = this.resumeCandidates.get(event.chatId);
     if (!candidates) {
-      const threads = await this.#listResumeThreads(event.chatId);
-      candidates = { threads, pageStart: 0 };
+      candidates = {
+        chatId: event.chatId,
+        cursors: new Map([[0, ""]]),
+        nextCursors: new Map(),
+        pages: new Map(),
+        threads: [],
+        page: [],
+        pageStart: 0,
+      };
       this.resumeCandidates.set(event.chatId, candidates);
     }
+    if (!candidates.pages.has(0)) await this.#loadResumePage(candidates, 0);
     if (isNext || isPrevious) {
-      const nextStart = candidates.pageStart + (isNext ? pageSize : -pageSize);
-      if (nextStart < 0 || nextStart >= candidates.threads.length) {
+      const nextStart = candidates.pageStart + (isNext ? RESUME_PAGE_SIZE : -RESUME_PAGE_SIZE);
+      if (nextStart < 0 || (isNext && !candidates.nextCursors.get(candidates.pageStart))) {
         await sendReply(event.messageId, `${event.eventId}-resume-end`,
           isNext ? "没有更多历史会话了。" : "已经是第一页了。", this.config);
         return;
       }
-      candidates.pageStart = nextStart;
-      const page = await this.#loadResumePage(candidates, nextStart, pageSize);
+      let page;
+      try {
+        page = await this.#loadResumePage(candidates, nextStart);
+      } catch {
+        await sendReply(event.messageId, `${event.eventId}-resume-end`, "无法读取下一页历史会话，请重新发送 `/resume`。", this.config);
+        return;
+      }
       await sendInteractiveCard(event.messageId, `${event.eventId}-resume-page-${nextStart}`,
-        buildResumeCard(page, this.state.sessions[event.chatId], nextStart, candidates.threads.length));
+        buildResumeCard(page, this.state.sessions[event.chatId], nextStart, {
+          hasNextPage: Boolean(candidates.nextCursors.get(nextStart)),
+        }));
       return;
     }
-    const page = candidates.threads.slice(candidates.pageStart, candidates.pageStart + pageSize);
-    const selected = /^\d+$/.test(query)
+    const page = candidates.page;
+    let selected = /^\d+$/.test(query)
       ? selectResumeThread(page, query)
       : selectResumeThread(candidates.threads, query);
+    if (selected.error && directThreadId && directThreadId === query) {
+      selected = { thread: { id: query } };
+    }
     if (selected.error) {
       await sendReply(event.messageId, `${event.eventId}-resume-error`, selected.error, this.config);
       return;
@@ -4371,6 +4413,7 @@ class BridgeRuntime {
         `已继续历史会话：${threadLabel(selected.thread)}\n工作目录：${this.cwdLabelFor(event.chatId)}`, this.config);
     }
     try {
+      const goalPromise = this.client.request("thread/goal/get", { threadId }).catch(() => null);
       if (!ownActive) {
         // A minimal resume rejoins a running thread and subscribes this bridge to its live events.
         const resumed = await this.client.request("thread/resume", {
@@ -4384,12 +4427,8 @@ class BridgeRuntime {
         const read = await this.client.request("thread/read", { threadId, includeTurns: true });
         historyThread = read?.thread;
       }
-      try {
-        const goal = await this.client.request("thread/goal/get", { threadId });
-        if (goal?.goal) historyThread = { ...historyThread, resumeGoal: goal.goal };
-      } catch {
-        // A goal is optional and unavailable on older App Server versions.
-      }
+      const goal = await goalPromise;
+      if (goal?.goal) historyThread = { ...historyThread, resumeGoal: goal.goal };
       const running = historyThread?.status?.type === "active" || historyThread?.resumeGoal?.status === "active";
       if (running) {
         this.#attachRunningThread(event, threadId, historyThread);
@@ -4413,22 +4452,35 @@ class BridgeRuntime {
   }
 
   async #handleResumePage(event, requestedStart) {
-    const pageSize = 5;
     let candidates = this.resumeCandidates.get(event.chatId);
     if (!candidates) {
-      const threads = await this.#listResumeThreads(event.chatId);
-      candidates = { threads, pageStart: 0 };
+      candidates = {
+        chatId: event.chatId,
+        cursors: new Map([[0, ""]]),
+        nextCursors: new Map(),
+        pages: new Map(),
+        threads: [],
+        page: [],
+        pageStart: 0,
+      };
       this.resumeCandidates.set(event.chatId, candidates);
     }
-    const lastStart = Math.max(0, Math.floor((Math.max(1, candidates.threads.length) - 1) / pageSize) * pageSize);
-    const pageStart = Math.min(Math.max(0, requestedStart), lastStart);
-    candidates.pageStart = pageStart;
-    const page = await this.#loadResumePage(candidates, pageStart, pageSize);
+    const pageStart = Math.max(0, Math.floor(requestedStart / RESUME_PAGE_SIZE) * RESUME_PAGE_SIZE);
+    if (pageStart > candidates.pageStart && !candidates.nextCursors.get(candidates.pageStart)) {
+      return;
+    }
+    let page;
+    try {
+      page = await this.#loadResumePage(candidates, pageStart);
+    } catch {
+      await sendReply(event.messageId, `${event.eventId}-resume-end`, "无法读取该历史会话页面，请重新发送 `/resume`。", this.config);
+      return;
+    }
     const card = buildResumeCard(
       page,
       this.state.sessions[event.chatId],
       pageStart,
-      candidates.threads.length,
+      { hasNextPage: Boolean(candidates.nextCursors.get(pageStart)) },
     );
     try {
       await updateInteractiveCard(event, card);

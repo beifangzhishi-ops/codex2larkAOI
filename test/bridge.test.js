@@ -1701,6 +1701,21 @@ test("resume cards show five sessions plus only the available page controls", ()
   assert.equal(resumeThreadStatusLabel({}), "");
 });
 
+test("resume cards support cursor pagination without waiting for a total count", () => {
+  const threads = Array.from({ length: 5 }, (_, index) => ({
+    id: `paged_${index + 1}`,
+    name: `Paged ${index + 1}`,
+    updatedAt: 1_750_000_000 - index,
+  }));
+  const card = buildResumeCard(threads, "", 5, { hasNextPage: true });
+  const actions = card.elements.filter((element) => element.tag === "action")
+    .flatMap((element) => element.actions);
+  const note = card.elements.find((element) => element.tag === "note");
+  assert.deepEqual(actions.slice(-2).map((button) => button.text.content), ["上一页", "下一页"]);
+  assert.equal(actions.at(-1).value.pageStart, 10);
+  assert.equal(note.elements[0].content, "第 2 页");
+});
+
 test("control card callbacks accept only the supported typed actions", () => {
   const raw = {
     event_id: "evt_control", chat_id: "oc_1", message_id: "om_1", operator_id: "ou_1",
