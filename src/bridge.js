@@ -1213,6 +1213,10 @@ export function createRunningThreadAttachment(event, threadId, thread = {}) {
   };
 }
 
+export function findThreadRuntime(activeThreads, attachedThreads, threadId) {
+  return activeThreads.get(threadId) || attachedThreads.get(threadId) || null;
+}
+
 function historicalInputText(input) {
   if (!input || typeof input !== "object") return "[非文本输入]";
   if (input.type === "text") return String(input.text || "").trim();
@@ -3293,7 +3297,7 @@ class BridgeRuntime {
     this.threadQueues.pause(threadId);
     const cleared = this.threadQueues.clearPending(threadId);
     const current = this.threadQueues.current(threadId);
-    const active = this.activeThreads.get(threadId);
+    const active = findThreadRuntime(this.activeThreads, this.attachedThreads, threadId);
     let clearedCount = cleared.length;
     let interruptText = "当前会话没有活跃任务。";
     try {
@@ -5161,7 +5165,7 @@ class BridgeRuntime {
       }
       return;
     }
-    const active = this.activeThreads.get(eventThreadId) || this.attachedThreads.get(eventThreadId);
+    const active = findThreadRuntime(this.activeThreads, this.attachedThreads, eventThreadId);
     if (!active) return;
     if (message.method === "turn/started" && params.turn?.id) {
       active.turnId = params.turn.id;
@@ -5204,6 +5208,9 @@ class BridgeRuntime {
     if (message.method === "turn/completed") {
       this.#finalizePendingAgent(active, params.turn || { status: "completed" });
       if (!active.external) active.resolveDone(params.turn || { status: "completed" });
+      if (active.external && this.attachedThreads.get(eventThreadId) === active) {
+        this.attachedThreads.delete(eventThreadId);
+      }
     }
     if (message.method === "error") {
       if (transientError) {

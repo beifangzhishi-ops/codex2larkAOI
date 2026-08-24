@@ -41,6 +41,7 @@ import {
   DEFAULT_WORK_MODEL,
   DEFAULT_WORK_EFFORT,
   createRunningThreadAttachment,
+  findThreadRuntime,
   createConsumerReadiness,
   createStandaloneCwd,
   createMarkdownDocument,
@@ -1490,6 +1491,14 @@ test("Goal attachment is ready before its asynchronous turn starts", () => {
   assert.equal(attachment.external, true);
   assert.equal(attachment.progressKeys.size, 0);
   assert.equal(attachment.pendingAgent, null);
+});
+
+test("stop runtime lookup includes resumed external threads and prefers local active turns", () => {
+  const attached = { threadId: "thr_attached", turnId: "turn_external", external: true };
+  const active = { threadId: "thr_attached", turnId: "turn_local", external: false };
+  assert.equal(findThreadRuntime(new Map(), new Map([[attached.threadId, attached]]), attached.threadId), attached);
+  assert.equal(findThreadRuntime(new Map([[active.threadId, active]]), new Map([[attached.threadId, attached]]), active.threadId), active);
+  assert.equal(findThreadRuntime(new Map(), new Map(), "missing"), null);
 });
 
 test("resume status loader degrades one failed history read without blocking the card", async () => {

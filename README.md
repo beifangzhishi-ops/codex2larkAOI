@@ -200,6 +200,8 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 2026-08-24 优化 `/resume`：首屏改为 5 条游标分页，不再遍历全部历史会话或逐条读取轮次、Goal 状态；翻页复用当前聊天缓存，选中会话时并行恢复历史与 Goal，减少首屏和回放等待。
 
+2026-08-24 修复 `/stop` 对 `/resume` 接入的运行中会话无效：中断查找同时覆盖本地 turn 和外部 attachment，并在外部 turn 完成后清理运行态。
+
 状态保存在 `.state/sessions.json`：
 
 - `sessions`：聊天到 Codex thread；
