@@ -80,16 +80,22 @@ npm run check
 
 ## 共享 Codex app-server
 
-共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
+共享 Codex app-server 供飞书桥接统一连接，避免桥接各自启动 codex 子进程。
 
-AOI 桥接自身不再启动 codex 子进程：启动时通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server；项目内旧版 `.runtime` 内核已删除。
+AOI 桥接自身不再启动 codex 子进程：启动时通过项目 `.env` 的 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server；项目内旧版 `.runtime` 内核已删除。
 
-- `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
-- `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
+- `shared-start.cmd`：双击启动共享 app-server（自动使用最新版 VS Code 扩展内置内核）；
+- `shared-stop.cmd`：双击停止共享 app-server。
 
-桌面端只在启动时读取 `CODEX_APP_SERVER_WS_URL`：同一端口重启共享 app-server 后桌面端会自动重连，无需重启；换端口或删除变量后需重启一次桌面端才生效。正常顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）与桌面端；停止时先关闭 Codex 桌面端，再双击 `shared-stop.cmd`。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+共享脚本不再写入用户环境变量 `CODEX_APP_SERVER_WS_URL`，因此 Codex 桌面端始终使用自带内核，不会因桌面端与 VS Code 共享内核的配置差异报 `invalid transport in mcp_servers.codex_app`。如需恢复桌面端连接共享 app-server（例如让桌面端实时看到飞书会话），可手动执行：
 
-异常恢复：共享进程被强杀后，Windows 端口表可能残留“进程不存在但仍在 LISTENING”的幽灵占用。`shared-stop.cmd` 会识别该情况并正常收尾（删除环境变量与 PID 文件），提示重启桌面端或电脑后端口才会释放；`shared-start.cmd` 遇到幽灵占用时不会误判“已在运行”，会提示先重启清理。若检测到 AOI/AKA 桥接占用端口（防御分支），脚本会自动调用对应 `stop.cmd` 停止并弹窗提示；其他未知进程仍会要求人工排查，不会误杀其他 codex 进程。
+```powershell
+[Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL','ws://127.0.0.1:45789','User')
+```
+
+然后重启桌面端；若再次出现该报错，删除该变量并重启桌面端即可恢复。正常顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）；停止时双击 `shared-stop.cmd`。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+
+异常恢复：共享进程被强杀后，Windows 端口表可能残留“进程不存在但仍在 LISTENING”的幽灵占用。`shared-stop.cmd` 会识别该情况并正常收尾（清理 PID 文件），提示重启桌面端或电脑后端口才会释放；`shared-start.cmd` 遇到幽灵占用时不会误判“已在运行”，会提示先重启清理。若检测到 AOI/AKA 桥接占用端口（防御分支），脚本会自动调用对应 `stop.cmd` 停止并弹窗提示；其他未知进程仍会要求人工排查，不会误杀其他 codex 进程。
 
 手动查看状态：
 
@@ -201,6 +207,8 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 2026-08-24 优化 `/resume`：首屏改为 5 条游标分页，不再遍历全部历史会话或逐条读取轮次、Goal 状态；翻页复用当前聊天缓存，选中会话时并行恢复历史与 Goal，减少首屏和回放等待。
 
 2026-08-24 修复 `/stop` 对 `/resume` 接入的运行中会话无效：中断查找同时覆盖本地 turn 和外部 attachment，并在外部 turn 完成后清理运行态。
+
+2026-08-27 修复共享 app-server 与 Codex 桌面端共存时报 `invalid transport in mcp_servers.codex_app`：共享脚本不再写入用户环境变量 `CODEX_APP_SERVER_WS_URL`，桌面端始终使用自带内核；飞书桥接仍通过项目 `.env` 连接共享 app-server。
 
 状态保存在 `.state/sessions.json`：
 
