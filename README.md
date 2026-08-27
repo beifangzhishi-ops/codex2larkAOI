@@ -84,10 +84,12 @@ npm run check
 
 AOI 桥接自身不再启动 codex 子进程：启动时通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server；项目内旧版 `.runtime` 内核已删除。
 
-- `shared-start.cmd`：双击启动共享 app-server（优先使用桌面端 Codex 运行时内置内核，与桌面端同构建，避免配置不兼容；找不到时回退最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
+- `shared-start.cmd`：双击启动共享 app-server（优先使用桌面端 Codex 运行时内置内核，使共享服务随桌面端内核更新，不再依赖 VS Code 扩展版本；找不到时回退最新版 VS Code 扩展内置内核），并写入用户环境变量 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`；
 - `shared-stop.cmd`：双击停止共享 app-server 并删除该环境变量。
 
 桌面端只在启动时读取 `CODEX_APP_SERVER_WS_URL`：同一端口重启共享 app-server 后桌面端会自动重连，无需重启；换端口或删除变量后需重启一次桌面端才生效。正常顺序：先双击 `shared-start.cmd`，再启动 AOI（`start.cmd`）与桌面端；停止时先关闭 Codex 桌面端，再双击 `shared-stop.cmd`。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+
+已知上游问题（2026-08-27）：Codex Desktop 26.820 系列通过 `CODEX_APP_SERVER_WS_URL` 连接外部 WebSocket app-server 时，桌面端会在 `thread/start` / `thread/resume` 请求中注入缺少基础传输定义的 `mcp_servers.codex_app.enabled_tools`，从而报 `invalid transport in mcp_servers.codex_app`。该配置由桌面端运行时生成，不是用户 `config.toml` 损坏，也与共享服务使用桌面端内核还是 VS Code 内核无关；AOI 仍可正常连接同一共享 app-server。OpenAI 已在 [openai/codex#40715](https://github.com/openai/codex/issues/40715) 和 [openai/codex#40819](https://github.com/openai/codex/issues/40819) 确认并跟踪相关问题。26.820.71523（MSIX 26.820.9563.0）已修复社区报告的 WSL 路径，但本项目实测外部 WebSocket 路径仍受影响。官方完整修复前，需要桌面端时先运行 `shared-stop.cmd` 并重启桌面端；需要 AOI 时运行 `shared-start.cmd`，暂不同时使用桌面端。
 
 异常恢复：共享进程被强杀后，Windows 端口表可能残留“进程不存在但仍在 LISTENING”的幽灵占用。`shared-stop.cmd` 会识别该情况并正常收尾（删除环境变量与 PID 文件），提示重启桌面端或电脑后端口才会释放；`shared-start.cmd` 遇到幽灵占用时不会误判“已在运行”，会提示先重启清理。若检测到 AOI/AKA 桥接占用端口（防御分支），脚本会自动调用对应 `stop.cmd` 停止并弹窗提示；其他未知进程仍会要求人工排查，不会误杀其他 codex 进程。
 
@@ -202,7 +204,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 2026-08-24 修复 `/stop` 对 `/resume` 接入的运行中会话无效：中断查找同时覆盖本地 turn 和外部 attachment，并在外部 turn 完成后清理运行态。
 
-2026-08-27 修复共享 app-server 与 Codex 桌面端共存时报 `invalid transport in mcp_servers.codex_app`：共享 app-server 优先改用桌面端 Codex 运行时内置内核启动，避免 VS Code 扩展内置内核与桌面端构建差异导致的配置不兼容；找不到桌面端内核时仍回退 VS Code 扩展内核。
+2026-08-27 共享 app-server 改为优先使用桌面端 Codex 运行时内置内核，使共享服务随桌面端内核更新，找不到时仍回退 VS Code 扩展内核。同日确认 `invalid transport in mcp_servers.codex_app` 是 Codex Desktop 26.820 系列连接外部 WebSocket app-server 时注入不完整运行时配置的上游问题；记录官方 issue、实际影响和等待官方完整修复期间的运行方式。
 
 状态保存在 `.state/sessions.json`：
 
