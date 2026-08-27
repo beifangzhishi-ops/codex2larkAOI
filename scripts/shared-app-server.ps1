@@ -15,6 +15,7 @@ $stateDir = Join-Path $root ".state"
 $pidFile = Join-Path $stateDir "shared-app-server.pid"
 $outLog = Join-Path $stateDir "shared-app-server.out.log"
 $errLog = Join-Path $stateDir "shared-app-server.err.log"
+$envVarName = "CODEX_APP_SERVER_WS_URL"
 
 function Show-Error {
   param([string]$message)
@@ -77,6 +78,16 @@ function Test-IsProjectBridge {
   return ($cmdLine -match ("codex2lark" + $projectToken) -and $cmdLine -match "bridge\.js|service-control\.js")
 }
 
+function Set-UserEnv {
+  param([string]$name, [string]$value)
+  try {
+    [Environment]::SetEnvironmentVariable($name, $value, "User")
+  } catch {
+    Show-Error ("写入用户环境变量 " + $name + " 失败：" + $_.Exception.Message)
+    exit 1
+  }
+}
+
 function Probe-Port {
   try {
     $client = New-Object System.Net.Sockets.TcpClient
@@ -89,15 +100,29 @@ function Probe-Port {
 }
 
 function Invoke-Start {
-  $extRoot = Join-Path $env:USERPROFILE ".vscode\extensions"
-  $candidates = @(Get-ChildItem -LiteralPath $extRoot -Directory -Filter "openai.chatgpt-*-win32-x64" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
-  if ($candidates.Count -eq 0) {
-    Show-Error "未找到 Codex VS Code 扩展，请先安装或更新 openai.chatgpt 扩展"
-    exit 1
+  $desktopRoot = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
+  $desktopExes = @(
+    Get-ChildItem -LiteralPath $desktopRoot -Directory -ErrorAction SilentlyContinue |
+      ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "codex.exe") -ErrorAction SilentlyContinue } |
+      Where-Object { $_ -and $_.Exists } |
+      Sort-Object LastWriteTime -Descending
+  )
+  $codexExe = ""
+  if ($desktopExes.Count -gt 0) {
+    $codexExe = $desktopExes[0].FullName
+    Write-Host ("使用桌面端内置内核：" + $codexExe)
+  } else {
+    $extRoot = Join-Path $env:USERPROFILE ".vscode\extensions"
+    $candidates = @(Get-ChildItem -LiteralPath $extRoot -Directory -Filter "openai.chatgpt-*-win32-x64" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+    if ($candidates.Count -eq 0) {
+      Show-Error "未找到桌面端 Codex 内核，也未找到 Codex VS Code 扩展，请先安装或更新其中之一"
+      exit 1
+    }
+    $codexExe = Join-Path $candidates[0].FullName "bin\windows-x86_64\codex.exe"
+    Write-Host ("使用 VS Code 扩展内置内核：" + $codexExe)
   }
-  $codexExe = Join-Path $candidates[0].FullName "bin\windows-x86_64\codex.exe"
   if (-not (Test-Path -LiteralPath $codexExe)) {
-    Show-Error ("扩展内核不存在：" + $codexExe)
+    Show-Error ("Codex 内核不存在：" + $codexExe)
     exit 1
   }
 
@@ -106,8 +131,10 @@ function Invoke-Start {
     if ($pidText -match "^\d+$") {
       $info = Get-ProcessInfo ([int]$pidText)
       if ($info -and $info.Process.ProcessName -eq "codex" -and (Test-IsCodexAppServer $info.CommandLine) -and (Test-Ready)) {
+        Set-UserEnv $envVarName $url
         Write-Host ("共享 app-server 已在运行（PID " + $pidText + "，端口 " + $port + "），跳过启动。")
-        Write-Host "桥接通过项目 .env 的 CODEX_APP_SERVER_WS_URL 连接本服务，桌面端不受影响。"
+        Write-Host ("用户环境变量 " + $envVarName + " 已确保为 " + $url)
+        Write-Host "桌面端重启一次后生效。"
         exit 0
       }
     }
@@ -139,8 +166,9 @@ function Invoke-Start {
     }
 
     if ($usable) {
-      Write-Host ("检测到已运行的共享 app-server（端口 " + $port + "），已复用。")
-      Write-Host "桥接通过项目 .env 的 CODEX_APP_SERVER_WS_URL 连接本服务，桌面端不受影响。"
+      Set-UserEnv $envVarName $url
+      Write-Host ("检测到已运行的共享 app-server（端口 " + $port + "），已复用并写入环境变量。")
+      Write-Host "桌面端重启一次后生效。"
       exit 0
     }
 
@@ -176,7 +204,8 @@ function Invoke-Start {
       $logTail = (Get-Content -LiteralPath $errLog -Tail 5) -join "`n"
     }
     if (Test-Ready) {
-      Write-Host ("共享 app-server 进程启动后退出，但端口已被可用实例接管（" + $url + "），已复用。")
+      Set-UserEnv $envVarName $url
+      Write-Host ("共享 app-server 进程启动后退出，但端口已被可用实例接管（" + $url + "），已复用并写入环境变量。")
       exit 0
     }
     Show-Error ("共享 app-server 启动后立即退出（退出码 " + $proc.ExitCode + "）。日志尾部：`n" + $logTail)
@@ -207,8 +236,10 @@ function Invoke-Start {
     exit 1
   }
 
+  Set-UserEnv $envVarName $url
   Write-Host ("共享 app-server 已启动（PID " + $proc.Id + "，端口 " + $port + "）")
-  Write-Host "桥接通过项目 .env 的 CODEX_APP_SERVER_WS_URL 连接本服务，桌面端不受影响。"
+  Write-Host ("用户环境变量 " + $envVarName + "=" + $url)
+  Write-Host "桌面端重启一次后生效。"
   exit 0
 }
 
@@ -245,7 +276,8 @@ function Invoke-Stop {
     Write-Host "未找到共享 app-server PID 文件（可能未通过脚本启动）。"
   }
 
-  Write-Host "未修改用户环境变量 CODEX_APP_SERVER_WS_URL，桌面端保持使用内置内核。"
+  Set-UserEnv $envVarName $null
+  Write-Host ("已删除用户环境变量 " + $envVarName + "。")
   Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 
   $listeners = @(Get-PortListeners $port)
