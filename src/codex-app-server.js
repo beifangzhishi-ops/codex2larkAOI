@@ -29,10 +29,16 @@ export class CodexAppServer extends EventEmitter {
     this.startPromise = null;
     this.reconnectPromise = null;
     this.stopping = false;
+
+    // WebSocket subscriptions are connection-scoped. These records let us rejoin the
+    // same threads after a transport reconnect without requiring a user /resume.
     this.subscriptions = new Map();
+
+    // Track delivery stages separately. Seeing item/started must never suppress a later
+    // item/completed replay: the completed item can contain the final answer.
     this.seenTurnStarts = new Set();
     this.seenTurnCompletions = new Set();
-    this.seenItems = new Set();
+    this.seenItemCompletions = new Set();
   }
 
   async start() {
@@ -103,6 +109,7 @@ export class CodexAppServer extends EventEmitter {
   async #connectWebSocket() {
     const WS = globalThis.WebSocket;
     if (!WS) throw new Error("当前 Node.js 不支持全局 WebSocket，请升级到 Node 22+ 或安装 ws 依赖");
+
     const ws = new WS(this.websocketUrl);
     this.ws = ws;
     await new Promise((resolve, reject) => {
@@ -112,12 +119,14 @@ export class CodexAppServer extends EventEmitter {
         settled = true;
         reject(new Error(`websocket 连接超时: ${this.websocketUrl}`));
       }, 15_000);
+
       const fail = () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         reject(new Error(`websocket 连接失败: ${this.websocketUrl}`));
       };
+
       ws.onopen = () => {
         if (settled) return;
         settled = true;
@@ -131,6 +140,7 @@ export class CodexAppServer extends EventEmitter {
       try { ws.close(); } catch { /* already closed */ }
       throw error;
     });
+
     ws.onmessage = (event) => {
       let data = event.data;
       if (typeof data !== "string") {
@@ -143,8 +153,12 @@ export class CodexAppServer extends EventEmitter {
       this.#onLine(String(data));
     };
     ws.onerror = () => { /* close 事件会统一处理 */ };
-    // During initialize, a close must reject pending RPCs but must not start a second reconnect loop.
-    ws.onclose = () => this.#dropWebSocket(ws, new Error("codex app-server websocket closed during initialize"), false);
+    // During initialize a close must reject pending RPCs without starting a second loop.
+    ws.onclose = () => this.#dropWebSocket(
+      ws,
+      new Error("codex app-server websocket closed during initialize"),
+      false,
+    );
     return ws;
   }
 
@@ -157,13 +171,16 @@ export class CodexAppServer extends EventEmitter {
 
   #rememberSubscription(method, params, result) {
     let threadId = "";
-    if (method === "thread/resume") threadId = String(params?.threadId || "");
-    else if (method === "thread/start" && params?.serviceName === "codex2lark") {
+    if (method === "thread/resume") {
+      threadId = String(params?.threadId || "");
+    } else if (method === "thread/start" && params?.serviceName === "codex2lark") {
       threadId = String(result?.thread?.id || "");
     }
     if (!threadId) return;
+
     const cwd = typeof params?.cwd === "string" && params.cwd ? params.cwd : "";
     this.subscriptions.set(threadId, { threadId, ...(cwd ? { cwd } : {}) });
+    // The response snapshot is history already visible at subscription time.
     this.#markThreadSnapshotSeen(result?.thread);
   }
 
@@ -181,7 +198,9 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #isTerminalTurn(turn) {
-    return ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(this.#turnStatus(turn));
+    return ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(
+      this.#turnStatus(turn),
+    );
   }
 
   #markThreadSnapshotSeen(thread) {
@@ -193,9 +212,13 @@ export class CodexAppServer extends EventEmitter {
       this.seenTurnStarts.add(this.#threadTurnKey(threadId, turnId));
       for (const item of Array.isArray(turn?.items) ? turn.items : []) {
         const itemId = String(item?.id || "");
-        if (itemId) this.seenItems.add(this.#threadItemKey(threadId, turnId, itemId));
+        if (itemId) {
+          this.seenItemCompletions.add(this.#threadItemKey(threadId, turnId, itemId));
+        }
       }
-      if (this.#isTerminalTurn(turn)) this.seenTurnCompletions.add(this.#threadTurnKey(threadId, turnId));
+      if (this.#isTerminalTurn(turn)) {
+        this.seenTurnCompletions.add(this.#threadTurnKey(threadId, turnId));
+      }
     }
   }
 
@@ -204,40 +227,80 @@ export class CodexAppServer extends EventEmitter {
     const threadId = String(params.threadId || params.thread?.id || "");
     const turnId = String(params.turnId || params.turn?.id || "");
     if (!threadId || !turnId) return;
+
     const turnKey = this.#threadTurnKey(threadId, turnId);
     if (message.method === "turn/started") this.seenTurnStarts.add(turnKey);
     if (message.method === "turn/completed") {
       this.seenTurnStarts.add(turnKey);
       this.seenTurnCompletions.add(turnKey);
     }
-    if (["item/started", "item/completed"].includes(message.method)) {
+
+    // Do not mark item/started here. A disconnect can happen after item/started but before
+    // item/completed, and the latter is where the final answer can become available.
+    if (message.method === "item/completed") {
       const itemId = String(params.item?.id || "");
-      if (itemId) this.seenItems.add(this.#threadItemKey(threadId, turnId, itemId));
+      if (itemId) {
+        this.seenItemCompletions.add(this.#threadItemKey(threadId, turnId, itemId));
+      }
+    }
+  }
+
+  #emitUnseenItemCompletion(threadId, turnId, item) {
+    const itemId = String(item?.id || "");
+    if (!threadId || !turnId || !itemId) return false;
+    const itemKey = this.#threadItemKey(threadId, turnId, itemId);
+    if (this.seenItemCompletions.has(itemKey)) return false;
+
+    this.seenItemCompletions.add(itemKey);
+    this.emit("notification", {
+      method: "item/completed",
+      params: { threadId, turnId, item },
+    });
+    return true;
+  }
+
+  #reconcileTerminalTurnItems(message) {
+    if (message?.method !== "turn/completed") return;
+    const params = message.params || {};
+    const threadId = String(params.threadId || params.thread?.id || "");
+    const turn = params.turn;
+    const turnId = String(params.turnId || turn?.id || "");
+    if (!threadId || !turnId) return;
+
+    // A few app-server paths place the final item only in the terminal turn snapshot.
+    // Synthesize only unseen item/completed notifications, before turn/completed.
+    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+      this.#emitUnseenItemCompletion(threadId, turnId, item);
     }
   }
 
   #replayRecoveredThread(thread) {
     const threadId = String(thread?.id || "");
     if (!threadId) return;
+
     for (const turn of Array.isArray(thread?.turns) ? thread.turns : []) {
       const turnId = String(turn?.id || "");
       if (!turnId) continue;
       const turnKey = this.#threadTurnKey(threadId, turnId);
+
       if (!this.seenTurnStarts.has(turnKey)) {
         this.seenTurnStarts.add(turnKey);
-        this.emit("notification", { method: "turn/started", params: { threadId, turn } });
+        this.emit("notification", {
+          method: "turn/started",
+          params: { threadId, turn },
+        });
       }
+
       for (const item of Array.isArray(turn?.items) ? turn.items : []) {
-        const itemId = String(item?.id || "");
-        if (!itemId) continue;
-        const itemKey = this.#threadItemKey(threadId, turnId, itemId);
-        if (this.seenItems.has(itemKey)) continue;
-        this.seenItems.add(itemKey);
-        this.emit("notification", { method: "item/completed", params: { threadId, turnId, item } });
+        this.#emitUnseenItemCompletion(threadId, turnId, item);
       }
+
       if (this.#isTerminalTurn(turn) && !this.seenTurnCompletions.has(turnKey)) {
         this.seenTurnCompletions.add(turnKey);
-        this.emit("notification", { method: "turn/completed", params: { threadId, turn } });
+        this.emit("notification", {
+          method: "turn/completed",
+          params: { threadId, turn },
+        });
       }
     }
   }
@@ -251,13 +314,18 @@ export class CodexAppServer extends EventEmitter {
         this.emit("stderr", `[bridge] recovered app-server subscription thread=${threadId}`);
       } catch (error) {
         if (!this.#canWrite()) throw error;
-        this.emit("stderr", `[bridge] cannot recover app-server subscription thread=${threadId}: ${error.message}`);
+        this.emit(
+          "stderr",
+          `[bridge] cannot recover app-server subscription thread=${threadId}: ${error.message}`,
+        );
       }
     }
   }
 
   #requestRaw(method, params, timeoutMs = this.requestTimeoutMs) {
-    if (!this.#canWrite()) return Promise.reject(new Error("codex app-server is not running"));
+    if (!this.#canWrite()) {
+      return Promise.reject(new Error("codex app-server is not running"));
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -296,9 +364,11 @@ export class CodexAppServer extends EventEmitter {
     const hadTransport = Boolean(ws || child || this.reconnectPromise || this.startPromise);
     this.ws = null;
     this.child = null;
+
     const error = new Error("codex app-server stopped");
     this.#rejectPending(error);
     if (hadTransport) this.emit("closed", error);
+
     if (ws) {
       try {
         ws.close();
@@ -313,6 +383,7 @@ export class CodexAppServer extends EventEmitter {
       } catch { /* ignore */ }
       return;
     }
+
     if (!child) return;
     try { child.stdin.end(); } catch { /* process already closed */ }
     setTimeout(() => child.kill(), 2000).unref();
@@ -321,10 +392,13 @@ export class CodexAppServer extends EventEmitter {
   #write(message) {
     if (this.ws) {
       const OPEN = globalThis.WebSocket?.OPEN ?? 1;
-      if (this.ws.readyState !== OPEN) throw new Error("codex app-server is not running");
+      if (this.ws.readyState !== OPEN) {
+        throw new Error("codex app-server is not running");
+      }
       this.ws.send(JSON.stringify(message));
       return;
     }
+
     if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
@@ -343,12 +417,24 @@ export class CodexAppServer extends EventEmitter {
       if (!pending) return;
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message || JSON.stringify(message.error)}`));
-      else pending.resolve(message.result);
+      if (message.error) {
+        pending.reject(
+          new Error(`${pending.method}: ${message.error.message || JSON.stringify(message.error)}`),
+        );
+      } else {
+        pending.resolve(message.result);
+      }
       return;
     }
-    if (message.id !== undefined && message.method) this.emit("serverRequest", message);
-    else if (message.method) {
+
+    if (message.id !== undefined && message.method) {
+      this.emit("serverRequest", message);
+      return;
+    }
+
+    if (message.method) {
+      // Ensure the bridge receives any final item before it processes turn/completed.
+      this.#reconcileTerminalTurnItems(message);
       this.#rememberNotification(message);
       this.emit("notification", message);
     }
@@ -370,13 +456,20 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #ensureReconnect(initialError) {
-    if (!this.websocketUrl || this.stopping || this.reconnectPromise) return this.reconnectPromise;
+    if (!this.websocketUrl || this.stopping || this.reconnectPromise) {
+      return this.reconnectPromise;
+    }
+
     const reconnect = this.#reconnect(initialError);
     this.reconnectPromise = reconnect;
     void reconnect.catch(() => {});
     reconnect.then(
-      () => { if (this.reconnectPromise === reconnect) this.reconnectPromise = null; },
-      () => { if (this.reconnectPromise === reconnect) this.reconnectPromise = null; },
+      () => {
+        if (this.reconnectPromise === reconnect) this.reconnectPromise = null;
+      },
+      () => {
+        if (this.reconnectPromise === reconnect) this.reconnectPromise = null;
+      },
     );
     return reconnect;
   }
@@ -384,11 +477,15 @@ export class CodexAppServer extends EventEmitter {
   async #reconnect(initialError) {
     let lastError = initialError;
     this.emit("stderr", `[bridge] app-server disconnected: ${initialError.message}`);
+
     for (let index = 0; index < this.reconnectDelaysMs.length; index += 1) {
       if (this.stopping) return;
       const delayMs = this.reconnectDelaysMs[index];
-      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
       if (this.stopping) return;
+
       this.emit("stderr", `[bridge] app-server reconnect attempt ${index + 1}`);
       try {
         await this.#connectAndInitialize();
@@ -405,8 +502,11 @@ export class CodexAppServer extends EventEmitter {
         }
       }
     }
+
     if (this.stopping) return;
-    const error = new Error(`codex app-server websocket reconnect exhausted: ${lastError?.message || initialError.message}`);
+    const error = new Error(
+      `codex app-server websocket reconnect exhausted: ${lastError?.message || initialError.message}`,
+    );
     this.emit("stderr", `[bridge] app-server reconnect exhausted: ${error.message}`);
     this.emit("closed", error);
     throw error;
