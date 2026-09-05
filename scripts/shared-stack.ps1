@@ -21,8 +21,6 @@ $backendErr = Join-Path $stateDir "shared-app-server.err.log"
 $proxyOut = Join-Path $stateDir "shared-app-server-proxy.out.log"
 $proxyErr = Join-Path $stateDir "shared-app-server-proxy.err.log"
 $proxyScript = Join-Path $PSScriptRoot "shared-app-server-proxy.js"
-$envName = "CODEX_APP_SERVER_WS_URL"
-$aoiEnvName = "AOI_REPO_PATH"
 
 function Show-Error([string]$Message) {
   Write-Host ("[错误] " + $Message) -ForegroundColor Red
@@ -31,14 +29,6 @@ function Show-Error([string]$Message) {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     [System.Windows.Forms.MessageBox]::Show($Message, "共享 Codex app-server", "OK", "Error") | Out-Null
   } catch {}
-}
-
-function Set-UserEnv([string]$Value) {
-  [Environment]::SetEnvironmentVariable($envName, $Value, "User")
-}
-
-function Set-AoiRepoEnv {
-  [Environment]::SetEnvironmentVariable($aoiEnvName, $root, "User")
 }
 
 function Get-ProcessInfo([int]$Id) {
@@ -178,8 +168,6 @@ function Start-Stack {
   $proxyInfo = if ($proxyPid) { Get-ProcessInfo $proxyPid } else { $null }
   $backendInfo = if ($backendPid) { Get-ProcessInfo $backendPid } else { $null }
   if ($proxyInfo -and $backendInfo -and (Is-Proxy $proxyInfo.CommandLine) -and (Is-CodexServer $backendInfo.CommandLine $backendPort) -and (Test-Ready $publicReady) -and (Test-Ready $backendReady)) {
-    Set-UserEnv $publicUrl
-    Set-AoiRepoEnv
     Write-Host ("共享栈已运行：Desktop/AOI -> " + $publicUrl + " -> " + $backendUrl)
     return
   }
@@ -211,22 +199,18 @@ function Start-Stack {
     throw
   }
 
-  Set-UserEnv $publicUrl
-  Set-AoiRepoEnv
   Write-Host ("共享栈已启动：Desktop/AOI -> " + $publicUrl + "（兼容代理） -> " + $backendUrl + "（真实 app-server）")
-  Write-Host ("已记录 " + $aoiEnvName + "=" + $root + "，供 Desktop 启动器冷启动共享栈。")
-  Write-Host "请完全退出并重新打开 Codex/ChatGPT Desktop 以读取新的用户环境变量。"
+  Write-Host "shared-stack 不写入任何 User/Machine 环境变量；Desktop 共享 URL 由共享版启动器临时注入。"
 }
 
 function Stop-Stack {
-  Set-UserEnv $null
   Stop-Owned $proxyPidFile "proxy" | Out-Null
   if (-not (Stop-Owned $backendPidFile "backend")) { Stop-Owned $backendPidFile "legacy" | Out-Null }
   foreach ($port in @($publicPort, $backendPort)) {
     $ids = @(Get-ListeningPids $port)
     if ($ids.Count -gt 0) { Write-Host ("[警告] 端口 " + $port + " 仍被外部进程监听，未自动停止：" + ($ids -join ",")) -ForegroundColor Yellow }
   }
-  Write-Host "共享栈已停止，CODEX_APP_SERVER_WS_URL 已清理；AOI_REPO_PATH 保留用于下次冷启动。"
+  Write-Host "共享栈已停止；未修改任何 User/Machine 环境变量。"
 }
 
 try {
