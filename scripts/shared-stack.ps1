@@ -22,6 +22,7 @@ $proxyOut = Join-Path $stateDir "shared-app-server-proxy.out.log"
 $proxyErr = Join-Path $stateDir "shared-app-server-proxy.err.log"
 $proxyScript = Join-Path $PSScriptRoot "shared-app-server-proxy.js"
 $envName = "CODEX_APP_SERVER_WS_URL"
+$aoiEnvName = "AOI_REPO_PATH"
 
 function Show-Error([string]$Message) {
   Write-Host ("[错误] " + $Message) -ForegroundColor Red
@@ -34,6 +35,10 @@ function Show-Error([string]$Message) {
 
 function Set-UserEnv([string]$Value) {
   [Environment]::SetEnvironmentVariable($envName, $Value, "User")
+}
+
+function Set-AoiRepoEnv {
+  [Environment]::SetEnvironmentVariable($aoiEnvName, $root, "User")
 }
 
 function Get-ProcessInfo([int]$Id) {
@@ -118,6 +123,20 @@ function Find-CodexExe {
       Sort-Object LastWriteTime -Descending
   )
   if ($desktop.Count -gt 0) { return $desktop[0].FullName }
+
+  try {
+    $package = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
+      Sort-Object Version -Descending |
+      Select-Object -First 1
+    if ($package -and (Test-Path -LiteralPath $package.InstallLocation)) {
+      $storeCodex = @(
+        Get-ChildItem -LiteralPath $package.InstallLocation -Recurse -File -Filter "codex.exe" -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending
+      )
+      if ($storeCodex.Count -gt 0) { return $storeCodex[0].FullName }
+    }
+  } catch {}
+
   $extRoot = Join-Path $env:USERPROFILE ".vscode\extensions"
   $ext = @(Get-ChildItem -LiteralPath $extRoot -Directory -Filter "openai.chatgpt-*-win32-x64" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
   foreach ($item in $ext) {
@@ -160,6 +179,7 @@ function Start-Stack {
   $backendInfo = if ($backendPid) { Get-ProcessInfo $backendPid } else { $null }
   if ($proxyInfo -and $backendInfo -and (Is-Proxy $proxyInfo.CommandLine) -and (Is-CodexServer $backendInfo.CommandLine $backendPort) -and (Test-Ready $publicReady) -and (Test-Ready $backendReady)) {
     Set-UserEnv $publicUrl
+    Set-AoiRepoEnv
     Write-Host ("共享栈已运行：Desktop/AOI -> " + $publicUrl + " -> " + $backendUrl)
     return
   }
@@ -169,7 +189,7 @@ function Start-Stack {
   Assert-PortsFree
 
   $codex = Find-CodexExe
-  if (-not $codex) { throw "未找到 Codex Desktop 或 VS Code 扩展内置 codex.exe" }
+  if (-not $codex) { throw "未找到 Codex Desktop / Microsoft Store 包 / VS Code 扩展内置 codex.exe" }
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
   if (-not $node) { throw "未找到 node.exe；AOI 要求 Node.js >= 20" }
 
@@ -192,7 +212,9 @@ function Start-Stack {
   }
 
   Set-UserEnv $publicUrl
+  Set-AoiRepoEnv
   Write-Host ("共享栈已启动：Desktop/AOI -> " + $publicUrl + "（兼容代理） -> " + $backendUrl + "（真实 app-server）")
+  Write-Host ("已记录 " + $aoiEnvName + "=" + $root + "，供 Desktop 启动器冷启动共享栈。")
   Write-Host "请完全退出并重新打开 Codex/ChatGPT Desktop 以读取新的用户环境变量。"
 }
 
@@ -204,7 +226,7 @@ function Stop-Stack {
     $ids = @(Get-ListeningPids $port)
     if ($ids.Count -gt 0) { Write-Host ("[警告] 端口 " + $port + " 仍被外部进程监听，未自动停止：" + ($ids -join ",")) -ForegroundColor Yellow }
   }
-  Write-Host "共享栈已停止，用户环境变量已清理。"
+  Write-Host "共享栈已停止，CODEX_APP_SERVER_WS_URL 已清理；AOI_REPO_PATH 保留用于下次冷启动。"
 }
 
 try {
