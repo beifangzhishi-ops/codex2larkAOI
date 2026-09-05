@@ -2,24 +2,44 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
 
+const DEFAULT_RECONNECT_DELAYS_MS = Object.freeze([250, 500, 1_000, 2_000, 4_000]);
+
 export class CodexAppServer extends EventEmitter {
-  constructor({ cwd, command = "codex", args = [], websocketUrl = "", requestTimeoutMs = 60_000 } = {}) {
+  constructor({
+    cwd,
+    command = "codex",
+    args = [],
+    websocketUrl = "",
+    requestTimeoutMs = 60_000,
+    reconnectDelaysMs = DEFAULT_RECONNECT_DELAYS_MS,
+  } = {}) {
     super();
     this.cwd = cwd;
     this.command = command;
     this.args = args;
     this.websocketUrl = String(websocketUrl || "").trim();
     this.requestTimeoutMs = requestTimeoutMs;
+    this.reconnectDelaysMs = Array.isArray(reconnectDelaysMs) && reconnectDelaysMs.length
+      ? reconnectDelaysMs.map((value) => Math.max(0, Number(value) || 0))
+      : [...DEFAULT_RECONNECT_DELAYS_MS];
     this.nextId = 1;
     this.pending = new Map();
     this.child = null;
     this.ws = null;
     this.startPromise = null;
+    this.reconnectPromise = null;
+    this.stopping = false;
+    this.subscriptions = new Map();
+    this.seenTurnStarts = new Set();
+    this.seenTurnCompletions = new Set();
+    this.seenItems = new Set();
   }
 
   async start() {
-    if (this.child || this.ws) return;
+    if (this.#canWrite()) return;
+    if (this.reconnectPromise) return this.reconnectPromise;
     if (this.startPromise) return this.startPromise;
+    this.stopping = false;
     this.startPromise = this.#start();
     try {
       await this.startPromise;
@@ -30,10 +50,14 @@ export class CodexAppServer extends EventEmitter {
 
   async #start() {
     if (this.websocketUrl) {
-      await this.#connectWebSocket();
-    } else {
-      await this.#startChild();
+      await this.#connectAndInitialize();
+      return;
     }
+    await this.#startChild();
+    await this.#initialize();
+  }
+
+  async #initialize() {
     await this.#requestRaw("initialize", {
       clientInfo: {
         name: "codex2lark",
@@ -62,21 +86,50 @@ export class CodexAppServer extends EventEmitter {
     child.once("close", (code) => this.#onClose(child, new Error(`codex app-server exited ${code}`)));
   }
 
+  async #connectAndInitialize() {
+    const ws = await this.#connectWebSocket();
+    try {
+      await this.#initialize();
+    } catch (error) {
+      this.#dropWebSocket(ws, error, false);
+      try { ws.close(); } catch { /* already closed */ }
+      throw error;
+    }
+    if (this.ws === ws) {
+      ws.onclose = () => this.#dropWebSocket(ws, new Error("codex app-server websocket closed"), true);
+    }
+  }
+
   async #connectWebSocket() {
     const WS = globalThis.WebSocket;
     if (!WS) throw new Error("当前 Node.js 不支持全局 WebSocket，请升级到 Node 22+ 或安装 ws 依赖");
     const ws = new WS(this.websocketUrl);
     this.ws = ws;
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`websocket 连接超时: ${this.websocketUrl}`)), 15_000);
-      ws.onopen = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      ws.onerror = () => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`websocket 连接超时: ${this.websocketUrl}`));
+      }, 15_000);
+      const fail = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         reject(new Error(`websocket 连接失败: ${this.websocketUrl}`));
       };
+      ws.onopen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      ws.onerror = fail;
+      ws.onclose = fail;
+    }).catch((error) => {
+      if (this.ws === ws) this.ws = null;
+      try { ws.close(); } catch { /* already closed */ }
+      throw error;
     });
     ws.onmessage = (event) => {
       let data = event.data;
@@ -90,12 +143,117 @@ export class CodexAppServer extends EventEmitter {
       this.#onLine(String(data));
     };
     ws.onerror = () => { /* close 事件会统一处理 */ };
-    ws.onclose = () => this.#onClose(ws, new Error("codex app-server websocket closed"));
+    // During initialize, a close must reject pending RPCs but must not start a second reconnect loop.
+    ws.onclose = () => this.#dropWebSocket(ws, new Error("codex app-server websocket closed during initialize"), false);
+    return ws;
   }
 
   async request(method, params = {}, options = {}) {
     await this.start();
-    return this.#requestRaw(method, params, options.timeoutMs);
+    const result = await this.#requestRaw(method, params, options.timeoutMs);
+    this.#rememberSubscription(method, params, result);
+    return result;
+  }
+
+  #rememberSubscription(method, params, result) {
+    let threadId = "";
+    if (method === "thread/resume") threadId = String(params?.threadId || "");
+    else if (method === "thread/start" && params?.serviceName === "codex2lark") {
+      threadId = String(result?.thread?.id || "");
+    }
+    if (!threadId) return;
+    const cwd = typeof params?.cwd === "string" && params.cwd ? params.cwd : "";
+    this.subscriptions.set(threadId, { threadId, ...(cwd ? { cwd } : {}) });
+    this.#markThreadSnapshotSeen(result?.thread);
+  }
+
+  #threadTurnKey(threadId, turnId) {
+    return `${threadId}:${turnId}`;
+  }
+
+  #threadItemKey(threadId, turnId, itemId) {
+    return `${threadId}:${turnId}:${itemId}`;
+  }
+
+  #turnStatus(turn) {
+    if (typeof turn?.status === "string") return turn.status.toLowerCase();
+    return String(turn?.status?.type || "").toLowerCase();
+  }
+
+  #isTerminalTurn(turn) {
+    return ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(this.#turnStatus(turn));
+  }
+
+  #markThreadSnapshotSeen(thread) {
+    const threadId = String(thread?.id || "");
+    if (!threadId) return;
+    for (const turn of Array.isArray(thread?.turns) ? thread.turns : []) {
+      const turnId = String(turn?.id || "");
+      if (!turnId) continue;
+      this.seenTurnStarts.add(this.#threadTurnKey(threadId, turnId));
+      for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+        const itemId = String(item?.id || "");
+        if (itemId) this.seenItems.add(this.#threadItemKey(threadId, turnId, itemId));
+      }
+      if (this.#isTerminalTurn(turn)) this.seenTurnCompletions.add(this.#threadTurnKey(threadId, turnId));
+    }
+  }
+
+  #rememberNotification(message) {
+    const params = message?.params || {};
+    const threadId = String(params.threadId || params.thread?.id || "");
+    const turnId = String(params.turnId || params.turn?.id || "");
+    if (!threadId || !turnId) return;
+    const turnKey = this.#threadTurnKey(threadId, turnId);
+    if (message.method === "turn/started") this.seenTurnStarts.add(turnKey);
+    if (message.method === "turn/completed") {
+      this.seenTurnStarts.add(turnKey);
+      this.seenTurnCompletions.add(turnKey);
+    }
+    if (["item/started", "item/completed"].includes(message.method)) {
+      const itemId = String(params.item?.id || "");
+      if (itemId) this.seenItems.add(this.#threadItemKey(threadId, turnId, itemId));
+    }
+  }
+
+  #replayRecoveredThread(thread) {
+    const threadId = String(thread?.id || "");
+    if (!threadId) return;
+    for (const turn of Array.isArray(thread?.turns) ? thread.turns : []) {
+      const turnId = String(turn?.id || "");
+      if (!turnId) continue;
+      const turnKey = this.#threadTurnKey(threadId, turnId);
+      if (!this.seenTurnStarts.has(turnKey)) {
+        this.seenTurnStarts.add(turnKey);
+        this.emit("notification", { method: "turn/started", params: { threadId, turn } });
+      }
+      for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+        const itemId = String(item?.id || "");
+        if (!itemId) continue;
+        const itemKey = this.#threadItemKey(threadId, turnId, itemId);
+        if (this.seenItems.has(itemKey)) continue;
+        this.seenItems.add(itemKey);
+        this.emit("notification", { method: "item/completed", params: { threadId, turnId, item } });
+      }
+      if (this.#isTerminalTurn(turn) && !this.seenTurnCompletions.has(turnKey)) {
+        this.seenTurnCompletions.add(turnKey);
+        this.emit("notification", { method: "turn/completed", params: { threadId, turn } });
+      }
+    }
+  }
+
+  async #recoverSubscriptions() {
+    for (const [threadId, params] of [...this.subscriptions.entries()]) {
+      if (this.stopping) return;
+      try {
+        const result = await this.#requestRaw("thread/resume", params);
+        this.#replayRecoveredThread(result?.thread);
+        this.emit("stderr", `[bridge] recovered app-server subscription thread=${threadId}`);
+      } catch (error) {
+        if (!this.#canWrite()) throw error;
+        this.emit("stderr", `[bridge] cannot recover app-server subscription thread=${threadId}: ${error.message}`);
+      }
+    }
   }
 
   #requestRaw(method, params, timeoutMs = this.requestTimeoutMs) {
@@ -132,14 +290,15 @@ export class CodexAppServer extends EventEmitter {
   }
 
   stop() {
+    this.stopping = true;
     const ws = this.ws;
     const child = this.child;
-    if (!ws && !child) return;
+    const hadTransport = Boolean(ws || child || this.reconnectPromise || this.startPromise);
     this.ws = null;
     this.child = null;
     const error = new Error("codex app-server stopped");
     this.#rejectPending(error);
-    this.emit("closed", error);
+    if (hadTransport) this.emit("closed", error);
     if (ws) {
       try {
         ws.close();
@@ -154,6 +313,7 @@ export class CodexAppServer extends EventEmitter {
       } catch { /* ignore */ }
       return;
     }
+    if (!child) return;
     try { child.stdin.end(); } catch { /* process already closed */ }
     setTimeout(() => child.kill(), 2000).unref();
   }
@@ -188,7 +348,10 @@ export class CodexAppServer extends EventEmitter {
       return;
     }
     if (message.id !== undefined && message.method) this.emit("serverRequest", message);
-    else if (message.method) this.emit("notification", message);
+    else if (message.method) {
+      this.#rememberNotification(message);
+      this.emit("notification", message);
+    }
   }
 
   #rejectPending(error) {
@@ -197,6 +360,56 @@ export class CodexAppServer extends EventEmitter {
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  #dropWebSocket(ws, error, reconnect) {
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.#rejectPending(error);
+    if (reconnect && !this.stopping) this.#ensureReconnect(error);
+  }
+
+  #ensureReconnect(initialError) {
+    if (!this.websocketUrl || this.stopping || this.reconnectPromise) return this.reconnectPromise;
+    const reconnect = this.#reconnect(initialError);
+    this.reconnectPromise = reconnect;
+    void reconnect.catch(() => {});
+    reconnect.then(
+      () => { if (this.reconnectPromise === reconnect) this.reconnectPromise = null; },
+      () => { if (this.reconnectPromise === reconnect) this.reconnectPromise = null; },
+    );
+    return reconnect;
+  }
+
+  async #reconnect(initialError) {
+    let lastError = initialError;
+    this.emit("stderr", `[bridge] app-server disconnected: ${initialError.message}`);
+    for (let index = 0; index < this.reconnectDelaysMs.length; index += 1) {
+      if (this.stopping) return;
+      const delayMs = this.reconnectDelaysMs[index];
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (this.stopping) return;
+      this.emit("stderr", `[bridge] app-server reconnect attempt ${index + 1}`);
+      try {
+        await this.#connectAndInitialize();
+        await this.#recoverSubscriptions();
+        this.emit("stderr", "[bridge] app-server reconnected");
+        this.emit("reconnected");
+        return;
+      } catch (error) {
+        lastError = error;
+        const ws = this.ws;
+        if (ws) {
+          this.#dropWebSocket(ws, error, false);
+          try { ws.close(); } catch { /* already closed */ }
+        }
+      }
+    }
+    if (this.stopping) return;
+    const error = new Error(`codex app-server websocket reconnect exhausted: ${lastError?.message || initialError.message}`);
+    this.emit("stderr", `[bridge] app-server reconnect exhausted: ${error.message}`);
+    this.emit("closed", error);
+    throw error;
   }
 
   #onClose(child, error) {
