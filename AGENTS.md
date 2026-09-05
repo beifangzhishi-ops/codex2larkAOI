@@ -8,19 +8,18 @@
 ## GitHub 同步
 
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
-- 所有更新默认推送到 GitHub 远程仓库的 `beta` 分支；各机器的 Codex 自动化与用户本人均可推送、维护 `beta`。
-- 只能操作 `beta` 分支和 `main`，不能操作其他分支。
-- `main` 为稳定分支：只有用户明确指令时才合并到 `main`；自动化任务不主动推送 `main`。
+- 仓库只维护 `main` 一个长期/工作分支，不创建或维护 `beta`、feature/fix 等其他远程分支。
+- 所有机器和自动化开始工作前先同步 `origin/main`；开发和验证通过后直接提交并推送到 `origin/main`。
+- 推送前必须运行 `npm run check`；如果当前环境无法运行，必须明确说明原因和未验证范围。
+- 禁止 force push 覆盖其他机器的新提交。推送被拒绝时，先重新同步 `origin/main`，解决冲突并重新验证。
+- 如发现历史遗留的其他远程分支，先确认其独有提交已经进入 `main`，再删除该分支；不要继续在遗留分支工作。
 
-### beta 分支更新
+### main 更新流程
 
-- 所有机器从 `origin/main` 拉取稳定改动，合并进本地 `beta` 分支，验证（`npm run check`）后推送到 `origin/beta`。
-
-### 合并到 main 的流程
-
-1. 在 `beta` 分支完成开发、测试、提交并推送 `origin/beta`。
-2. 用户明确指令合并到 `main` 后，执行：切到 `main` 拉取最新，合并 `beta`，解决冲突并验证，再推送 `origin/main`。
-3. 合并完成后，各机器拉取 `origin/main` 合并进 `beta`，避免后续合并冲突。
+1. `git fetch origin`，切换到 `main` 并以 fast-forward 方式同步 `origin/main`。
+2. 完成修改后运行 `npm run check`。
+3. 验证通过后提交，并推送到 `origin/main`。
+4. 如果推送时发现远端已有新提交，重新同步、解决冲突并再次运行检查后再推送；不要强推。
 
 ## AKA/AOI 双槽协作
 
