@@ -1063,6 +1063,15 @@ export function createPendingTitleJob(threadId, cwd, prompt, answer, sessionMode
   };
 }
 
+export function buildSharedThreadOptions(cwd, model = "") {
+  return { cwd, ...(model ? { model } : {}) };
+}
+
+export function isCompletedTurn(turn) {
+  const status = typeof turn?.status === "string" ? turn.status : turn?.status?.type;
+  return status === "completed";
+}
+
 export function buildTitleThreadOptions(config, model, cwd = config.rootDir) {
   return {
     cwd: resolve(cwd),
@@ -3625,7 +3634,7 @@ class BridgeRuntime {
         `模型设置已自动回退。\n${selection.fallbackNotice}\n下一轮使用：${selection.entry.displayName}（${selection.entry.model}）/ ${selection.effort}`, this.config);
     }
     const { threadId } = await this.#ensureThread(
-      event.chatId, selection.entry.model, cwd, approvalMode,
+      event.chatId, selection.entry.model, cwd,
     );
     const goal = await this.#getGoal(threadId);
     if (this.interjectionModeFor(event.chatId) === "guide" && (goal?.status === "active" || this.activeThreads.has(threadId))) {
@@ -3674,14 +3683,8 @@ class BridgeRuntime {
     });
   }
 
-  #threadOptions(chatId, cwd = this.cwdFor(chatId), model = "", mode = this.modeFor(chatId)) {
-    return {
-      cwd,
-      approvalPolicy: approvalPolicy(),
-      approvalsReviewer: approvalsReviewer(mode),
-      sandbox: "workspace-write",
-      ...(model ? { model } : {}),
-    };
+  #threadOptions(chatId, cwd = this.cwdFor(chatId), model = "") {
+    return buildSharedThreadOptions(cwd, model);
   }
 
   async #listResumeThreads(chatId, cursor = "") {
@@ -4523,10 +4526,10 @@ class BridgeRuntime {
     }
   }
 
-  async #ensureThread(chatId, model = "", cwd = this.cwdFor(chatId), mode = this.modeFor(chatId)) {
+  async #ensureThread(chatId, model = "", cwd = this.cwdFor(chatId)) {
     let threadId = this.state.sessions[chatId];
     let isNew = false;
-    const common = this.#threadOptions(chatId, cwd, model, mode);
+    const common = this.#threadOptions(chatId, cwd, model);
     if (threadId && !this.loadedThreads.has(threadId)) {
       try {
         await this.client.request("thread/resume", { threadId, ...common });
@@ -4651,7 +4654,7 @@ class BridgeRuntime {
     if (!this.loadedThreads.has(threadId)) {
       await this.client.request("thread/resume", {
         threadId,
-        ...this.#threadOptions(event.chatId, cwd, model, approvalMode),
+        ...this.#threadOptions(event.chatId, cwd, model),
       });
       this.loadedThreads.add(threadId);
     }
@@ -4819,12 +4822,12 @@ class BridgeRuntime {
     active.pendingAgent = null;
     if (active.external) {
       this.#queueProgress(active, `item-final-${active.turnId}-${pending.id}`,
-        turn?.status === "completed" ? pending.text : formatThreadItem(
+        isCompletedTurn(turn) ? pending.text : formatThreadItem(
           { type: "agentMessage", phase: "commentary", text: pending.text }, "completed",
         ));
       return;
     }
-    if (turn?.status === "completed") {
+    if (isCompletedTurn(turn)) {
       active.finalMessages.push(pending.text);
     } else {
       const text = formatThreadItem({ type: "agentMessage", phase: "commentary", text: pending.text }, "completed");

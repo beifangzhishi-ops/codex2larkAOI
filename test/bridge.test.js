@@ -10,6 +10,8 @@ import {
   approvalsReviewer,
   approvalCardUpdateArgs,
   buildConfig,
+  buildSharedThreadOptions,
+  isCompletedTurn,
   buildFeishuPostContent,
   buildApprovalCard,
   buildTurnCollaborationMode,
@@ -1066,6 +1068,20 @@ test("approval settings keep on-request policy and delegate only new turns", () 
   assert.equal(approvalsReviewer("manual"), "user");
 });
 
+test("shared thread options leave approval and sandbox policy to each turn", () => {
+  const thread = buildSharedThreadOptions("C:\\work", "gpt-test");
+  assert.deepEqual(thread, { cwd: "C:\\work", model: "gpt-test" });
+  assert.equal("approvalPolicy" in thread, false);
+  assert.equal("approvalsReviewer" in thread, false);
+  assert.equal("sandbox" in thread, false);
+});
+
+test("completed turn helper accepts string and structured protocol statuses", () => {
+  assert.equal(isCompletedTurn({ status: "completed" }), true);
+  assert.equal(isCompletedTurn({ status: { type: "completed" } }), true);
+  assert.equal(isCompletedTurn({ status: "interrupted" }), false);
+  assert.equal(isCompletedTurn({}), false);
+});
 test("screenshot command captures physical pixels across the DPI-aware virtual desktop", () => {
   const command = buildScreenshotPowerShellCommand("C:\\temp\\screen's.png");
   assert.match(command, /SetThreadDpiAwarenessContext/);
