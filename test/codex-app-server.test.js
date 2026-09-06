@@ -48,6 +48,11 @@ class FakeWebSocket {
     });
   }
 
+  serverMessage(message) {
+    if (this.readyState !== FakeWebSocket.OPEN) throw new Error("socket not open");
+    this.onmessage?.({ data: JSON.stringify(message) });
+  }
+
   close() {
     if (this.readyState === FakeWebSocket.CLOSED) return;
     this.readyState = FakeWebSocket.CLOSED;
@@ -161,6 +166,151 @@ test("reconnect replays only unseen gap items from the resumed thread snapshot",
   FakeWebSocket.instances[1].serverClose();
   await reconnectedAgain;
   assert.deepEqual(notifications, []);
+  client.stop();
+});
+
+test("item/started before disconnect does not suppress recovered final item/completed", async () => {
+  FakeWebSocket.handler = (message, ws) => {
+    if (message.method !== "thread/resume") return defaultResult(message);
+    const reconnect = FakeWebSocket.instances.indexOf(ws) > 0;
+    return {
+      thread: {
+        id: "thread-final-gap",
+        turns: [{
+          id: "turn-final-gap",
+          status: reconnect ? "completed" : "active",
+          items: reconnect ? [{
+            id: "agent-final-gap",
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "最终结论",
+          }] : [],
+        }],
+      },
+    };
+  };
+
+  const client = new CodexAppServer({
+    websocketUrl: "ws://127.0.0.1:45789",
+    reconnectDelaysMs: [0],
+    requestTimeoutMs: 1000,
+  });
+  const notifications = [];
+  client.on("notification", (message) => notifications.push(message));
+
+  await client.request("thread/resume", { threadId: "thread-final-gap" });
+  FakeWebSocket.instances[0].serverMessage({
+    method: "item/started",
+    params: {
+      threadId: "thread-final-gap",
+      turnId: "turn-final-gap",
+      item: { id: "agent-final-gap", type: "agentMessage" },
+    },
+  });
+  notifications.length = 0;
+
+  const reconnected = once(client, "reconnected");
+  FakeWebSocket.instances[0].serverClose();
+  await reconnected;
+
+  const completed = notifications.filter((message) => message.method === "item/completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].params.item.text, "最终结论");
+  assert.equal(notifications.at(-1).method, "turn/completed");
+  client.stop();
+});
+
+test("turn/completed snapshot synthesizes a missing final item before completion", async () => {
+  const client = new CodexAppServer({
+    websocketUrl: "ws://127.0.0.1:45789",
+    reconnectDelaysMs: [0],
+    requestTimeoutMs: 1000,
+  });
+  const notifications = [];
+  client.on("notification", (message) => notifications.push(message));
+  await client.request("thread/resume", { threadId: "thread-terminal" });
+
+  const ws = FakeWebSocket.instances[0];
+  ws.serverMessage({
+    method: "item/started",
+    params: {
+      threadId: "thread-terminal",
+      turnId: "turn-terminal",
+      item: { id: "agent-terminal", type: "agentMessage" },
+    },
+  });
+  notifications.length = 0;
+
+  ws.serverMessage({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-terminal",
+      turn: {
+        id: "turn-terminal",
+        status: { type: "completed" },
+        items: [{
+          id: "agent-terminal",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "terminal snapshot final",
+        }],
+      },
+    },
+  });
+
+  assert.deepEqual(notifications.map((message) => message.method), [
+    "item/completed",
+    "turn/completed",
+  ]);
+  assert.equal(notifications[0].params.item.text, "terminal snapshot final");
+  client.stop();
+});
+
+test("terminal turn reconciliation does not duplicate an already completed item", async () => {
+  const client = new CodexAppServer({
+    websocketUrl: "ws://127.0.0.1:45789",
+    reconnectDelaysMs: [0],
+    requestTimeoutMs: 1000,
+  });
+  const notifications = [];
+  client.on("notification", (message) => notifications.push(message));
+  await client.request("thread/resume", { threadId: "thread-terminal-dedupe" });
+
+  const ws = FakeWebSocket.instances[0];
+  const item = {
+    id: "agent-terminal-dedupe",
+    type: "agentMessage",
+    phase: "final_answer",
+    text: "only once",
+  };
+  ws.serverMessage({
+    method: "item/completed",
+    params: {
+      threadId: "thread-terminal-dedupe",
+      turnId: "turn-terminal-dedupe",
+      item,
+    },
+  });
+  ws.serverMessage({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-terminal-dedupe",
+      turn: {
+        id: "turn-terminal-dedupe",
+        status: "completed",
+        items: [item],
+      },
+    },
+  });
+
+  assert.equal(
+    notifications.filter((message) => message.method === "item/completed").length,
+    1,
+  );
+  assert.equal(
+    notifications.filter((message) => message.method === "turn/completed").length,
+    1,
+  );
   client.stop();
 });
 
