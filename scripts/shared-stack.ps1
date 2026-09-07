@@ -1,8 +1,9 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("start", "stop")]
   [string]$Action,
-  [switch]$NoGui
+  [switch]$NoGui,
+  [string]$FallbackProxy = "127.0.0.1:7890"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,81 @@ function Show-Error([string]$Message) {
   } catch {}
 }
 
+function ConvertTo-ProxyUri([AllowNull()][string]$Value, [string]$DefaultScheme = "http") {
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+  $clean = $Value.Trim()
+  if ($clean -match "^[a-zA-Z][a-zA-Z0-9+.-]*://") { return $clean }
+  return ($DefaultScheme + "://" + $clean)
+}
+
+function Resolve-SharedProxy {
+  $http = ConvertTo-ProxyUri ([string]$env:HTTP_PROXY)
+  $https = ConvertTo-ProxyUri ([string]$env:HTTPS_PROXY)
+  $all = ConvertTo-ProxyUri ([string]$env:ALL_PROXY)
+  $seed = if ($https) { $https } elseif ($http) { $http } else { $all }
+  if ($seed) {
+    if (-not $http) { $http = $seed }
+    if (-not $https) { $https = $seed }
+    if (-not $all) { $all = $seed }
+    return @{ Source = "继承调用方环境"; Http = $http; Https = $https; All = $all }
+  }
+
+  try {
+    $settings = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop
+    $enabled = ([int]$settings.ProxyEnable -eq 1)
+    $server = [string]$settings.ProxyServer
+    if ($enabled -and -not [string]::IsNullOrWhiteSpace($server)) {
+      $server = $server.Trim()
+      if ($server -notmatch "=") {
+        $single = ConvertTo-ProxyUri $server
+        return @{ Source = "Windows 当前用户系统代理"; Http = $single; Https = $single; All = $single }
+      }
+
+      $map = @{}
+      foreach ($entry in ($server -split ";")) {
+        if ($entry -match "^\s*([^=]+)=(.+?)\s*$") {
+          $map[$matches[1].Trim().ToLowerInvariant()] = $matches[2].Trim()
+        }
+      }
+      $httpValue = [string]$map["http"]
+      $httpsValue = [string]$map["https"]
+      $socksValue = [string]$map["socks"]
+      if ([string]::IsNullOrWhiteSpace($httpValue)) { $httpValue = $httpsValue }
+      if ([string]::IsNullOrWhiteSpace($httpsValue)) { $httpsValue = $httpValue }
+      $http = ConvertTo-ProxyUri $httpValue
+      $https = ConvertTo-ProxyUri $httpsValue
+      $all = if ([string]::IsNullOrWhiteSpace($socksValue)) { $https } else { ConvertTo-ProxyUri $socksValue "socks5" }
+      if ($http -or $https -or $all) {
+        return @{ Source = "Windows 当前用户分协议系统代理"; Http = $http; Https = $https; All = $all }
+      }
+    }
+  } catch {}
+
+  $fallback = ConvertTo-ProxyUri $FallbackProxy
+  if ($fallback) {
+    return @{ Source = "回退代理"; Http = $fallback; Https = $fallback; All = $fallback }
+  }
+  return $null
+}
+
+function Set-SharedProxyEnvironment {
+  $proxy = Resolve-SharedProxy
+  if (-not $proxy) {
+    Write-Warning "未解析到共享 app-server 外网代理；Remote Control 可能无法连接。"
+    return
+  }
+
+  if ($proxy.Http) { $env:HTTP_PROXY = $proxy.Http } else { Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue }
+  if ($proxy.Https) { $env:HTTPS_PROXY = $proxy.Https } else { Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue }
+  if ($proxy.All) { $env:ALL_PROXY = $proxy.All } else { Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue }
+
+  $noProxyParts = @([string]$env:NO_PROXY -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  foreach ($local in @("localhost", "127.0.0.1", "::1")) {
+    if ($local -notin $noProxyParts) { $noProxyParts += $local }
+  }
+  $env:NO_PROXY = ($noProxyParts -join ",")
+  Write-Host ("shared app-server 网络代理：" + $proxy.Source)
+}
 function Get-ProcessInfo([int]$Id) {
   $p = Get-Process -Id $Id -ErrorAction SilentlyContinue
   if (-not $p) { return $null }
@@ -180,6 +256,8 @@ function Start-Stack {
   if (-not $codex) { throw "未找到 Codex Desktop / Microsoft Store 包 / VS Code 扩展内置 codex.exe" }
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
   if (-not $node) { throw "未找到 node.exe；AOI 要求 Node.js >= 20" }
+
+  Set-SharedProxyEnvironment
 
   $backend = Start-Process -FilePath $codex -ArgumentList @("app-server", "--listen", $backendUrl) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr -PassThru
   Set-Content -LiteralPath $backendPidFile -Value ([string]$backend.Id) -Encoding ascii

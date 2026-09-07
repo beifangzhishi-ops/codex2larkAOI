@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$CheckOnly,
     [ValidateRange(1, 120)]
@@ -160,7 +160,7 @@ function Wait-HttpReady {
 }
 
 function Start-SharedStack {
-    param([string]$ReadyUrl)
+    param([string]$ReadyUrl, [string]$FallbackProxy)
 
     if (Test-HttpReady -Url $ReadyUrl) {
         Write-Host 'AOI shared app-server 已运行。' -ForegroundColor Green
@@ -173,7 +173,7 @@ function Start-SharedStack {
 
     $currentShell = (Get-Process -Id $PID -ErrorAction Stop).Path
     Write-Host 'AOI shared app-server 未运行，正在启动 45789/45790...'
-    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui
+    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy
     if ($LASTEXITCODE -ne 0) {
         throw ('shared-stack.ps1 启动失败，退出代码：' + $LASTEXITCODE)
     }
@@ -242,7 +242,7 @@ try {
     Write-Host '代理端口可连接。' -ForegroundColor Green
 
     Write-Section '确保 AOI shared app-server'
-    Start-SharedStack -ReadyUrl $sharedReadyUrl
+    Start-SharedStack -ReadyUrl $sharedReadyUrl -FallbackProxy $FallbackProxy
 
     Write-Section '设置本次启动环境'
     $env:HTTP_PROXY = $proxy.Http
