@@ -1064,7 +1064,7 @@ export function createPendingTitleJob(threadId, cwd, prompt, answer, sessionMode
 }
 
 export function buildSharedThreadOptions(cwd, model = "") {
-  return { cwd, ...(model ? { model } : {}) };
+  return { cwd, permissions: ":workspace", ...(model ? { model } : {}) };
 }
 
 export function isCompletedTurn(turn) {
@@ -3007,12 +3007,11 @@ export function approvalsReviewer(mode) {
   return mode === "auto" ? "auto_review" : "user";
 }
 
-function turnSandbox(cwd) {
+export function buildSharedTurnPermissionOptions(mode) {
   return {
-    type: "workspaceWrite",
-    writableRoots: [cwd, resolve(cwd, ".git"), resolve(cwd, ".agents"), resolve(cwd, ".codex")],
-    readOnlyAccess: { type: "fullAccess" },
-    networkAccess: false,
+    approvalPolicy: approvalPolicy(),
+    approvalsReviewer: approvalsReviewer(mode),
+    permissions: ":workspace",
   };
 }
 
@@ -4682,9 +4681,7 @@ class BridgeRuntime {
         input: this.#takeImageInputs(event.chatId, event.content),
         additionalContext: this.config.turnAdditionalContext,
         cwd,
-        approvalPolicy: approvalPolicy(),
-        approvalsReviewer: approvalsReviewer(approvalMode),
-        sandboxPolicy: turnSandbox(cwd),
+        ...buildSharedTurnPermissionOptions(approvalMode),
         model,
         effort,
         collaborationMode: buildTurnCollaborationMode(

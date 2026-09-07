@@ -11,6 +11,7 @@ import {
   approvalCardUpdateArgs,
   buildConfig,
   buildSharedThreadOptions,
+  buildSharedTurnPermissionOptions,
   isCompletedTurn,
   buildFeishuPostContent,
   buildApprovalCard,
@@ -1066,14 +1067,21 @@ test("approval settings keep on-request policy and delegate only new turns", () 
   assert.equal(approvalPolicy(), "on-request");
   assert.equal(approvalsReviewer("auto"), "auto_review");
   assert.equal(approvalsReviewer("manual"), "user");
+  assert.deepEqual(buildSharedTurnPermissionOptions("auto"), {
+    approvalPolicy: "on-request", approvalsReviewer: "auto_review", permissions: ":workspace",
+  });
+  assert.deepEqual(buildSharedTurnPermissionOptions("manual"), {
+    approvalPolicy: "on-request", approvalsReviewer: "user", permissions: ":workspace",
+  });
 });
 
-test("shared thread options leave approval and sandbox policy to each turn", () => {
+test("shared thread options use the workspace named permission profile", () => {
   const thread = buildSharedThreadOptions("C:\\work", "gpt-test");
-  assert.deepEqual(thread, { cwd: "C:\\work", model: "gpt-test" });
+  assert.deepEqual(thread, { cwd: "C:\\work", permissions: ":workspace", model: "gpt-test" });
   assert.equal("approvalPolicy" in thread, false);
   assert.equal("approvalsReviewer" in thread, false);
   assert.equal("sandbox" in thread, false);
+  assert.equal("sandboxPolicy" in thread, false);
 });
 
 test("completed turn helper accepts string and structured protocol statuses", () => {
