@@ -143,8 +143,8 @@ function ConvertTo-ReadyUrl {
 function Test-HttpReady {
     param([string]$Url)
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 -ErrorAction Stop
-        return ($response.StatusCode -eq 200)
+        $code = & curl.exe --noproxy '*' --connect-timeout 2 --max-time 3 -s -o NUL -w '%{http_code}' $Url
+        return ($LASTEXITCODE -eq 0 -and $code -eq '200')
     }
     catch { return $false }
 }
@@ -162,17 +162,12 @@ function Wait-HttpReady {
 function Start-SharedStack {
     param([string]$ReadyUrl, [string]$FallbackProxy)
 
-    if (Test-HttpReady -Url $ReadyUrl) {
-        Write-Host 'AOI shared app-server 已运行。' -ForegroundColor Green
-        return
-    }
-
     if (-not (Test-Path -LiteralPath $sharedStackScript)) {
         throw ('缺少 shared stack 脚本：' + $sharedStackScript)
     }
 
     $currentShell = (Get-Process -Id $PID -ErrorAction Stop).Path
-    Write-Host 'AOI shared app-server 未运行，正在启动 45789/45790...'
+    Write-Host '正在检查 AOI 共享服务与完整运行时，必要时启动 45789/45790...'
     & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy
     if ($LASTEXITCODE -ne 0) {
         throw ('shared-stack.ps1 启动失败，退出代码：' + $LASTEXITCODE)
@@ -216,14 +211,9 @@ try {
 
     if ($CheckOnly) {
         Write-Section '共享 App Server 状态'
-        if (Test-HttpReady -Url $sharedReadyUrl) {
-            Write-Host ('已就绪：' + $SharedAppUrl) -ForegroundColor Green
-        }
-        else {
-            Write-Warning ('未就绪：' + $SharedAppUrl)
-        }
-        Write-Host ('CODEX_APP_SERVER_WS_URL(User)=' + [string][Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User'))
-        exit 0
+        $statusShell = (Get-Process -Id $PID -ErrorAction Stop).Path
+        & $statusShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action status -NoGui
+        exit $LASTEXITCODE
     }
 
     $runningChatGpt = @(Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue)

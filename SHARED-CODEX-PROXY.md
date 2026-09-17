@@ -36,7 +36,7 @@ Start-Codex-Shared-Proxy.cmd
 
 1. 检查 Clash / Windows 系统代理。
 2. 检查 AOI shared stack。
-3. 如果 45789 未就绪，调用本仓库 `scripts/shared-stack.ps1 -Action start -NoGui` 启动：
+3. 调用本仓库 `scripts/shared-stack.ps1 -Action start -NoGui`，检查当前运行时并按需启动：
    - 45789 compatibility proxy
    - 45790 real codex app-server
 4. 设置本次 Desktop 进程树：
@@ -47,6 +47,22 @@ Start-Codex-Shared-Proxy.cmd
    - `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789`
 5. 启动 Microsoft Store Codex Desktop。
 6. shared stack 启动失败时不回退到内置 app-server。
+
+### 自动发现与独立运行时
+
+每次运行共享启动器都会检查桌面缓存与 Microsoft Store 安装目录，按主程序修改时间选择完整版本；两者均不可用时查找 VS Code 扩展。必须同时存在且非空的文件包括 `codex.exe`、`codex-code-mode-host.exe`、`codex-command-runner.exe` 和 `codex-windows-sandbox-setup.exe`。
+
+启动前按文件内容生成指纹，将同目录 Codex 程序和动态库复制到 AOI 的 `.runtime/shared/<指纹>/`，校验通过后从副本启动。桌面端更新、清理自己的缓存不会影响该副本。独立目录不提交 Git，旧副本保留以供仍在运行的进程使用。
+
+已有服务正常运行时，启动器检查工具文件并提示发现的不同版本；不自动中断任务。任务结束后停止并重新启动共享服务，即自动采用发现的完整版本。仍使用桌面缓存的既有进程也会提示在下次启动迁移。
+
+只读检查运行时、可用更新和两个健康接口：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\shared-stack.ps1 -Action status -NoGui
+```
+
+自动发现发生在启动或手动状态检查时，不安装后台定时监控。运行时检查发现文件缺失时会明确报错，即使健康接口仍返回成功也不会当作正常复用。
 
 ### 无共享模式
 

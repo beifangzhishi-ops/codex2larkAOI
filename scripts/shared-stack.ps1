@@ -1,6 +1,6 @@
 ﻿param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("start", "stop")]
+  [ValidateSet("start", "stop", "status")]
   [string]$Action,
   [switch]$NoGui,
   [string]$FallbackProxy = "127.0.0.1:7890"
@@ -22,6 +22,8 @@ $backendErr = Join-Path $stateDir "shared-app-server.err.log"
 $proxyOut = Join-Path $stateDir "shared-app-server-proxy.out.log"
 $proxyErr = Join-Path $stateDir "shared-app-server-proxy.err.log"
 $proxyScript = Join-Path $PSScriptRoot "shared-app-server-proxy.js"
+$runtimeScript = Join-Path $PSScriptRoot "shared-runtime.js"
+$runtimeRoot = Join-Path $root ".runtime\shared"
 
 function Show-Error([string]$Message) {
   Write-Host ("[错误] " + $Message) -ForegroundColor Red
@@ -139,8 +141,8 @@ function Get-ListeningPids([int]$Port) {
 
 function Test-Ready([string]$Url) {
   try {
-    $r = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 -ErrorAction Stop
-    return ($r.StatusCode -eq 200)
+    $code = & curl.exe --noproxy "*" --connect-timeout 2 --max-time 3 -s -o NUL -w "%{http_code}" $Url
+    return ($LASTEXITCODE -eq 0 -and $code -eq "200")
   } catch { return $false }
 }
 
@@ -180,26 +182,24 @@ function Stop-Owned([string]$PidPath, [ValidateSet("proxy", "backend", "legacy")
   return $true
 }
 
-function Find-CodexExe {
+function Get-RuntimeCandidates {
+  $primary = @()
+  $fallback = @()
   $desktopRoot = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
-  $desktop = @(
+  $primary += @(
     Get-ChildItem -LiteralPath $desktopRoot -Directory -ErrorAction SilentlyContinue |
       ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "codex.exe") -ErrorAction SilentlyContinue } |
       Where-Object { $_ -and $_.Exists } |
-      Sort-Object LastWriteTime -Descending
+      Select-Object -ExpandProperty FullName
   )
-  if ($desktop.Count -gt 0) { return $desktop[0].FullName }
 
   try {
     $package = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue |
       Sort-Object Version -Descending |
       Select-Object -First 1
     if ($package -and (Test-Path -LiteralPath $package.InstallLocation)) {
-      $storeCodex = @(
-        Get-ChildItem -LiteralPath $package.InstallLocation -Recurse -File -Filter "codex.exe" -ErrorAction SilentlyContinue |
-          Sort-Object LastWriteTime -Descending
-      )
-      if ($storeCodex.Count -gt 0) { return $storeCodex[0].FullName }
+      $storeCodex = Join-Path $package.InstallLocation "app\resources\codex.exe"
+      if (Test-Path -LiteralPath $storeCodex) { $primary = @($storeCodex) + $primary }
     }
   } catch {}
 
@@ -207,9 +207,49 @@ function Find-CodexExe {
   $ext = @(Get-ChildItem -LiteralPath $extRoot -Directory -Filter "openai.chatgpt-*-win32-x64" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
   foreach ($item in $ext) {
     $candidate = Join-Path $item.FullName "bin\windows-x86_64\codex.exe"
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    if (Test-Path -LiteralPath $candidate) { $fallback += $candidate }
   }
-  return $null
+  return @{ primary = @($primary); fallback = @($fallback) }
+}
+
+function Get-RuntimeReport([string]$Mode, [string]$ActiveExecutable = "") {
+  $request = @{ candidates = (Get-RuntimeCandidates); activeExecutable = $ActiveExecutable; runtimeRoot = $runtimeRoot }
+  $savedConsoleEncoding = [Console]::OutputEncoding
+  $savedOutputEncoding = $OutputEncoding
+  try {
+    $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    [Console]::OutputEncoding = $OutputEncoding
+    $result = $request | ConvertTo-Json -Depth 5 -Compress | & node $runtimeScript $Mode
+    if ($LASTEXITCODE -ne 0) { throw "共享运行时检查失败；请查看上方具体原因。" }
+    return ($result | ConvertFrom-Json)
+  } finally {
+    $OutputEncoding = $savedOutputEncoding
+    [Console]::OutputEncoding = $savedConsoleEncoding
+  }
+}
+
+function Show-RuntimeReport($Report) {
+  foreach ($item in $Report.rejected) { Write-Warning ("跳过不完整运行时：" + $item.executable + "；" + $item.reason) }
+  if ($Report.selected) { Write-Host ("自动发现运行时：" + $Report.selected.executable) }
+  else { Write-Warning "未发现完整的新运行时。" }
+  if ($Report.active) {
+    Write-Host ("当前共享运行时：" + $Report.active.executable)
+    if ($Report.active.missing.Count -gt 0) {
+      throw ("当前共享运行时缺少文件：" + ($Report.active.missing -join "、") + "。请在任务结束后停止并重新启动共享服务。")
+    }
+    if ($Report.integrityError) { throw "当前独立运行时内容校验失败，请在任务结束后检查副本目录。" }
+    if (-not $Report.managed) { Write-Warning "当前共享进程使用桌面缓存；下次停止再启动会自动切换到 AOI 独立副本。" }
+    if ($Report.updateAvailable) { Write-Warning "发现不同的完整运行时；当前任务保持运行，下次停止再启动时自动采用发现的版本。" }
+  }
+}
+
+function Show-StackStatus {
+  $backendId = Read-Pid $backendPidFile
+  $backend = if ($backendId) { Get-Process -Id $backendId -ErrorAction SilentlyContinue } else { $null }
+  $activeExecutable = if ($backend -and $backend.ProcessName -eq "codex") { $backend.Path } else { "" }
+  Write-Host ("代理就绪：" + (Test-Ready $publicReady) + "；后端就绪：" + (Test-Ready $backendReady))
+  if (-not $activeExecutable) { Write-Warning "未找到 PID 文件对应的共享 Codex 进程。" }
+  Show-RuntimeReport (Get-RuntimeReport "inspect" $activeExecutable)
 }
 
 function Assert-PortsFree {
@@ -234,8 +274,7 @@ function Start-Stack {
   if ($legacyPid) {
     $legacyInfo = Get-ProcessInfo $legacyPid
     if ($legacyInfo -and $legacyInfo.Process.ProcessName -eq "codex" -and (Is-CodexServer $legacyInfo.CommandLine $publicPort)) {
-      Write-Host "检测到旧版 45789 直连共享 server，正在迁移到 45790 + 代理..."
-      Stop-Owned $backendPidFile "legacy" | Out-Null
+      throw "检测到仍在运行的 45789 直连共享服务，请在任务结束后停止并重新启动，以迁移到独立运行时与兼容代理。"
     }
   }
 
@@ -244,16 +283,23 @@ function Start-Stack {
   $proxyInfo = if ($proxyPid) { Get-ProcessInfo $proxyPid } else { $null }
   $backendInfo = if ($backendPid) { Get-ProcessInfo $backendPid } else { $null }
   if ($proxyInfo -and $backendInfo -and (Is-Proxy $proxyInfo.CommandLine) -and (Is-CodexServer $backendInfo.CommandLine $backendPort) -and (Test-Ready $publicReady) -and (Test-Ready $backendReady)) {
+    Show-RuntimeReport (Get-RuntimeReport "inspect" $backendInfo.Process.Path)
     Write-Host ("共享栈已运行：Desktop/AOI -> " + $publicUrl + " -> " + $backendUrl)
     return
   }
+
+  if ($backendInfo -and $backendInfo.Process.ProcessName -eq "codex") {
+    throw "共享后端仍在运行，但连接或进程归属检查未通过；请先查看 status，任务结束后再停止重启。"
+  }
+
+  $runtime = Get-RuntimeReport "prepare"
+  $codex = $runtime.prepared.executable
+  Write-Host ("使用 AOI 独立运行时：" + $codex)
 
   Stop-Owned $proxyPidFile "proxy" | Out-Null
   Stop-Owned $backendPidFile "backend" | Out-Null
   Assert-PortsFree
 
-  $codex = Find-CodexExe
-  if (-not $codex) { throw "未找到 Codex Desktop / Microsoft Store 包 / VS Code 扩展内置 codex.exe" }
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
   if (-not $node) { throw "未找到 node.exe；AOI 要求 Node.js >= 20" }
 
@@ -292,7 +338,7 @@ function Stop-Stack {
 }
 
 try {
-  if ($Action -eq "start") { Start-Stack } else { Stop-Stack }
+  if ($Action -eq "start") { Start-Stack } elseif ($Action -eq "status") { Show-StackStatus } else { Stop-Stack }
   exit 0
 } catch {
   Show-Error $_.Exception.Message
