@@ -1964,7 +1964,7 @@ export function buildConfig(env) {
 }
 
 async function preflight(config) {
-  await runCommand(config.codexCommand, ["app-server", "--help"]);
+  if (!config.appServerWebSocketUrl) await runCommand(config.codexCommand, ["app-server", "--help"]);
   await runCommand("lark-cli", ["event", "schema", "card.action.trigger"]);
   const { stdout } = await runCommand("lark-cli", ["auth", "status"]);
   const status = JSON.parse(stdout);
@@ -5490,7 +5490,7 @@ export async function main() {
   const runtime = new BridgeRuntime(state, config);
   await runtime.start();
   console.log(`[bridge] root=${config.rootDir}`);
-  console.log(`[bridge] codex=${config.codexCommand}`);
+  if (!config.appServerWebSocketUrl) console.log(`[bridge] codex=${config.codexCommand}`);
   console.log(`[bridge] app-server=${config.appServerWebSocketUrl ? `websocket:${config.appServerWebSocketUrl}` : "stdio"}`);
   console.log(`[bridge] allowed_users=${config.allowedIds.size} full_read=true approval=${config.defaultApprovalMode} sandbox=workspace-write`);
   await startConsumer(state, config, runtime);

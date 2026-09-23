@@ -45,7 +45,7 @@ notepad .env
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
 - `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；本项目统一填 `beta`；
-- `CODEX_COMMAND`：仅用于启动预检的 `codex.exe` 绝对路径；留空时自动发现最新版 VS Code 扩展内置内核（与共享 app-server 一致）；实际连接走 `CODEX_APP_SERVER_WS_URL` 指定的共享 app-server，不要指向已删除的项目内旧版内核；
+- `CODEX_COMMAND`：仅在未设置 `CODEX_APP_SERVER_WS_URL`、使用本地 stdio 模式时指定 `codex.exe`；WebSocket 共享模式下不启动或预检此程序。留空时，本地 stdio 模式自动发现 VS Code 扩展内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_THINK_MODEL`、`CODEX_THINK_EFFORT`：`/think` 快捷命令使用的思考模型和思考强度，默认 `gpt-5.6-sol` / `high`；可通过 `/thinkmodel` 修改项目 `.env`，模型需在 App Server `model/list` 中可用；
 - `CODEX_WORK_MODEL`、`CODEX_WORK_EFFORT`：`/work` 快捷命令使用的执行模型和思考强度，默认 `deepseek-v4-flash` / `max`；可通过 `/workmodel` 修改项目 `.env`，模型需在 App Server `model/list` 中可用；
@@ -83,6 +83,8 @@ npm run check
 共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
 
 AOI 桥接通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server。
+
+桥接日志中的 `app-server=websocket:...` 是实际连接地址；共享后端启动日志中的 `.runtime/shared/<指纹>/codex.exe` 是从桌面端运行时复制的独立副本，来源可查同目录的 `来源.json`。用下方 `status` 命令可同时查看自动发现的桌面端运行时和当前后端运行时。
 
 - `shared-start.cmd`：自动发现桌面缓存或 Store 安装目录中的完整运行时，校验并复制到 `.runtime/shared/<指纹>/` 后启动；找不到完整桌面版本时回退到 VS Code 扩展。
 - `shared-stop.cmd`：双击停止共享 app-server 与兼容代理。
