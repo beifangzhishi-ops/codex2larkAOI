@@ -230,10 +230,10 @@ function Get-RuntimeReport([string]$Mode, [string]$ActiveExecutable = "") {
 
 function Show-RuntimeReport($Report) {
   foreach ($item in $Report.rejected) { Write-Warning ("跳过不完整运行时：" + $item.executable + "；" + $item.reason) }
-  if ($Report.selected) { Write-Host ("自动发现运行时：" + $Report.selected.executable) }
+  if ($Report.selected) { Write-Host ("自动发现的内核来源：" + $Report.selected.executable) }
   else { Write-Warning "未发现完整的新运行时。" }
   if ($Report.active) {
-    Write-Host ("当前共享运行时：" + $Report.active.executable)
+    Write-Host ("当前共享内核路径：" + $Report.active.executable)
     if ($Report.active.missing.Count -gt 0) {
       throw ("当前共享运行时缺少文件：" + ($Report.active.missing -join "、") + "。请在任务结束后停止并重新启动共享服务。")
     }
@@ -294,7 +294,8 @@ function Start-Stack {
 
   $runtime = Get-RuntimeReport "prepare"
   $codex = $runtime.prepared.executable
-  Write-Host ("使用 AOI 独立运行时：" + $codex)
+  Write-Host ("共享内核来源：" + $runtime.prepared.source)
+  Write-Host ("共享内核运行副本：" + $codex)
 
   Stop-Owned $proxyPidFile "proxy" | Out-Null
   Stop-Owned $backendPidFile "backend" | Out-Null

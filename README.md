@@ -86,6 +86,8 @@ AOI 桥接通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server
 
 桥接日志中的 `app-server=websocket:...` 是实际连接地址；共享后端启动日志中的 `.runtime/shared/<指纹>/codex.exe` 是从桌面端运行时复制的独立副本，来源可查同目录的 `来源.json`。用下方 `status` 命令可同时查看自动发现的桌面端运行时和当前后端运行时。
 
+共享启动器分别输出“共享内核来源”和“共享内核运行副本”；前者是桌面端或回退的 VS Code 扩展内核，后者是实际启动的 AOI 本地副本。
+
 - `shared-start.cmd`：自动发现桌面缓存或 Store 安装目录中的完整运行时，校验并复制到 `.runtime/shared/<指纹>/` 后启动；找不到完整桌面版本时回退到 VS Code 扩展。
 - `shared-stop.cmd`：双击停止共享 app-server 与兼容代理。
 - `Start-Codex-Shared-Proxy.cmd`：检查共享服务及配套工具，再给桌面端进程临时设置 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789` 并启动桌面端。
