@@ -14,6 +14,7 @@ import { liteAdaptor } from "mathjax-full/js/adaptors/liteAdaptor.js";
 import { RegisterHTMLHandler } from "mathjax-full/js/handlers/html.js";
 import sharp from "sharp";
 import { CodexAppServer } from "./codex-app-server.js";
+import { ExecutionBudget, TurnDelivery, terminalTurn } from "./turn-delivery.js";
 import {
   createStandaloneCwd,
   ensureStandaloneCwd,
@@ -580,6 +581,7 @@ export function normalizeEvent(value) {
     messageType: String(event?.message_type ?? ""),
     content: normalizeTextContent(event?.content),
     imageKey: extractImageKey(event?.content),
+    ...(event?.parent_id ? { parentMessageId: String(event.parent_id) } : {}),
   };
 }
 
@@ -1728,6 +1730,7 @@ export function formatThreadItem(item, stage = "completed") {
 export function classifyAgentMessage(item) {
   const text = String(item?.text || "").trim();
   if (!item || item.type !== "agentMessage" || !text) return null;
+  if (item.delivery === "async" || item.questions?.length) return { kind: "progress", text };
   if (item.phase === "commentary") return { kind: "progress", text };
   if (item.phase === "final_answer") return { kind: "final", text };
   return { kind: "pending", text };
@@ -1881,6 +1884,8 @@ export function normalizePersistedState(value = {}) {
     modelSettings: value.modelSettings && typeof value.modelSettings === "object" ? value.modelSettings : {},
     pendingTitleJobs: value.pendingTitleJobs && typeof value.pendingTitleJobs === "object" ? value.pendingTitleJobs : {},
     pendingWorkdirQueries: value.pendingWorkdirQueries && typeof value.pendingWorkdirQueries === "object" ? value.pendingWorkdirQueries : {},
+    turnDeliveries: value.turnDeliveries && typeof value.turnDeliveries === "object" ? value.turnDeliveries : {},
+    userInputs: value.userInputs && typeof value.userInputs === "object" ? value.userInputs : {},
     events: Array.isArray(value.events) ? value.events : [],
     markdownDelivery: {
       folderToken: String(markdownDelivery.folderToken || ""),
@@ -2600,7 +2605,7 @@ async function sendApprovalCard(messageId, eventKey, subject, approvalId) {
 }
 
 async function sendInteractiveCard(messageId, eventKey, card) {
-  await runCommand("lark-cli", [
+  return runCommand("lark-cli", [
     "im", "+messages-reply", "--as", "bot", "--message-id", messageId,
     "--msg-type", "interactive", "--content", JSON.stringify(card),
     "--idempotency-key", idempotencyKey(eventKey),
@@ -2626,6 +2631,17 @@ async function updateApprovalCard(event) {
 export async function sendMessageCommon(commonArgs, eventKey, text, config, options = {}, runner = runCommand) {
   const { cwd = ROOT, embedImages = false, promoteLinkedImages = false } = options;
   const consumedImages = [];
+  const messageIds = [];
+  const execute = runner;
+  runner = async (...args) => {
+    const result = await execute(...args);
+    try {
+      const payload = JSON.parse(result?.stdout || "{}");
+      const id = payload.message_id || payload.data?.message_id || payload.data?.message?.message_id;
+      if (id) messageIds.push(id);
+    } catch { /* 非消息响应没有 message_id */ }
+    return result;
+  };
   const cleaned = String(text ?? "").replace(/^::(?:git|code-comment)[^\r\n]*$/gim, "");
   const promoted = promoteLinkedImages ? promoteLocalImageLinks(cleaned, { cwd }) : cleaned;
   const chunks = splitReply(promoted, config.replyChars);
@@ -2669,7 +2685,7 @@ export async function sendMessageCommon(commonArgs, eventKey, text, config, opti
       }
     }
   }
-  return { consumedImages: [...new Set(consumedImages)] };
+  return { consumedImages: [...new Set(consumedImages)], messageIds };
 }
 
 export async function sendReply(messageId, eventKey, text, config, options = {}) {
@@ -3115,15 +3131,22 @@ export class ThreadTaskQueueManager {
   }
 }
 
-class BridgeRuntime {
-  constructor(state, config) {
+export class BridgeRuntime {
+  constructor(state, config, { client, save = saveState, reply = sendReply, card = sendInteractiveCard,
+    updateCard = updateInteractiveCard, deliverFiles, planDelivery, setTimer = setTimeout,
+    clearTimer = clearTimeout, now = Date.now, budgetMs, inputWindowMs = 90_000 } = {}) {
     this.state = state;
     this.config = config;
-    this.client = new CodexAppServer({
+    this.client = client || new CodexAppServer({
       cwd: ROOT,
       command: config.codexCommand,
       websocketUrl: config.appServerWebSocketUrl,
     });
+    Object.assign(this, { persist: () => save(this.state), reply, card, updateCard, fileDelivery: deliverFiles,
+      planDelivery, setTimer, clearTimer, now, budgetMs, inputWindowMs });
+    this.state.turnDeliveries ||= {};
+    this.state.userInputs ||= {};
+    this.inputTimers = new Map();
     this.loadedThreads = new Set();
     this.activeThreads = new Map();
     this.attachedThreads = new Map();
@@ -3131,6 +3154,14 @@ class BridgeRuntime {
     this.chatActiveThreads = new Map();
     this.pendingApprovals = new Map();
     this.pendingUserInputs = new Map();
+    for (const entry of Object.values(this.state.userInputs)) {
+      if (entry.status === "processed") continue;
+      entry.rpcPending = false;
+      entry.submitting = false;
+      const pending = this.pendingUserInputs.get(entry.chatId) || [];
+      pending.push(entry);
+      this.pendingUserInputs.set(entry.chatId, pending);
+    }
     this.pendingImages = new Map();
     this.resumeCandidates = new Map();
     this.pendingCompactions = new Map();
@@ -3141,15 +3172,24 @@ class BridgeRuntime {
     );
     this.titleRuns = new Map();
     this.titleJobsRunning = new Set();
+    this.deliveries = new TurnDelivery(this.state.turnDeliveries, {
+      save: this.persist,
+      isBound: (record) => !record.detached && shouldDeliverThreadOutput(this.state, record.chatId, record.threadId),
+      readThread: (threadId) => this.client.request("thread/read", { threadId, includeTurns: true }),
+      deliver: (record, entry) => this.#deliverResultItem(record, entry),
+      onSnapshot: (record, turn) => this.#recoverTurnItems(record, turn),
+    });
     this.client.on("stderr", (text) => console.error(`[codex] ${text}`));
     this.client.on("notification", (message) => this.#onNotification(message));
     this.client.on("serverRequest", (message) => this.#onServerRequest(message));
     this.client.on("closed", (error) => this.#onClientClosed(error));
+    this.client.on("reconnected", () => { void this.deliveries.recover(); });
   }
 
   async start() {
     await this.client.start();
     await this.#subscribeBoundThreads();
+    await this.deliveries.start();
   }
 
   async #subscribeBoundThreads() {
@@ -3163,8 +3203,14 @@ class BridgeRuntime {
           this.state.workdirs[chatId] = cwd;
           saveState(this.state);
         }
-        await this.client.request("thread/resume", { threadId, ...(cwd ? { cwd } : {}) });
+        const resumed = await this.client.request("thread/resume", { threadId, ...(cwd ? { cwd } : {}) });
         this.loadedThreads.add(threadId);
+        const runningTurn = resumed?.thread?.turns?.findLast((turn) =>
+          turn.status === "inProgress" || turn.status?.type === "inProgress");
+        if (runningTurn && !this.deliveries.find(threadId, runningTurn.id)) {
+          // 首次升级时旧桥接没有交付记录，接入已经运行的线程，接住重启后的最终输出。
+          this.#ensureDesktopMirror(threadId, runningTurn.id);
+        }
         console.log(`[bridge] subscribed bound thread ${threadId} for chat ${chatId}`);
       } catch (error) {
         console.warn(`[bridge] cannot resume bound thread ${threadId} for chat ${chatId}: ${error.message}`);
@@ -3173,6 +3219,9 @@ class BridgeRuntime {
   }
 
   stop() {
+    this.deliveries.stop();
+    for (const timer of this.inputTimers.values()) this.clearTimer(timer);
+    this.inputTimers.clear();
     this.client.stop();
   }
 
@@ -3295,7 +3344,7 @@ class BridgeRuntime {
         "当前未选择会话；未中断后台任务，也没有清除排队消息。", this.config);
       return;
     }
-    this.#cancelDetachedUserInputs(event.chatId, threadId);
+    this.#cancelDetachedUserInputs(event.chatId, "");
     const goal = await this.#getGoal(threadId);
     if (goal?.status === "active") {
       await this.#pauseGoalAndInterrupt(threadId);
@@ -4102,7 +4151,7 @@ class BridgeRuntime {
 
   #pendingUserInput(chatId, inputId = "") {
     const pending = this.pendingUserInputs.get(chatId) || [];
-    return inputId ? pending.find((entry) => entry.inputId === inputId) : pending[0];
+    return inputId ? pending.find((entry) => entry.inputId === inputId) : pending.find((entry) => entry.rpcPending);
   }
 
   #unansweredUserInputQuestion(entry) {
@@ -4113,12 +4162,13 @@ class BridgeRuntime {
   async #renderUserInputCard(event, entry) {
     const card = buildUserInputCard(entry.params, entry.inputId, entry.answers);
     if (event.token && event.operatorId) {
-      await updateInteractiveCard(event, card);
+      await this.updateCard(event, card);
       return;
     }
-    await sendInteractiveCard(event.messageId,
+    const result = await this.card(event.messageId,
       `${event.eventId}-user-input-${entry.inputId}-${this.#unansweredUserInputQuestion(entry)?.id || "next"}`,
       card);
+    this.#rememberPromptMessageIds(entry, result);
   }
 
   async #completeUserInput(event, entry) {
@@ -4126,19 +4176,64 @@ class BridgeRuntime {
     const index = pending.indexOf(entry);
     if (index < 0) return false;
     const answers = entry.answers;
-    this.client.respond(entry.requestId, { answers });
-    pending.splice(index, 1);
-    if (pending.length) this.pendingUserInputs.set(entry.chatId, pending);
-    else this.pendingUserInputs.delete(entry.chatId);
+    if (entry.submitting) return false;
+    entry.submitting = true;
+    this.persist();
+    let late = false;
+    try {
+      if (entry.rpcPending) {
+        this.client.respond(entry.requestId, { answers });
+        this.#releaseUserInput(entry);
+      } else {
+        const input = buildTurnInput((entry.params.questions || []).map((q) =>
+          `问题：${q.question}\n回答：${userInputAnswerValues(answers, q.id).join("、")}`).join("\n\n"));
+        const runtime = findThreadRuntime(this.activeThreads, this.attachedThreads, entry.threadId);
+        let sourceRunning = runtime?.turnId === entry.turnId && !runtime.stopRequested;
+        if (entry.kind === "message" && !sourceRunning) {
+          const result = await this.client.request("thread/read", { threadId: entry.threadId, includeTurns: true });
+          const turn = result?.thread?.turns?.find((candidate) => candidate.id === entry.turnId);
+          sourceRunning = turn?.status === "inProgress" || turn?.status?.type === "inProgress";
+        }
+        if (entry.kind === "message" && sourceRunning) {
+          try {
+            await this.client.request("turn/steer", { threadId: entry.threadId, expectedTurnId: entry.turnId, input });
+          } catch (error) {
+            const result = await this.client.request("thread/read", { threadId: entry.threadId, includeTurns: true });
+            const turn = result?.thread?.turns?.find((candidate) => candidate.id === entry.turnId);
+            if (!terminalTurn(turn)) throw error;
+            late = true;
+          }
+        } else late = true;
+        if (late) {
+          const { selection } = await this.#selectionFor(entry.chatId);
+          const cwd = this.cwdFor(entry.chatId);
+          this.threadQueues.enqueue(entry.threadId, {
+            event: { ...event, chatId: entry.chatId, content: input.map((item) => item.text).join("\n") },
+            snapshot: snapshotTurnSettings({ threadId: entry.threadId, cwd,
+              approvalMode: this.modeFor(entry.chatId), model: selection.entry.model, effort: selection.effort }),
+            cancelRequested: false, startedTurn: false,
+          });
+        }
+      }
+    } catch (error) {
+      entry.submitting = false;
+      this.persist();
+      throw error;
+    }
+    this.#removeUserInput(entry);
+    console.log(`[user-input] submitted thread=${entry.threadId} turn=${entry.turnId} input=${entry.inputId} late=${late}`);
     if (event.token && event.operatorId) {
       try {
-        await updateInteractiveCard(event, buildResolvedUserInputCard(entry.params, answers));
+        await this.updateCard(event, buildResolvedUserInputCard(entry.params, answers));
       } catch (error) {
         console.warn(`[bridge] user input card update failed: ${error.message}`);
       }
     } else {
-      await sendReply(event.messageId, `${event.eventId}-user-input-complete`, "已提交回答，Codex 将继续执行。", this.config);
+      await this.reply(event.messageId, `${event.eventId}-user-input-complete`,
+        late ? "原轮次已结束，已作为新消息继续。" : "已提交回答，Codex 将继续执行。", this.config);
     }
+    if (late && event.token && event.operatorId) await this.reply(event.messageId,
+      `${event.eventId}-user-input-late`, "原轮次已结束，已作为新消息继续。", this.config);
     return true;
   }
 
@@ -4147,18 +4242,19 @@ class BridgeRuntime {
     const options = Array.isArray(question?.options) ? question.options : [];
     const option = options.find((candidate) => String(candidate?.label || "") === answer);
     if (options.length && !option && !question.isOther) {
-      await sendReply(event.messageId, `${event.eventId}-user-input-invalid`,
+      await this.reply(event.messageId, `${event.eventId}-user-input-invalid`,
         "请选择卡片中的一个选项；如果该问题允许自定义答案，也可以直接回复文字。", this.config);
       return true;
     }
     entry.answers[questionId] = { answers: [answer] };
+    this.persist();
     if (!this.#unansweredUserInputQuestion(entry)) {
       await this.#completeUserInput(event, entry);
     } else {
       try {
         await this.#renderUserInputCard(event, entry);
       } catch (error) {
-        await sendReply(event.messageId, `${event.eventId}-user-input-card-error`,
+        await this.reply(event.messageId, `${event.eventId}-user-input-card-error`,
           `已记录当前回答，但下一道问题卡片发送失败：${String(error.message || error).slice(0, 1200)}`, this.config);
       }
     }
@@ -4167,14 +4263,14 @@ class BridgeRuntime {
 
   async #handleUserInputCard(event) {
     const entry = this.#pendingUserInput(event.chatId, event.inputId);
-    if (!entry) {
-      await sendReply(event.messageId, `${event.eventId}-user-input-expired`, "该问题已经处理或已过期。", this.config);
+    if (!entry || entry.submitting || !shouldDeliverThreadOutput(this.state, entry.chatId, entry.threadId)) {
+      await this.reply(event.messageId, `${event.eventId}-user-input-expired`, "该问题已经处理或已过期。", this.config);
       return;
     }
     const question = (Array.isArray(entry.params?.questions) ? entry.params.questions : [])
       .find((candidate) => String(candidate?.id || "") === event.questionId);
     if (!question) {
-      await sendReply(event.messageId, `${event.eventId}-user-input-invalid`, "该问题已经变化，请重新等待新的问题卡片。", this.config);
+      await this.reply(event.messageId, `${event.eventId}-user-input-invalid`, "该问题已经变化，请重新等待新的问题卡片。", this.config);
       return;
     }
     await this.#recordUserInputAnswer(event, entry, question, event.answer);
@@ -4202,8 +4298,12 @@ class BridgeRuntime {
   }
 
   async #handleUserInputText(event) {
-    const entry = this.#pendingUserInput(event.chatId);
+    const entries = this.pendingUserInputs.get(event.chatId) || [];
+    const entry = event.parentMessageId
+      ? entries.find((candidate) => candidate.promptMessageIds?.includes(event.parentMessageId))
+      : this.#pendingUserInput(event.chatId);
     if (!entry) return false;
+    if (entry.submitting || !shouldDeliverThreadOutput(this.state, entry.chatId, entry.threadId)) return false;
     const question = this.#unansweredUserInputQuestion(entry);
     if (!question) return false;
     const options = Array.isArray(question.options) ? question.options : [];
@@ -4212,7 +4312,7 @@ class BridgeRuntime {
     if (numeric && options[Number(numeric[0]) - 1]) answer = String(options[Number(numeric[0]) - 1].label || "");
     const option = options.find((candidate) => String(candidate?.label || "").toLocaleLowerCase() === answer.toLocaleLowerCase());
     if (options.length && !option && !question.isOther) {
-      await sendReply(event.messageId, `${event.eventId}-user-input-help`,
+      await this.reply(event.messageId, `${event.eventId}-user-input-help`,
         `${userInputPromptText(entry.params)}\n\n也可以直接回复选项编号，例如 1。`, this.config);
       return true;
     }
@@ -4496,7 +4596,7 @@ class BridgeRuntime {
     }
   }
 
-  async #deliverFiles(event, files, threadId = "") {
+  async #deliverFiles(event, files, threadId = "", strict = false) {
     for (let index = 0; index < files.length; index += 1) {
       if (threadId && !shouldDeliverThreadOutput(this.state, event.chatId, threadId)) break;
       try {
@@ -4521,6 +4621,7 @@ class BridgeRuntime {
         }
         await sendReply(event.messageId, `${event.eventId}-file-error-${index}`,
           `文件发送失败：${String(error.message || error).slice(0, 1500)}`, this.config);
+        if (strict) throw error;
       }
     }
   }
@@ -4586,7 +4687,7 @@ class BridgeRuntime {
     const { event, snapshot } = task;
     if (task.cancelRequested) {
       if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
-        await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+        await this.reply(event.messageId, `${event.eventId}-cancelled-before-start`,
           "任务已由 `/stop` 在开始前取消。", this.config);
       }
       return;
@@ -4598,7 +4699,7 @@ class BridgeRuntime {
     try {
       if (task.cancelRequested) {
         if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
-          await sendReply(event.messageId, `${event.eventId}-cancelled-before-start`,
+          await this.reply(event.messageId, `${event.eventId}-cancelled-before-start`,
             "任务已由 `/stop` 在开始前取消。", this.config);
         }
         succeeded = true;
@@ -4612,33 +4713,13 @@ class BridgeRuntime {
         saveState(this.state);
       }
       this.#retryPendingTitleJobs();
-      const completed = await this.#runTurn(task);
-      const delivery = extractFileDirectives(completed.answer || "", { cwd: snapshot.cwd, keepMediaLinks: true });
-      if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
-        let consumedImages = [];
-        if (delivery.text) {
-          const sent = await sendReply(event.messageId, `${event.eventId}-final`, delivery.text, this.config, {
-            cwd: snapshot.cwd,
-            embedImages: true,
-          });
-          consumedImages = sent?.consumedImages || [];
-        } else if (!delivery.files.length) {
-          await sendReply(event.messageId, `${event.eventId}-final`, "Codex 未返回文本结果。", this.config);
-        }
-        const consumed = new Set(consumedImages.map((path) => resolve(path)));
-        const remainingFiles = delivery.files.filter(
-          (file) => !(file.kind === "MEDIA" && consumed.has(resolve(file.path))),
-        );
-        await this.#deliverFiles(event, remainingFiles, snapshot.threadId);
-      } else {
-        console.log(`[bridge] suppressed detached thread output thread=${snapshot.threadId} chat=${event.chatId}`);
-      }
+      await this.#runTurn(task);
       succeeded = true;
       this.#retryPendingTitleJobs();
     } catch (error) {
       console.error(error);
       if (shouldDeliverThreadOutput(this.state, event.chatId, snapshot.threadId)) {
-        await sendReply(event.messageId, `${event.eventId}-error`,
+        await this.reply(event.messageId, `${event.eventId}-error`,
           `Codex 执行失败：${String(error.message || error).slice(0, 2000)}`, this.config);
       }
     } finally {
@@ -4650,6 +4731,16 @@ class BridgeRuntime {
   async #runTurn(task) {
     const { event, snapshot } = task;
     const { threadId, cwd, approvalMode, model, effort } = snapshot;
+    // 本地超时/重启不能把后端仍在运行的轮次误当成空闲线程。
+    for (const record of Object.values(this.state.turnDeliveries)) {
+      if (record.threadId !== threadId || record.terminal || record.detached || !(record.timedOut || record.recovering)) continue;
+      while (!record.terminal && !record.detached && !task.cancelRequested) {
+        try { await this.deliveries.reconcile(record); }
+        catch (error) { console.warn(`[delivery] waiting for backend thread=${threadId}: ${error.message}`); }
+        if (!record.terminal && !task.cancelRequested) await new Promise((resolveWait) => this.setTimer(resolveWait, 30_000));
+      }
+    }
+    if (task.cancelRequested) return { answer: "" };
     if (!this.loadedThreads.has(threadId)) {
       await this.client.request("thread/resume", {
         threadId,
@@ -4668,6 +4759,7 @@ class BridgeRuntime {
       chatId: event.chatId, threadId, turnId: "", event, approvalMode, stopRequested: false, interruptSent: false,
       finalMessages: [], progressKeys: new Set(), sendQueue: Promise.resolve(), resolveDone, rejectDone,
       pendingAgent: null,
+      cwd, collaborationMode: this.collaborationModeFor(event.chatId, threadId),
     };
     task.startedTurn = true;
     this.activeThreads.set(threadId, active);
@@ -4689,24 +4781,33 @@ class BridgeRuntime {
         ),
       });
       active.turnId = result.turn.id;
+      this.#registerDelivery(active);
       if (active.stopRequested && !active.interruptSent) {
         active.interruptSent = true;
         await this.client.request("turn/interrupt", { threadId, turnId: active.turnId });
       }
-      const timeout = setTimeout(() => rejectDone(new Error(`Codex turn timed out after ${this.config.timeoutMs} ms`)), this.config.timeoutMs);
+      active.budget = new ExecutionBudget(this.budgetMs ?? this.config.timeoutMs, () => {
+        void this.#handleTurnTimeout(active).catch(rejectDone);
+      }, { now: this.now, setTimer: this.setTimer, clearTimer: this.clearTimer });
+      for (const entry of this.pendingUserInputs.get(event.chatId) || []) {
+        if (entry.threadId === threadId && entry.turnId === active.turnId && entry.rpcPending && entry.blocking) {
+          active.budget.pause(entry.inputId);
+        }
+      }
       try {
         const completion = await done;
         if (completion.status === "failed") throw new Error(completion.error?.message || "Codex turn failed");
         if (completion.status === "interrupted" && !active.finalMessages.length) active.finalMessages.push("操作已停止。");
       } catch (error) {
-        if (active.turnId && this.client.child) {
+        if (active.turnId && !active.timeoutHandled) {
           try { await this.client.request("turn/interrupt", { threadId, turnId: active.turnId }); } catch { /* already finished */ }
         }
         throw error;
       } finally {
-        clearTimeout(timeout);
+        active.budget?.dispose();
       }
       await active.sendQueue;
+      await this.deliveries.flush(this.#registerDelivery(active));
       return { answer: active.finalMessages.join("\n\n").trim() };
     } finally {
       if (this.activeThreads.get(threadId) === active) this.activeThreads.delete(threadId);
@@ -4715,6 +4816,97 @@ class BridgeRuntime {
       if (!remainingThreads?.size) this.chatActiveThreads.delete(event.chatId);
       await this.#clearPendingForTurn(event.chatId, active.turnId);
     }
+  }
+
+  #registerDelivery(active) {
+    return this.deliveries.register({ chatId: active.chatId, threadId: active.threadId, turnId: active.turnId,
+      event: active.event, cwd: active.cwd || this.cwdFor(active.chatId),
+      collaborationMode: active.collaborationMode || this.collaborationModeFor(active.chatId, active.threadId) });
+  }
+
+  #deliveryRuntime(record) {
+    return { ...record, finalMessages: [], progressKeys: new Set(), pendingAgent: record.pendingAgent || null,
+      sendQueue: Promise.resolve(), resolveDone: () => {}, rejectDone: () => {}, deliveryOnly: true };
+  }
+
+  async #deliverResultItem(record, entry) {
+    if (entry.kind === "plan") {
+      const active = this.#deliveryRuntime(record);
+      if (this.planDelivery) return this.planDelivery(record, entry.item);
+      await this.#queuePlanReview(active, entry.item);
+      return;
+    }
+    const { event, cwd, threadId } = record;
+    const key = `${event.eventId}-final-${record.turnId}-${entry.item.id}`;
+    const delivery = extractFileDirectives(entry.item.text || "", { cwd, keepMediaLinks: true });
+    entry.parts ||= { text: false, consumedImages: [], files: {} };
+    if (delivery.text && !entry.parts.text) {
+      const sent = await this.reply(event.messageId, key, delivery.text, this.config, { cwd, embedImages: true });
+      entry.parts.consumedImages = sent?.consumedImages || [];
+      entry.parts.text = true;
+      this.persist();
+    }
+    const consumed = new Set(entry.parts.consumedImages.map((path) => resolve(path)));
+    const files = delivery.files.filter((file) => !(file.kind === "MEDIA" && consumed.has(resolve(file.path))));
+    for (let index = 0; index < files.length; index++) {
+      if (entry.parts.files[index]) continue;
+      if (!shouldDeliverThreadOutput(this.state, record.chatId, threadId)) throw new Error("会话绑定已改变，停止交付。");
+      const fileEvent = { ...event, eventId: `${key}-file-${index}` };
+      if (this.fileDelivery) await this.fileDelivery(fileEvent, [files[index]], threadId);
+      else await this.#deliverFiles(fileEvent, [files[index]], threadId, true);
+      entry.parts.files[index] = true;
+      this.persist();
+    }
+  }
+
+  #captureResult(active, item, kind) {
+    if (active.external) {
+      if (kind === "plan") return this.#queuePlanReview(active, item);
+      return this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, item.text);
+    }
+    const record = this.#registerDelivery(active);
+    if (record.detached) return;
+    void this.deliveries.enqueue(record, item, kind);
+  }
+
+  async #recoverTurnItems(record, turn) {
+    const active = this.#deliveryRuntime(record);
+    let lastPending = null;
+    for (const item of turn.items || []) {
+      if (!terminalTurn(turn)) continue; // 活跃快照可能包含尚未写完的最终文字。
+      if (item.type === "agentMessage" && item.questions?.length) this.#queueAsyncQuestions(active, item);
+      const classified = classifyAgentMessage(item);
+      if (item.type === "plan" && record.collaborationMode === "plan" && item.text?.trim()) {
+        this.#captureResult(active, item, "plan");
+      } else if (classified?.kind === "final") this.#captureResult(active, item, "final");
+      else if (classified?.kind === "pending") lastPending = item;
+      else if (item.type !== "reasoning") lastPending = null;
+    }
+    if (terminalTurn(turn) && lastPending) this.#captureResult(active, lastPending, "final");
+    if (terminalTurn(turn)) this.#releaseInputsForTurn(record.chatId, record.threadId, record.turnId);
+  }
+
+  async #handleTurnTimeout(active) {
+    active.timeoutHandled = true;
+    const record = this.#registerDelivery(active);
+    record.timedOut = true;
+    this.persist();
+    console.warn(`[delivery] timeout-check thread=${active.threadId} turn=${active.turnId}`);
+    let turn;
+    try { turn = await this.deliveries.reconcile(record); }
+    catch (error) { console.warn(`[delivery] timeout read failed: ${error.message}`); }
+    if (terminalTurn(turn)) { active.resolveDone(turn); return; }
+    if (!turn) {
+      active.rejectDone(new Error("未在执行时限内确认轮次结束，正在继续核对后端结果。"));
+      return;
+    }
+    try {
+      await this.client.request("turn/interrupt", { threadId: active.threadId, turnId: active.turnId });
+      active.interruptSent = true;
+      await this.deliveries.reconcile(record);
+    } catch (error) { console.warn(`[delivery] timeout interrupt/reconcile failed: ${error.message}`); }
+    if (record.terminal) active.resolveDone({ status: record.status });
+    else active.rejectDone(new Error("执行超过时限，已请求停止；最终结果将继续核对并补发。"));
   }
 
   #retryPendingTitleJobs() {
@@ -4789,7 +4981,7 @@ class BridgeRuntime {
     active.progressKeys.add(key);
     active.sendQueue = active.sendQueue
       .then(() => shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)
-        ? sendReply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config, {
+        ? this.reply(active.event.messageId, `${active.event.eventId}-${key}`, text, this.config, {
             cwd: this.cwdFor(active.chatId),
             embedImages: true,
             promoteLinkedImages: true,
@@ -4802,6 +4994,10 @@ class BridgeRuntime {
     if (!active?.pendingAgent) return;
     const pending = active.pendingAgent;
     active.pendingAgent = null;
+    if (active.deliveryOnly) {
+      const record = this.deliveries.find(active.threadId, active.turnId);
+      if (record) { delete record.pendingAgent; this.persist(); }
+    }
     const text = formatThreadItem({ type: "agentMessage", phase: "commentary", text: pending.text }, "completed");
     if (text) this.#queueProgress(active, `item-pending-${active.turnId}-${pending.id}`, text);
   }
@@ -4811,12 +5007,20 @@ class BridgeRuntime {
     if (!text) return;
     this.#queuePendingAgent(active);
     active.pendingAgent = { id: String(item?.id || "legacy"), text };
+    if (active.deliveryOnly) {
+      const record = this.deliveries.find(active.threadId, active.turnId);
+      if (record) { record.pendingAgent = active.pendingAgent; this.persist(); }
+    }
   }
 
   #finalizePendingAgent(active, turn) {
     if (!active?.pendingAgent) return;
     const pending = active.pendingAgent;
     active.pendingAgent = null;
+    if (active.deliveryOnly) {
+      const record = this.deliveries.find(active.threadId, active.turnId);
+      if (record) { delete record.pendingAgent; this.persist(); }
+    }
     if (active.external) {
       this.#queueProgress(active, `item-final-${active.turnId}-${pending.id}`,
         isCompletedTurn(turn) ? pending.text : formatThreadItem(
@@ -4826,6 +5030,7 @@ class BridgeRuntime {
     }
     if (isCompletedTurn(turn)) {
       active.finalMessages.push(pending.text);
+      this.#captureResult(active, { id: pending.id, type: "agentMessage", text: pending.text }, "final");
     } else {
       const text = formatThreadItem({ type: "agentMessage", phase: "commentary", text: pending.text }, "completed");
       this.#queueProgress(active, `item-pending-end-${active.turnId}-${pending.id}`, text);
@@ -4972,18 +5177,19 @@ class BridgeRuntime {
   #queuePlanReview(active, item) {
     const planItemId = String(item?.id || "");
     const plan = String(item?.text || "").trim();
-    if (!planItemId || !plan || this.state.planReviews[planItemId]) return;
-    this.state.planReviews[planItemId] = {
+    if (!planItemId || !plan) return Promise.resolve();
+    if (this.state.planReviews[planItemId]?.status !== "pending" && this.state.planReviews[planItemId]) return Promise.resolve();
+    this.state.planReviews[planItemId] ||= {
       chatId: active.chatId,
       threadId: active.threadId,
       plan,
       status: "pending",
       createdAt: Date.now(),
     };
-    saveState(this.state);
+    this.persist();
     active.sendQueue = active.sendQueue.then(async () => {
       if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
-      const split = splitPlanCardImages(plan, { cwd: this.cwdFor(active.chatId) });
+      const split = splitPlanCardImages(plan, { cwd: active.cwd || this.cwdFor(active.chatId) });
       const cleanedPlan = sanitizePlanCardMarkdown(plan);
       const documentTitle = formatPlanDocumentTitle(new Date());
       const documentPath = resolve(tmpdir(), `${documentTitle}.md`);
@@ -5002,7 +5208,7 @@ class BridgeRuntime {
         ? split.text
         : plan.length > this.config.replyChars ? "计划正文已另行发送。" : split.text;
       if (!cloudDocument && plan.length > this.config.replyChars) {
-        await sendReply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
+        await this.reply(active.event.messageId, `${active.event.eventId}-plan-${planItemId}`, plan, this.config);
       }
       const uploadedImages = [];
       for (const image of split.images) {
@@ -5021,9 +5227,9 @@ class BridgeRuntime {
           entry.documentUrl = cloudDocument.documentUrl;
           entry.documentFolderUrl = cloudDocument.folderUrl;
         }
-        saveState(this.state);
+        this.persist();
       }
-      await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
+      await this.card(active.event.messageId, `${active.event.eventId}-plan-review-${planItemId}`,
         buildPlanReviewCard(
           cardPlan,
           planItemId,
@@ -5038,18 +5244,21 @@ class BridgeRuntime {
         const documentLink = review?.documentUrl
           ? `\n\n${markdownDeliveryReply(review.documentTitle || "Codex 计划", review.documentUrl, review.documentFolderUrl)}`
           : "";
-        await sendReply(active.event.messageId, `${active.event.eventId}-plan-fallback-${planItemId}`,
+        await this.reply(active.event.messageId, `${active.event.eventId}-plan-fallback-${planItemId}`,
           `确认卡片发送失败，请直接回复同意或修改意见。\n\n${sanitizePlanCardMarkdown(plan)}${documentLink}`, this.config);
       } catch (fallbackError) {
         console.error(`[bridge] plan review fallback failed: ${fallbackError.message}`);
+        throw fallbackError;
       }
     });
+    return active.sendQueue;
   }
 
   #queueUserInput(active, message) {
     const params = message.params || {};
     const questions = Array.isArray(params.questions) ? params.questions : [];
-    const inputId = randomUUID();
+    const inputId = `rpc-${active.threadId}-${params.turnId || active.turnId}-${params.itemId || message.id}`;
+    if (this.state.userInputs[inputId] || this.deliveries.find(active.threadId, active.turnId)?.answeredInputs?.includes(inputId)) return;
     const entry = {
       inputId,
       chatId: active.chatId,
@@ -5058,21 +5267,106 @@ class BridgeRuntime {
       requestId: message.id,
       params: { ...params, questions },
       answers: {},
+      kind: "rpc", blocking: params.isBlocking !== false, rpcPending: true, promptMessageIds: [],
     };
     const pending = this.pendingUserInputs.get(active.chatId) || [];
     pending.push(entry);
     this.pendingUserInputs.set(active.chatId, pending);
+    this.state.userInputs[inputId] = entry;
+    this.persist();
+    console.log(`[user-input] waiting thread=${active.threadId} turn=${entry.turnId} input=${inputId} blocking=${entry.blocking}`);
+    if (entry.blocking) active.budget?.pause(inputId);
+    else {
+      const timer = this.setTimer(() => {
+        if (!entry.rpcPending) return;
+        try {
+          this.client.respond(entry.requestId, { answers: {} });
+          this.#releaseUserInput(entry);
+          console.log(`[user-input] auto-resolved thread=${entry.threadId} turn=${entry.turnId} input=${inputId}`);
+        } catch (error) { console.warn(`[user-input] auto-resolution failed input=${inputId}: ${error.message}`); }
+      }, this.inputWindowMs);
+      timer?.unref?.();
+      this.inputTimers.set(inputId, timer);
+    }
+    this.#sendUserInputPrompt(active, entry);
+  }
+
+  #queueAsyncQuestions(active, item) {
+    const inputId = `message-${active.threadId}-${active.turnId}-${item.id}`;
+    if (this.state.userInputs[inputId]) return;
+    // 已提交的卡片通过持久化的已处理标记去重。
+    const record = this.deliveries.find(active.threadId, active.turnId);
+    if (record?.answeredInputs?.includes(inputId)) return;
+    const entry = { inputId, chatId: active.chatId, threadId: active.threadId, turnId: active.turnId,
+      kind: "message", blocking: false, rpcPending: false, answers: {}, promptMessageIds: [],
+      params: { questions: item.questions.map((q, index) => ({ id: `${item.id}-${index}`, header: "问题",
+        question: q.title, isOther: true, options: (q.options || []).map((label) => ({ label, description: "" })) })) } };
+    this.state.userInputs[inputId] = entry;
+    const pending = this.pendingUserInputs.get(active.chatId) || [];
+    pending.push(entry);
+    this.pendingUserInputs.set(active.chatId, pending);
+    this.persist();
+    this.#sendUserInputPrompt(active, entry);
+  }
+
+  #sendUserInputPrompt(active, entry) {
+    const { inputId } = entry;
     active.sendQueue = active.sendQueue.then(async () => {
       if (!shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) return;
       try {
-        await sendInteractiveCard(active.event.messageId, `${active.event.eventId}-user-input-${inputId}`,
+        const result = await this.card(active.event.messageId, `${active.event.eventId}-user-input-${inputId}`,
           buildUserInputCard(entry.params, inputId));
+        this.#rememberPromptMessageIds(entry, result);
+        console.log(`[user-input] prompt-sent thread=${entry.threadId} turn=${entry.turnId} input=${inputId}`);
       } catch (error) {
         console.warn(`[bridge] user input card failed; using text fallback: ${error.message}`);
-        await sendReply(active.event.messageId, `${active.event.eventId}-user-input-${inputId}-text`,
+        const result = await this.reply(active.event.messageId, `${active.event.eventId}-user-input-${inputId}-text`,
           userInputPromptText(entry.params), this.config);
+        this.#rememberPromptMessageIds(entry, result);
       }
     }).catch((error) => console.error(`[bridge] user input prompt failed: ${error.message}`));
+  }
+
+  #rememberPromptMessageIds(entry, result) {
+    try {
+      const payload = JSON.parse(result?.stdout || "{}");
+      const id = payload.message_id || payload.data?.message_id || payload.data?.message?.message_id;
+      entry.promptMessageIds.push(...(result?.messageIds || []), ...(id ? [id] : []));
+      entry.promptMessageIds = [...new Set(entry.promptMessageIds)];
+      this.persist();
+    } catch { /* 卡片点击仍可通过 inputId 回答 */ }
+  }
+
+  #releaseUserInput(entry) {
+    entry.rpcPending = false;
+    const timer = this.inputTimers.get(entry.inputId);
+    if (timer != null) this.clearTimer(timer);
+    this.inputTimers.delete(entry.inputId);
+    const active = this.activeThreads.get(entry.threadId);
+    if (active?.turnId === entry.turnId) active.budget?.resume(entry.inputId);
+    this.persist();
+    console.log(`[user-input] released thread=${entry.threadId} turn=${entry.turnId} input=${entry.inputId}`);
+  }
+
+  #releaseInputsForTurn(chatId, threadId, turnId) {
+    for (const entry of this.pendingUserInputs.get(chatId) || []) {
+      if (entry.threadId === threadId && entry.turnId === turnId && entry.rpcPending) this.#releaseUserInput(entry);
+    }
+  }
+
+  #removeUserInput(entry) {
+    this.#releaseUserInput(entry);
+    const pending = (this.pendingUserInputs.get(entry.chatId) || []).filter((item) => item !== entry);
+    if (pending.length) this.pendingUserInputs.set(entry.chatId, pending);
+    else this.pendingUserInputs.delete(entry.chatId);
+    this.state.userInputs[entry.inputId] = { inputId: entry.inputId, chatId: entry.chatId,
+      threadId: entry.threadId, turnId: entry.turnId, status: "processed" };
+    const record = this.deliveries.find(entry.threadId, entry.turnId);
+    if (record) {
+      record.answeredInputs ||= [];
+      if (!record.answeredInputs.includes(entry.inputId)) record.answeredInputs.push(entry.inputId);
+    }
+    this.persist();
   }
 
   #queueApprovalCard(active, key, subject, approvalId) {
@@ -5093,6 +5387,15 @@ class BridgeRuntime {
   #onNotification(message) {
     const params = message.params || {};
     const eventThreadId = params.threadId || params.thread?.id;
+    const eventTurnId = params.turnId || params.turn?.id;
+    if (message.method === "serverRequest/resolved") {
+      for (const entries of this.pendingUserInputs.values()) {
+        for (const entry of entries) {
+          if (entry.threadId === eventThreadId && entry.requestId === params.requestId) this.#releaseUserInput(entry);
+        }
+      }
+      return;
+    }
     const errorMessage = params.error?.message || "";
     const transientError = message.method === "error" && isTransientCodexError(errorMessage);
     const titleRun = this.titleRuns.get(eventThreadId);
@@ -5140,7 +5443,7 @@ class BridgeRuntime {
       this.#ensureDesktopMirror(eventThreadId, params.turnId);
     }
     if (this.activeThreads.has(eventThreadId)) this.#finishDesktopMirror(eventThreadId);
-    const mirror = this.desktopMirrors.get(eventThreadId);
+    const mirror = this.deliveries.find(eventThreadId, eventTurnId) ? null : this.desktopMirrors.get(eventThreadId);
     if (mirror) {
       if (message.method === "item/started" && params.item?.type === "userMessage") {
         this.#handleMirrorUserMessage(mirror, params.item, params.turnId);
@@ -5165,11 +5468,17 @@ class BridgeRuntime {
       }
       return;
     }
-    const active = findThreadRuntime(this.activeThreads, this.attachedThreads, eventThreadId);
+    let active = findThreadRuntime(this.activeThreads, this.attachedThreads, eventThreadId);
+    // 新轮次已经开始时，旧轮次的迟到事件仍归原来的交付上下文。
+    if (!active || (eventTurnId && active.turnId && active.turnId !== eventTurnId)) {
+      const record = this.deliveries.find(eventThreadId, eventTurnId);
+      active = record ? this.#deliveryRuntime(record) : null;
+    }
     if (!active) return;
     if (message.method === "turn/started" && params.turn?.id) {
       active.turnId = params.turn.id;
       active.pendingAgent = null;
+      if (!active.external) this.#registerDelivery(active);
     }
     if (message.method === "item/started") {
       if (params.item?.type && params.item.type !== "userMessage") this.#queuePendingAgent(active);
@@ -5178,6 +5487,7 @@ class BridgeRuntime {
     }
     if (message.method === "item/completed") {
       const item = params.item;
+      if (item?.type === "agentMessage" && item.questions?.length) this.#queueAsyncQuestions(active, item);
       const classified = classifyAgentMessage(item);
       if (classified) {
         if (classified.kind === "progress") {
@@ -5190,6 +5500,7 @@ class BridgeRuntime {
             this.#queueProgress(active, `item-final-${active.turnId}-${item.id}`, classified.text);
           } else {
             active.finalMessages.push(classified.text);
+            this.#captureResult(active, item, "final");
           }
         } else {
           this.#setPendingAgent(active, item);
@@ -5197,8 +5508,8 @@ class BridgeRuntime {
       } else {
         this.#queuePendingAgent(active);
         if (item?.type === "plan" && item.text?.trim() &&
-            this.collaborationModeFor(active.chatId, active.threadId) === "plan") {
-          this.#queuePlanReview(active, item);
+            (active.collaborationMode || this.collaborationModeFor(active.chatId, active.threadId)) === "plan") {
+          this.#captureResult(active, item, "plan");
           return;
         }
         const text = formatThreadItem(item, "completed");
@@ -5207,6 +5518,15 @@ class BridgeRuntime {
     }
     if (message.method === "turn/completed") {
       this.#finalizePendingAgent(active, params.turn || { status: "completed" });
+      this.#releaseInputsForTurn(active.chatId, eventThreadId, eventTurnId || active.turnId);
+      if (!active.external) {
+        const record = this.#registerDelivery(active);
+        this.deliveries.complete(record, params.turn || { status: "completed" });
+        if (!Object.keys(record.items).length) {
+          this.#captureResult(active, { id: `${active.turnId}-empty`, type: "agentMessage",
+            text: params.turn?.status === "interrupted" ? "操作已停止。" : "Codex 未返回文本结果。" }, "final");
+        }
+      }
       if (!active.external) active.resolveDone(params.turn || { status: "completed" });
       if (active.external && this.attachedThreads.get(eventThreadId) === active) {
         this.attachedThreads.delete(eventThreadId);
@@ -5227,9 +5547,14 @@ class BridgeRuntime {
 
   #onServerRequest(message) {
     const params = message.params || {};
-    if (this.desktopMirrors.has(params.threadId) && !this.attachedThreads.has(params.threadId)) return;
+    if (this.desktopMirrors.has(params.threadId) && !this.attachedThreads.has(params.threadId) &&
+        !this.deliveries.find(params.threadId, params.turnId)) return;
     if (message.method === "item/tool/requestUserInput") {
-      const active = this.activeThreads.get(params.threadId) || this.attachedThreads.get(params.threadId);
+      let active = this.activeThreads.get(params.threadId) || this.attachedThreads.get(params.threadId);
+      if (!active || (params.turnId && active.turnId && params.turnId !== active.turnId)) {
+        const record = this.deliveries.find(params.threadId, params.turnId);
+        active = record && !record.detached ? this.#deliveryRuntime(record) : null;
+      }
       if (!active || !shouldDeliverThreadOutput(this.state, active.chatId, active.threadId)) {
         this.client.respond(message.id, { answers: {} });
         return;
@@ -5281,6 +5606,10 @@ class BridgeRuntime {
   }
 
   #cancelDetachedApprovals(chatId, selectedThreadId) {
+    for (const record of Object.values(this.state.turnDeliveries)) {
+      if (record.chatId === chatId && record.threadId !== selectedThreadId) record.detached = true;
+    }
+    this.persist();
     const pending = this.pendingApprovals.get(chatId) || [];
     const remaining = [];
     for (const approval of pending) {
@@ -5303,7 +5632,10 @@ class BridgeRuntime {
         remaining.push(entry);
         continue;
       }
-      try { this.client.respond(entry.requestId, { answers: {} }); } catch { /* request already resolved */ }
+      if (entry.rpcPending) {
+        try { this.client.respond(entry.requestId, { answers: {} }); } catch { /* request already resolved */ }
+      }
+      this.#removeUserInput(entry);
     }
     if (remaining.length) this.pendingUserInputs.set(chatId, remaining);
     else this.pendingUserInputs.delete(chatId);
@@ -5330,21 +5662,14 @@ class BridgeRuntime {
     if (remaining.length) this.pendingApprovals.set(chatId, remaining);
     else this.pendingApprovals.delete(chatId);
     if (!turnId) return;
-    const pendingInputs = this.pendingUserInputs.get(chatId) || [];
-    const remainingInputs = [];
-    for (const entry of pendingInputs) {
-      if (entry.turnId === turnId) {
-        try { this.client.respond(entry.requestId, { answers: {} }); } catch { /* request already resolved */ }
-      } else remainingInputs.push(entry);
-    }
-    if (remainingInputs.length) this.pendingUserInputs.set(chatId, remainingInputs);
-    else this.pendingUserInputs.delete(chatId);
+    // 只有后端明确解除或结束请求时才改变提问状态；本地超时不得清掉晚答入口。
   }
 
   #onClientClosed(error) {
     this.loadedThreads.clear();
     this.attachedThreads.clear();
     this.desktopMirrors.clear();
+    for (const entries of this.pendingUserInputs.values()) for (const entry of entries) this.#releaseUserInput(entry);
     for (const active of this.activeThreads.values()) active.rejectDone(error);
     for (const titleRun of this.titleRuns.values()) titleRun.rejectDone(error);
   }

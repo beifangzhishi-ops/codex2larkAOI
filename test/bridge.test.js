@@ -2394,7 +2394,7 @@ test("sendChatMessage sends new bot messages with idempotency keys", async () =>
   };
   const config = buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_WORKDIR: process.cwd() });
   const result = await sendChatMessage("oc_test", "desktop-user-1", "你好", config, {}, runner);
-  assert.deepEqual(result, { consumedImages: [] });
+  assert.deepEqual(result, { consumedImages: [], messageIds: [] });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "lark-cli");
   assert.ok(calls[0].args.includes("+messages-send"));
