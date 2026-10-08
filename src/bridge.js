@@ -1960,7 +1960,7 @@ export function buildConfig(env) {
     titleEffort: titleEffort || "auto",
     defaultApprovalMode,
     defaultInterjectionMode,
-    timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 1_800_000,
+    timeoutMs: Number(env.CODEX_TIMEOUT_MS) || 259_200_000,
     replyChars: Math.min(Math.max(Number(env.FEISHU_REPLY_CHARS) || 3500, 500), 8000),
     eventCacheSize: Math.min(Math.max(Number(env.EVENT_CACHE_SIZE) || 1000, 100), 10_000),
     temperatureApiUrl: String(env.TEMPERATURE_API_URL || "http://127.0.0.1:8085/data.json").trim() || "http://127.0.0.1:8085/data.json",
