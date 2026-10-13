@@ -2503,14 +2503,6 @@ test("buildConfig validates and exposes approval defaults", () => {
   assert.equal(config.workModel, DEFAULT_WORK_MODEL);
   assert.equal(config.workEffort, DEFAULT_WORK_EFFORT);
   assert.equal(config.temperatureApiUrl, "http://127.0.0.1:8085/data.json");
-  assert.equal("projectInstructions" in config, false);
-  const channelContext = config.turnAdditionalContext["codex2lark.aoi.feishu-channel"];
-  assert.equal(channelContext.kind, "application");
-  assert.match(channelContext.value, /渠道规则仅适用于当前飞书轮次/);
-  assert.doesNotMatch(channelContext.value, /禁止停止、重启或终止 AOI 桥接服务/);
-  assert.doesNotMatch(channelContext.value, /MEDIA:|FILE:|文件交付|交付指令/);
-  assert.match(channelContext.value, /桥接负责 \/new、\/cd、\/resume、\/branch、\/compress、\/model、\/thinkmodel、\/workmodel、\/think、\/work、\/screen、\/temperature/);
-  assert.match(channelContext.value, /用户明确要求管理本项目服务时，使用 start\.cmd 或 stop\.cmd/);
   assert.equal(buildConfig({
     FEISHU_ALLOWED_OPEN_IDS: "ou_test",
     CODEX_WORKDIR: process.cwd(),

@@ -250,7 +250,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 每次更新后的推荐收尾顺序为：运行 `npm run check`，提交该阶段纯文本改动，执行 `stop.cmd --no-pause-on-error`，再执行 `start.cmd --no-pause-on-error`。确认新 PID 存在、两类事件消费者均输出 `[event] ready`，且 `.env` 中 `LARKSUITE_CLI_CONFIG_DIR` 仍指向 AOI 开发槽。不要使用 `lark-cli event stop --all`，否则可能影响其他项目实例。
 
-凭证仍由 `lark-cli` 和 `codex` 自行管理。飞书渠道规则通过 `turn/start.additionalContext` 按轮次注入；项目规则不作为渠道提示词注入，目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
+凭证仍由 `lark-cli` 和 `codex` 自行管理。普通飞书业务轮次直接传递用户输入，不额外注入渠道提示词；会话标题生成使用独立临时线程及专用指令。目标项目的 `AGENTS.md` 由 Codex 按当前工作目录正常加载。
 
 ## GitHub 同步与多机部署
 

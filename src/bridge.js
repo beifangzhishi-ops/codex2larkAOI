@@ -82,18 +82,6 @@ const latexDocument = mathjax.document("", {
   InputJax: new TeX({ packages: AllPackages, maxBuffer: 20_000 }),
   OutputJax: new SVG({ fontCache: "none" }),
 });
-const AOI_FEISHU_TURN_INSTRUCTIONS = [
-  "当前轮次来自 AOI 飞书 App，由 codex2lark 桥接转发。以下渠道规则仅适用于当前飞书轮次，不得根据线程来源、工作目录或历史轮次延伸到 VS Code、Codex CLI 或其他本机会话。",
-  "工作期间发送简短的 commentary 进度；只分享结论、假设、进度和操作意图，不暴露私有思维链。桥接不转发终端、文件修改、MCP 或网页搜索等工具事件，不要为了展示工具而重复命令。",
-  "桥接负责 /new、/cd、/resume、/branch、/compress、/model、/thinkmodel、/workmodel、/think、/work、/screen、/temperature、/status、/stop、审批命令、接收者授权、事件去重和飞书凭证。普通任务不得用 shell 模拟这些聊天控制或编辑桥接状态；用户明确要求管理本项目服务时，使用 start.cmd 或 stop.cmd。",
-  "任何以 / 开头的消息都按命令处理；写错的命令会收到“无效命令”提示，不会进入 Codex。",
-].join("\n");
-const AOI_FEISHU_TURN_CONTEXT = {
-  "codex2lark.aoi.feishu-channel": {
-    kind: "application",
-    value: AOI_FEISHU_TURN_INSTRUCTIONS,
-  },
-};
 
 export function parseDotEnv(text) {
   const values = {};
@@ -1964,7 +1952,6 @@ export function buildConfig(env) {
     replyChars: Math.min(Math.max(Number(env.FEISHU_REPLY_CHARS) || 3500, 500), 8000),
     eventCacheSize: Math.min(Math.max(Number(env.EVENT_CACHE_SIZE) || 1000, 100), 10_000),
     temperatureApiUrl: String(env.TEMPERATURE_API_URL || "http://127.0.0.1:8085/data.json").trim() || "http://127.0.0.1:8085/data.json",
-    turnAdditionalContext: AOI_FEISHU_TURN_CONTEXT,
   };
 }
 
@@ -4771,7 +4758,6 @@ export class BridgeRuntime {
       const result = await this.client.request("turn/start", {
         threadId,
         input: this.#takeImageInputs(event.chatId, event.content),
-        additionalContext: this.config.turnAdditionalContext,
         cwd,
         ...buildSharedTurnPermissionOptions(approvalMode),
         model,
