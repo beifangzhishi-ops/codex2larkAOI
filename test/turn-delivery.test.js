@@ -86,6 +86,65 @@ test("阻塞等待暂停累计额度，多题等待结束后恢复剩余时间",
   await clock.advance(1); assert.equal(expired, 1);
 });
 
+test("旧 stop 不能中断后来的轮次，正常 stop 仍能中断当前轮次", async () => {
+  const f = fixture();
+  f.clock.time = 1_000_000;
+  f.active.event = { ...event, createdAtMs: 999_000 };
+  await f.runtime.route({ ...event, eventId: "old-stop", createdAtMs: 998_000 }, { type: "stop" });
+  assert.equal(f.client.requests.some((r) => r.method === "turn/interrupt"), false);
+  assert.match(f.sent.at(-1)[2], /未受影响/);
+  await f.runtime.route({ ...event, eventId: "valid-stop", createdAtMs: 999_500 }, { type: "stop" });
+  const interrupts = f.client.requests.filter((r) => r.method === "turn/interrupt");
+  assert.equal(interrupts.length, 1);
+  assert.equal(interrupts[0].params.turnId, "turn");
+});
+
+test("消息早发但轮次晚启动时，旧 stop 也不能中断后启动的轮次", async () => {
+  const f = fixture();
+  f.clock.time = 1_000_000;
+  f.active.event = { ...event, createdAtMs: 997_000 };
+  f.active.startedAtMs = 999_500;
+  await f.runtime.route({ ...event, eventId: "old-stop-late-start", createdAtMs: 999_000 }, { type: "stop" });
+  assert.equal(f.client.requests.some((r) => r.method === "turn/interrupt"), false);
+});
+
+test("过期或缺少时间戳的 stop 不会中断任务", async () => {
+  const f = fixture();
+  f.clock.time = 1_000_000;
+  f.active.event = { ...event, createdAtMs: 900_000 };
+  await f.runtime.route({ ...event, eventId: "expired-stop", createdAtMs: 900_000 }, { type: "stop" });
+  await f.runtime.route({ ...event, eventId: "unknown-stop" }, { type: "stop" });
+  assert.equal(f.client.requests.some((r) => r.method === "turn/interrupt"), false);
+  assert.equal(f.sent.filter((args) => /过期/.test(args[2])).length, 2);
+});
+
+test("stop 入队时锁定轮次，队列等待期间切换的任务不受影响", async () => {
+  const f = fixture();
+  f.clock.time = 1_000_000;
+  f.active.event = { ...event, createdAtMs: 900_000 };
+  let release;
+  f.runtime.chatRouteQueues.set("chat", new Promise((resolve) => { release = resolve; }));
+  const stop = f.runtime.route({ ...event, eventId: "queued-stop", createdAtMs: 999_000 }, { type: "stop" });
+  f.runtime.activeThreads.set("thread", { ...f.active, turnId: "new-turn", event: { ...event, createdAtMs: 999_500 } });
+  release();
+  await stop;
+  assert.equal(f.client.requests.some((r) => r.method === "turn/interrupt"), false);
+});
+
+test("stop 只清除指令之前排队的消息", async () => {
+  const f = fixture();
+  f.clock.time = 1_000_000;
+  f.active.event = { ...event, createdAtMs: 900_000 };
+  f.runtime.threadQueues.worker = () => new Promise(() => {});
+  f.runtime.threadQueues.pause("thread");
+  const before = { event: { ...event, eventId: "before", createdAtMs: 998_000 } };
+  const after = { event: { ...event, eventId: "after", createdAtMs: 999_700 } };
+  f.runtime.threadQueues.enqueue("thread", before);
+  f.runtime.threadQueues.enqueue("thread", after);
+  await f.runtime.route({ ...event, eventId: "stop-pending", createdAtMs: 999_000 }, { type: "stop" });
+  assert.equal(f.runtime.threadQueues.current("thread"), after);
+});
+
 test("最终消息在轮次完成前交付，重复事件不重复发送", async () => {
   const f = fixture();
   f.notify("item/completed", { item: final() });

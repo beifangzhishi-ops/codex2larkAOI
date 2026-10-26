@@ -569,6 +569,7 @@ export function normalizeEvent(value) {
     messageType: String(event?.message_type ?? ""),
     content: normalizeTextContent(event?.content),
     imageKey: extractImageKey(event?.content),
+    ...(event?.create_time ? { createdAtMs: Number(event.create_time) } : {}),
     ...(event?.parent_id ? { parentMessageId: String(event.parent_id) } : {}),
   };
 }
@@ -911,6 +912,7 @@ export function parseControlCardAction(value) {
     operatorId: String(value.operator_id || ""),
     token: String(value.token || ""),
     action: actionValue.action,
+    ...(value.timestamp ? { createdAtMs: Number(value.timestamp) } : {}),
     ...(actionValue.mode ? { mode: actionValue.mode } : {}),
     ...(actionValue.target !== undefined ? { target: actionValue.target } : {}),
     ...(actionValue.threadId !== undefined ? { threadId: actionValue.threadId } : {}),
@@ -1200,10 +1202,13 @@ export function mergeRuntimeThreadStatuses(threads, activeThreadIds = new Set())
 }
 
 export function createRunningThreadAttachment(event, threadId, thread = {}) {
+  const latestTurn = selectLatestTurn(thread.turns);
+  const startedAtMs = Number(latestTurn?.startedAt) * 1000;
   return {
     chatId: event.chatId,
     threadId,
-    turnId: selectLatestTurn(thread.turns)?.id || "",
+    turnId: latestTurn?.id || "",
+    ...(Number.isSafeInteger(startedAtMs) && startedAtMs > 0 ? { startedAtMs } : {}),
     event,
     external: true,
     progressKeys: new Set(),
@@ -3071,9 +3076,12 @@ export class ThreadTaskQueueManager {
     this.#drain(threadId, queue);
   }
 
-  clearPending(threadId) {
+  clearPending(threadId, eligible = () => true) {
     const queue = this.queues.get(threadId);
-    return queue ? queue.tasks.splice(0) : [];
+    if (!queue) return [];
+    const cleared = queue.tasks.filter(eligible);
+    queue.tasks = queue.tasks.filter((task) => !eligible(task));
+    return cleared;
   }
 
   current(threadId) {
@@ -3278,8 +3286,15 @@ export class BridgeRuntime {
   }
 
   route(event, command) {
+    // Freeze the target at ingress: chat routing can be waiting behind unrelated work.
+    const selectedThread = command?.type === "stop" ? this.state.sessions[event.chatId] : null;
+    const stopTarget = command?.type === "stop" ? {
+      threadId: selectedThread,
+      active: findThreadRuntime(this.activeThreads, this.attachedThreads, selectedThread),
+      current: this.threadQueues.current(selectedThread),
+    } : null;
     const previous = this.chatRouteQueues.get(event.chatId) || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.#processRoute(event, command));
+    const next = previous.catch(() => {}).then(() => this.#processRoute(event, command, stopTarget));
     this.chatRouteQueues.set(event.chatId, next);
     const cleanup = () => {
       if (this.chatRouteQueues.get(event.chatId) === next) this.chatRouteQueues.delete(event.chatId);
@@ -3295,9 +3310,9 @@ export class BridgeRuntime {
     return next;
   }
 
-  async #handleImmediate(event, command) {
+  async #handleImmediate(event, command, stopTarget) {
     if (command.type === "stop") {
-      await this.#stopSelectedThread(event);
+      await this.#stopSelectedThread(event, stopTarget);
       return;
     }
     if (command.type === "approvalMode") {
@@ -3324,24 +3339,41 @@ export class BridgeRuntime {
     }
   }
 
-  async #stopSelectedThread(event) {
-    const threadId = this.state.sessions[event.chatId];
+  async #stopSelectedThread(event, target) {
+    const issuedAtMs = event.createdAtMs;
+    if (!Number.isSafeInteger(issuedAtMs) || issuedAtMs <= 0 ||
+        issuedAtMs > this.now() + 5_000 || this.now() - issuedAtMs > 60_000) {
+      await this.reply(event.messageId, `${event.eventId}-stop-expired`,
+        "停止指令的时间戳缺失或已过期，未中断任务。需要停止当前任务请重新发送 `/stop`。", this.config);
+      return;
+    }
+    const threadId = target?.threadId;
     if (!threadId) {
-      await sendReply(event.messageId, `${event.eventId}-stop`,
+      await this.reply(event.messageId, `${event.eventId}-stop`,
         "当前未选择会话；未中断后台任务，也没有清除排队消息。", this.config);
+      return;
+    }
+    // An old stop must never affect a turn that started after the command was sent.
+    const activeNow = findThreadRuntime(this.activeThreads, this.attachedThreads, threadId);
+    const active = activeNow === target.active &&
+      (!activeNow || !(Number(activeNow.startedAtMs || activeNow.event?.createdAtMs) > issuedAtMs))
+      ? activeNow : null;
+    const current = this.threadQueues.current(threadId) === target.current ? target.current : null;
+    if ((!active && activeNow) || (current && Number(current.event?.createdAtMs) > issuedAtMs)) {
+      await this.reply(event.messageId, `${event.eventId}-stop-obsolete`,
+        "停止指令针对的轮次已结束；当前任务未受影响。", this.config);
       return;
     }
     this.#cancelDetachedUserInputs(event.chatId, "");
     const goal = await this.#getGoal(threadId);
     if (goal?.status === "active") {
       await this.#pauseGoalAndInterrupt(threadId);
-      await sendReply(event.messageId, `${event.eventId}-stop`, "Goal 已先暂停，再中断当前轮次。", this.config);
+      await this.reply(event.messageId, `${event.eventId}-stop`, "Goal 已先暂停，再中断当前轮次。", this.config);
       return;
     }
     this.threadQueues.pause(threadId);
-    const cleared = this.threadQueues.clearPending(threadId);
-    const current = this.threadQueues.current(threadId);
-    const active = findThreadRuntime(this.activeThreads, this.attachedThreads, threadId);
+    const cleared = this.threadQueues.clearPending(threadId, (task) =>
+      Number.isSafeInteger(task.event?.createdAtMs) && task.event.createdAtMs <= issuedAtMs);
     let clearedCount = cleared.length;
     let interruptText = "当前会话没有活跃任务。";
     try {
@@ -3357,12 +3389,13 @@ export class BridgeRuntime {
             interruptText = `活跃任务中断请求失败：${String(error.message || error).slice(0, 500)}`;
           }
         }
-      } else if (current && !current.startedTurn) {
+      } else if (current && !current.startedTurn &&
+          !(Number(current.event?.createdAtMs) > issuedAtMs)) {
         current.cancelRequested = true;
         clearedCount += 1;
         interruptText = "当前会话没有已启动的 Codex turn。";
       }
-      await Promise.allSettled(cleared.map((task) => sendReply(
+      await Promise.allSettled(cleared.map((task) => this.reply(
         task.event.messageId,
         `${task.event.eventId}-cancelled-before-start`,
         "任务已由 `/stop` 在开始前取消。",
@@ -3371,13 +3404,13 @@ export class BridgeRuntime {
     } finally {
       this.threadQueues.resume(threadId);
     }
-    await sendReply(event.messageId, `${event.eventId}-stop`,
+    await this.reply(event.messageId, `${event.eventId}-stop`,
       `${interruptText}\n已清除 ${clearedCount} 条尚未开始的排队消息。`, this.config);
   }
 
-  async #processRoute(event, command) {
+  async #processRoute(event, command, stopTarget) {
     if (["stop", "approvalMode", "interjectionMode", "approve", "deny"].includes(command?.type)) {
-      await this.#handleImmediate(event, command);
+      await this.#handleImmediate(event, command, stopTarget);
       return;
     }
     if (command?.type === "invalid") {
@@ -4744,6 +4777,7 @@ export class BridgeRuntime {
     void done.catch(() => {});
     const active = {
       chatId: event.chatId, threadId, turnId: "", event, approvalMode, stopRequested: false, interruptSent: false,
+      startedAtMs: this.now(),
       finalMessages: [], progressKeys: new Set(), sendQueue: Promise.resolve(), resolveDone, rejectDone,
       pendingAgent: null,
       cwd, collaborationMode: this.collaborationModeFor(event.chatId, threadId),

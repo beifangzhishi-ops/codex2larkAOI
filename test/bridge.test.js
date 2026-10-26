@@ -202,6 +202,16 @@ test("normalizeEvent still parses raw JSON image content", () => {
   }).imageKey, "img_v3_raw");
 });
 
+test("normalizeEvent preserves the original Feishu message creation time", () => {
+  const normalized = normalizeEvent({
+    event_id: "evt_stop", message_id: "om_stop", chat_id: "chat", chat_type: "p2p",
+    sender_id: "ou_1", message_type: "text", content: "{\"text\":\"/stop\"}",
+    create_time: "1792986200000", timestamp: "1792986300000",
+  });
+  assert.equal(normalized.createdAtMs, 1792986200000);
+  assert.deepEqual(parseControlCommand(normalized.content), { type: "stop" });
+});
+
 test("messageImageDownloadSpec builds bot image resource download args", () => {
   const spec = messageImageDownloadSpec("om_1", "img_v3_x", "evt1.img");
   assert.deepEqual(spec.args, [
@@ -1760,6 +1770,10 @@ test("control card callbacks accept only the supported typed actions", () => {
     operatorId: "ou_1", token: "token_1", action: "resumePage", pageStart: 5,
   });
   assert.equal(parseCardAction(raw).type, "control");
+  assert.equal(parseControlCardAction({
+    ...raw, timestamp: "1792986200000",
+    action_value: JSON.stringify({ kind: "codex2lark_control", action: "stop" }),
+  }).createdAtMs, 1792986200000);
   assert.equal(parseCardAction({
     ...raw,
     action_value: JSON.stringify({ kind: "codex2lark_control", action: "resumePage", pageStart: -5 }),
