@@ -3,8 +3,16 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $entrypoint = Join-Path $PSScriptRoot "ensure-aoi-running.js"
 $taskName = "Codex2Lark-AOI"
-$node = (Get-Command node.exe -ErrorAction Stop).Source
-$user = "$env:USERDOMAIN\$env:USERNAME"
+$profileDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $root))
+if ((Split-Path -Leaf (Split-Path -Parent $profileDir)) -ne "Users") {
+  throw "AOI repository must be under the intended Windows user's profile: $root"
+}
+$userName = Split-Path -Leaf $profileDir
+$user = "$env:COMPUTERNAME\$userName"
+$node = Join-Path $profileDir "AppData\Local\Programs\nodejs\node.exe"
+if (-not (Test-Path -LiteralPath $node)) {
+  $node = (Get-Command node.exe -ErrorAction Stop).Source
+}
 
 if (-not (Test-Path -LiteralPath $entrypoint)) {
   throw "AOI task entrypoint not found: $entrypoint"
