@@ -2,7 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
-import { waitForIdle, launchServiceControl } from "../scripts/restart-when-idle.js";
+import { waitForIdle, launchServiceControl, hasReadyEventConsumers } from "../scripts/restart-when-idle.js";
+
+test("safe restart verifies the actual Feishu consumer ready markers", () => {
+  assert.equal(hasReadyEventConsumers(""), false);
+  assert.equal(hasReadyEventConsumers("[event] ready event_key=im.message.receive_v1"), false);
+  assert.equal(hasReadyEventConsumers("[event] ready event_key=card.action.trigger"), false);
+  assert.equal(hasReadyEventConsumers([
+    "[event] ready event_key=im.message.receive_v1",
+    "[event] ready event_key=card.action.trigger",
+  ].join("\n")), true);
+});
 
 test("safe restart launches the Node service controller without cmd.exe quoting", async () => {
   const calls = [];

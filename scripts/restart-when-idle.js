@@ -7,6 +7,27 @@ import { parseDotEnv, buildConfig } from "../src/bridge.js";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
+export function hasReadyEventConsumers(log) {
+  return ["im.message.receive_v1", "card.action.trigger"]
+    .every((key) => log.includes(`[event] ready event_key=${key}`));
+}
+
+export function verifyCurrentBridge() {
+  const stateDir = resolve(ROOT, ".state");
+  const pidFile = resolve(stateDir, "bridge.pid");
+  const resultFile = resolve(stateDir, "idle-restart-result.json");
+  const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8").trim()) : 0;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("AOI bridge PID is missing");
+  process.kill(pid, 0);
+  const log = readFileSync(resolve(stateDir, "bridge.err.log"), "utf8");
+  if (!hasReadyEventConsumers(log)) throw new Error("AOI event consumers are not ready");
+  writeFileSync(resultFile, JSON.stringify({
+    status: "verified", pid, verification: "Both Feishu event consumers are ready",
+    time: new Date().toISOString(),
+  }, null, 2));
+  console.log(`AOI bridge verified: PID=${pid}; both Feishu event consumers ready`);
+}
+
 export async function waitForIdle({ readThread, getThreads, getPid, expectedPid,
   delay = (ms) => new Promise((done) => setTimeout(done, ms)), now = Date.now,
   maxWaitMs = 12 * 60 * 60 * 1000, intervalMs = 15_000, log = console.log }) {
@@ -70,8 +91,7 @@ export async function main() {
     while (Date.now() < readyDeadline) {
       process.kill(newPid, 0);
       const errors = readFileSync(resolve(stateDir, "bridge.err.log"), "utf8");
-      ready = errors.includes("ready event_key=im.message.receive_v1") &&
-        errors.includes("ready event_key=card.action.trigger") && errors.includes("feishu-websocket: connected");
+      ready = hasReadyEventConsumers(errors);
       if (ready) break;
       await new Promise((done) => setTimeout(done, 500));
     }
@@ -88,5 +108,9 @@ export async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+  if (process.argv[2] === "--verify") {
+    try { verifyCurrentBridge(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+  } else {
+    main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+  }
 }

@@ -14,6 +14,7 @@
 - 6v 的 `Codex2Lark-AOI` 计划任务只负责登录后启动 AOI 桥接，不启动共享 Codex 或桌面端。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
 - 运行态仍有任务时不得直接重启桥接来激活配置，应先确认空闲。
 - 安全重启入口 `scripts/restart-when-idle.js` 必须在连续确认绑定会话空闲后，通过 Node 直接调用 `src/service-control.js` 的 `stop` 和 `launch`，避免依赖 Windows `cmd.exe` 的引号拼接；不得停止共享 App Server。
+- AOI 重启后的飞书事件就绪判断以实际日志的两个 `[event] ready event_key=...` 标记为准。已重启的 AOI 用 `scripts/restart-when-idle.js --verify` 单独验证，不应为了修正验收结果重复重启。
 
 ## /resume 会话列表
 
