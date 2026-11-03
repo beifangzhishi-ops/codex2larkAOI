@@ -163,15 +163,40 @@ function Is-Proxy([string]$Cmd) {
   return ($Cmd -match "shared-app-server-proxy\.js" -and $Cmd -match ":45789" -and $Cmd -match ":45790")
 }
 
-function Stop-Owned([string]$PidPath, [ValidateSet("proxy", "backend", "legacy")][string]$Kind) {
+function Is-OwnedProxy([string]$Cmd) {
+  return (Is-Proxy $Cmd) -and ($Cmd.IndexOf($proxyScript, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Is-OwnedBackend($Info) {
+  if (-not $Info -or $Info.Process.ProcessName -ne "codex" -or -not (Is-CodexServer $Info.CommandLine $backendPort)) { return $false }
+  $exe = [string]$Info.Process.Path
+  $rootPath = [System.IO.Path]::GetFullPath($runtimeRoot)
+  $prefix = $rootPath.TrimEnd([char]92) + [char]92
+  return $exe.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-StackListeners {
+  $publicListeners = @(Get-ListeningPids $publicPort)
+  $backendListeners = @(Get-ListeningPids $backendPort)
+  $validProxy = @($publicListeners | Where-Object {
+    $info = Get-ProcessInfo $_
+    $info -and (Is-Proxy $info.CommandLine)
+  })
+  $validBackend = @($backendListeners | Where-Object {
+    $info = Get-ProcessInfo $_
+    $info -and $info.Process.ProcessName -eq "codex" -and (Is-CodexServer $info.CommandLine $backendPort)
+  })
+  return @{ Proxy = $validProxy; Backend = $validBackend; PublicPids = $publicListeners; BackendPids = $backendListeners }
+}
+
+function Stop-Owned([string]$PidPath, [ValidateSet("proxy", "backend")][string]$Kind) {
   $id = Read-Pid $PidPath
   if (-not $id) { Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue; return $false }
   $info = Get-ProcessInfo $id
   if (-not $info) { Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue; return $false }
   $ok = $false
-  if ($Kind -eq "proxy") { $ok = Is-Proxy $info.CommandLine }
-  elseif ($Kind -eq "backend") { $ok = ($info.Process.ProcessName -eq "codex" -and (Is-CodexServer $info.CommandLine $backendPort)) }
-  else { $ok = ($info.Process.ProcessName -eq "codex" -and (Is-CodexServer $info.CommandLine $publicPort)) }
+  if ($Kind -eq "proxy") { $ok = Is-OwnedProxy $info.CommandLine }
+  else { $ok = Is-OwnedBackend $info }
   if (-not $ok) {
     Write-Host ("[警告] PID 文件指向的进程不符合预期，未停止：PID " + $id) -ForegroundColor Yellow
     return $false
@@ -247,6 +272,18 @@ function Show-StackStatus {
   $backendId = Read-Pid $backendPidFile
   $backend = if ($backendId) { Get-Process -Id $backendId -ErrorAction SilentlyContinue } else { $null }
   $activeExecutable = if ($backend -and $backend.ProcessName -eq "codex") { $backend.Path } else { "" }
+  $listeners = Get-StackListeners
+  if ((Test-Ready $publicReady) -and (Test-Ready $backendReady) -and
+      $listeners.Proxy.Count -gt 0 -and $listeners.Backend.Count -gt 0) {
+    $ownProxy = Read-Pid $proxyPidFile
+    $ownBackend = Read-Pid $backendPidFile
+    $proxyInfo = if ($ownProxy) { Get-ProcessInfo $ownProxy } else { $null }
+    $backendInfo = if ($ownBackend) { Get-ProcessInfo $ownBackend } else { $null }
+    $owned = ($ownProxy -in $listeners.Proxy) -and ($ownBackend -in $listeners.Backend) -and
+      $proxyInfo -and (Is-OwnedProxy $proxyInfo.CommandLine) -and (Is-OwnedBackend $backendInfo)
+    if ($owned) { Write-Host "Shared stack owner: this checkout" }
+    else { Write-Host "Shared stack owner: another launcher; hot attachment allowed" }
+  }
   Write-Host ("代理就绪：" + (Test-Ready $publicReady) + "；后端就绪：" + (Test-Ready $backendReady))
   if (-not $activeExecutable) { Write-Warning "未找到 PID 文件对应的共享 Codex 进程。" }
   Show-RuntimeReport (Get-RuntimeReport "inspect" $activeExecutable)
@@ -268,37 +305,42 @@ function Assert-PortsFree {
 
 function Start-Stack {
   New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-  if (-not (Test-Path -LiteralPath $proxyScript)) { throw ("缺少代理脚本：" + $proxyScript) }
-
-  $legacyPid = Read-Pid $backendPidFile
-  if ($legacyPid) {
-    $legacyInfo = Get-ProcessInfo $legacyPid
-    if ($legacyInfo -and $legacyInfo.Process.ProcessName -eq "codex" -and (Is-CodexServer $legacyInfo.CommandLine $publicPort)) {
-      throw "检测到仍在运行的 45789 直连共享服务，请在任务结束后停止并重新启动，以迁移到独立运行时与兼容代理。"
+  $listeners = Get-StackListeners
+  $healthy = (Test-Ready $publicReady) -and (Test-Ready $backendReady)
+  if ($healthy -and $listeners.Proxy.Count -gt 0 -and $listeners.Backend.Count -gt 0) {
+    $ownProxy = Read-Pid $proxyPidFile
+    $ownBackend = Read-Pid $backendPidFile
+    $proxyInfo = if ($ownProxy) { Get-ProcessInfo $ownProxy } else { $null }
+    $backendInfo = if ($ownBackend) { Get-ProcessInfo $ownBackend } else { $null }
+    if (($ownProxy -in $listeners.Proxy) -and ($ownBackend -in $listeners.Backend) -and
+        $proxyInfo -and (Is-OwnedProxy $proxyInfo.CommandLine) -and (Is-OwnedBackend $backendInfo)) {
+      Write-Host ("Shared stack already owned by this launcher: " + $publicUrl)
+    } else {
+      Write-Host ("Hot-attached to existing shared stack; this launcher is not its owner: " + $publicUrl)
     }
+    return
   }
+  if ($listeners.PublicPids.Count -gt 0 -or $listeners.BackendPids.Count -gt 0) {
+    throw "Shared stack ports are occupied but the full stack is not verified healthy. No process will be replaced."
+  }
+  $oldProxy = Read-Pid $proxyPidFile
+  $oldBackend = Read-Pid $backendPidFile
+  $oldProxyInfo = if ($oldProxy) { Get-ProcessInfo $oldProxy } else { $null }
+  $oldBackendInfo = if ($oldBackend) { Get-ProcessInfo $oldBackend } else { $null }
+  if (($oldProxyInfo -and (Is-OwnedProxy $oldProxyInfo.CommandLine)) -or (Is-OwnedBackend $oldBackendInfo)) {
+    throw "Owned shared stack processes are still alive but unhealthy. Use status and an explicit stop; no automatic replacement."
+  }
+  if (-not (Test-Path -LiteralPath $proxyScript)) { throw ("缺少代理脚本：" + $proxyScript) }
 
   $proxyPid = Read-Pid $proxyPidFile
   $backendPid = Read-Pid $backendPidFile
   $proxyInfo = if ($proxyPid) { Get-ProcessInfo $proxyPid } else { $null }
   $backendInfo = if ($backendPid) { Get-ProcessInfo $backendPid } else { $null }
-  if ($proxyInfo -and $backendInfo -and (Is-Proxy $proxyInfo.CommandLine) -and (Is-CodexServer $backendInfo.CommandLine $backendPort) -and (Test-Ready $publicReady) -and (Test-Ready $backendReady)) {
-    Show-RuntimeReport (Get-RuntimeReport "inspect" $backendInfo.Process.Path)
-    Write-Host ("共享栈已运行：Desktop/AOI -> " + $publicUrl + " -> " + $backendUrl)
-    return
-  }
-
-  if ($backendInfo -and $backendInfo.Process.ProcessName -eq "codex") {
-    throw "共享后端仍在运行，但连接或进程归属检查未通过；请先查看 status，任务结束后再停止重启。"
-  }
-
   $runtime = Get-RuntimeReport "prepare"
   $codex = $runtime.prepared.executable
   Write-Host ("共享内核来源：" + $runtime.prepared.source)
   Write-Host ("共享内核运行副本：" + $codex)
 
-  Stop-Owned $proxyPidFile "proxy" | Out-Null
-  Stop-Owned $backendPidFile "backend" | Out-Null
   Assert-PortsFree
 
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -329,8 +371,11 @@ function Start-Stack {
 }
 
 function Stop-Stack {
-  Stop-Owned $proxyPidFile "proxy" | Out-Null
-  if (-not (Stop-Owned $backendPidFile "backend")) { Stop-Owned $backendPidFile "legacy" | Out-Null }
+  $ownProxyStopped = Stop-Owned $proxyPidFile "proxy"
+  $ownBackendStopped = Stop-Owned $backendPidFile "backend"
+  if (-not $ownProxyStopped -and -not $ownBackendStopped) {
+    Write-Host "No shared processes owned by this launcher; leaving the attached stack running."
+  }
   foreach ($port in @($publicPort, $backendPort)) {
     $ids = @(Get-ListeningPids $port)
     if ($ids.Count -gt 0) { Write-Host ("[警告] 端口 " + $port + " 仍被外部进程监听，未自动停止：" + ($ids -join ",")) -ForegroundColor Yellow }
@@ -339,7 +384,19 @@ function Stop-Stack {
 }
 
 try {
-  if ($Action -eq "start") { Start-Stack } elseif ($Action -eq "status") { Show-StackStatus } else { Stop-Stack }
+  if ($Action -eq "status") { Show-StackStatus; exit 0 }
+  # All checkouts share this lock, preventing simultaneous first starts and stops.
+  $mutex = [System.Threading.Mutex]::new($false, "Global\CodexSharedStack_45789_45790")
+  $locked = $false
+  try {
+    try { $locked = $mutex.WaitOne(60000) }
+    catch [System.Threading.AbandonedMutexException] { $locked = $true }
+    if (-not $locked) { throw "Timed out acquiring the shared stack launcher lock." }
+    if ($Action -eq "start") { Start-Stack } else { Stop-Stack }
+  } finally {
+    if ($locked) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+  }
   exit 0
 } catch {
   Show-Error $_.Exception.Message

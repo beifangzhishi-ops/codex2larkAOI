@@ -267,3 +267,9 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
 
+
+## Cross-project shared launcher ownership
+
+The same shared launcher modules are bundled independently in AOI and CodexMobileUI. On a single machine, whichever checkout starts the 45789 compatibility proxy and 45790 Codex backend owns those processes. A later launcher can hot-attach without a restart after verifying both listener identities and /readyz; its stop command never terminates another checkout's processes. A machine-wide named mutex serializes startup and explicit shutdown across checkouts. A partial or unidentified stack is never forcibly replaced.
+
+AOI may be started and stopped without controlling the shared stack, and the Mobile Gateway owns only its own loopback listener. Explicitly stopping an owned shared stack disconnects all attached consumers; first check running Codex turns. See SHARED-CODEX-PROXY.md for full behavior. Source logic is synchronized across both projects, but neither requires the other repository at runtime. Multi-client approval and live hot-attach validation remain unverified.

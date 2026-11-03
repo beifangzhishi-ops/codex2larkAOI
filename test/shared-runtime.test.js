@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { requiredFiles, readRuntime, selectRuntime, prepareRuntime, runtimeStatus } from "../scripts/shared-runtime.js";
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "共享运行时测试-"));
+  const tempParent = path.resolve(".state", "shared-runtime-tests");
+  fs.mkdirSync(tempParent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(tempParent, "runtime-"));
   t.after(() => {
-    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(path.resolve(root)), tempParent);
     fs.rmSync(root, { recursive: true, force: true });
   });
   const make = (name, version, modified) => {

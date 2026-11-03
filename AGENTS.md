@@ -48,3 +48,10 @@
 - 参考源使用 GitHub 官方仓库 `https://github.com/NousResearch/hermes-agent`，飞书相关实现优先查看 `gateway/platforms/feishu.py` 及仓库内对应测试和文档。
 - 参考时只提取与当前需求直接相关且能验证的设计或实现，不自动复制 Hermes 专属行为、配置、提示词、`SOUL.md` 或工作流。
 - 如果 Hermes 当前实现与本项目的 Codex App Server、`lark-cli` 架构或用户明确需求冲突，以本项目约束和用户需求为准，并说明差异。
+
+## Shared-stack launcher ownership
+- Shared stack launchers in AOI and CodexMobileUI must use the same 45789/45790 proxy/backend contract and the cross-checkout Windows mutex.
+- Only the checkout that launched a process may stop it. Ownership is checked from the checkout-local PID file and the actual command/executable path. A second launcher hot-attaches only after verifying both listeners and readiness.
+- A failed health/identity check must not kill or replace foreign processes. Do not restart the shared stack to restart the Feishu bridge or Mobile Gateway.
+- Before explicit shutdown of an owned shared stack, check for active turns and other attached clients; explicit stop disconnects all clients.
+- When launcher behavior changes, also update CodexMobileUI's standalone source copies and synchronize AOI main to 6v and noha. Do not introduce an AOI runtime dependency into CodexMobileUI.

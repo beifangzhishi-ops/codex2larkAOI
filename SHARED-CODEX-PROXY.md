@@ -82,3 +82,7 @@ Start-Codex-Proxy.cmd
 只想单独运行 Desktop、排除 shared app-server 变量影响时，使用独立 `codex-windows-proxy-launcher`。
 
 切换两种模式前应完全退出当前 Codex Desktop，因为 Desktop 的 App Server 连接选择发生在启动阶段。
+
+## Multi-launcher hot attachment and shutdown
+
+AOI and CodexMobileUI bundle the same shared-stack launcher components. On 6v and noha, one checkout becomes the owner only when it actually starts both processes; a second launcher detects the healthy 45789/45790 stack and attaches without restarting. Process-identity checks and a machine-wide startup mutex prevent duplicate ownership and cross-project shutdown. Status is read-only. Explicit stop from a non-owner leaves the other stack intact; explicit stop by its owner may disconnect Desktop, AOI and mobile clients, so check active work first. An unhealthy or unidentified port owner is reported instead of being killed or adopted. Independent Mobile Gateway lifecycle is documented in the CodexMobileUI repository. The Windows handoff requires live verification.
