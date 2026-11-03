@@ -50,6 +50,8 @@
 - 如果 Hermes 当前实现与本项目的 Codex App Server、`lark-cli` 架构或用户明确需求冲突，以本项目约束和用户需求为准，并说明差异。
 
 ## Shared-stack launcher ownership
+- Desktop is a single frontend per host. All AOI/CodexMobileUI Desktop launchers must use the same cross-checkout Desktop launch mutex spanning process detection, shared-stack attach/start, launch, and verification. An existing Desktop prevents a second launch; never stop an existing Desktop merely to attach another client.
+- Shared App Server must remain running when Desktop closes. Desktop exit does not imply stop; only explicit owner-authorized shared-stop may terminate the shared processes.
 - Shared stack launchers in AOI and CodexMobileUI must use the same 45789/45790 proxy/backend contract and the cross-checkout Windows mutex.
 - Only the checkout that launched a process may stop it. Ownership is checked from the checkout-local PID file and the actual command/executable path. A second launcher hot-attaches only after verifying both listeners and readiness.
 - A failed health/identity check must not kill or replace foreign processes. Do not restart the shared stack to restart the Feishu bridge or Mobile Gateway.

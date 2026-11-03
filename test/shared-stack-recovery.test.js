@@ -7,7 +7,7 @@ const source = fs.readFileSync(new URL("../scripts/shared-stack.ps1", import.met
 const functions = source.slice(source.indexOf('function Show-Error'), source.lastIndexOf('\ntry {'));
 
 for (const owned of [true, false]) {
-  test(`半栈恢复必须核验代理归属 ${owned}`, { skip: process.platform !== "win32" }, () => {
+  test(`半栈恢复必须核验代理归属 ${owned}`, { skip: process.platform !== "win32" }, (t) => {
     const mocks = `
 $proxyPidFile = "proxy.pid"
 $backendPidFile = "backend.pid"
@@ -25,6 +25,11 @@ try { Start-Stack } catch { Write-Output $_.Exception.Message }
 `;
     const command = `& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(functions + mocks).toString("base64")}'))))`;
     const result = spawnSync("pwsh.exe", ["-NoProfile", "-Command", command], { encoding: "utf8", timeout: 20000 });
+    if (result.error && ["EPERM", "EACCES"].includes(result.error.code)) {
+      t.skip("Restricted runner disallows PowerShell child processes; run this integration test on a normal Windows host.");
+      return;
+    }
+    if (result.error) throw result.error;
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, owned ? /已进入后端恢复/ : /No process will be replaced/);
   });

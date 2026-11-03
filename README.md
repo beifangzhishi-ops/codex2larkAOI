@@ -113,6 +113,8 @@ AOI 桥接通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server
 - `shared-stop.cmd`：双击停止共享 app-server 与兼容代理。
 - `Start-Codex-Shared-Proxy.cmd`：检查共享服务及配套工具，再给桌面端进程临时设置 `CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789` 并启动桌面端。
 
+桌面启动器通过跨项目 Windows 全局锁保证两个共享启动器不会同时拉起两个 Desktop；已有 Desktop 时退出且不修改正在运行的服务。共享 App Server 独立于 Desktop，关闭 Desktop 不会关闭 45789/45790，AOI 和手机端仍可继续连接。详见 [SHARED-CODEX-PROXY.md](SHARED-CODEX-PROXY.md)。
+
 2026-09-17：共享服务使用独立完整副本，防止桌面端更新清理缓存后出现 `codex-code-mode-host.exe` 缺失。每次启动都会自动检查可用版本；已有进程发现更新时保留当前任务，下次停止再启动时采用新版。必要工具文件缺失会明确报错。运行时副本不进入 Git；详细说明见 [共享启动器说明](SHARED-CODEX-PROXY.md)。
 
 AOI 可先于共享 Codex Desktop 启动。通过 `CODEX_APP_SERVER_WS_URL` 连接时，即使共享后端尚未启动，AOI 也会先启动飞书监听，然后在后台持续尝试连接；短间隔重连后每 10 秒重试一次。共享后端恢复后自动重订阅绑定线程并补发未交付的结果。后端关闭或更新期间，AOI 不会自行拉起任何独立 app-server；离线期间的新任务会收到共享 Codex 未连接的提示。

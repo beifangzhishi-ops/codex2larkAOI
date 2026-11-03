@@ -86,3 +86,11 @@ Start-Codex-Proxy.cmd
 ## Multi-launcher hot attachment and shutdown
 
 AOI and CodexMobileUI bundle the same shared-stack launcher components. On 6v and noha, one checkout becomes the owner only when it actually starts both processes; a second launcher detects the healthy 45789/45790 stack and attaches without restarting. Process-identity checks and a machine-wide startup mutex prevent duplicate ownership and cross-project shutdown. Status is read-only. Explicit stop from a non-owner leaves the other stack intact; explicit stop by its owner may disconnect Desktop, AOI and mobile clients, so check active work first. An unhealthy or unidentified port owner is reported instead of being killed or adopted. Independent Mobile Gateway lifecycle is documented in the CodexMobileUI repository. The Windows handoff requires live verification.
+
+The Desktop launcher forwards the child shared-stack diagnostic output, including the failing action, line, and exception. A stale PID or a live but unhealthy process must be investigated rather than force-stopped; the launcher does not silently reclaim it.
+
+## Desktop single instance, independent backend
+
+The Desktop entry uses a machine-wide `Global\\CodexSharedDesktop_SingleLaunch` mutex around the ChatGPT.exe process check, shared-stack start/hot-attach, and Desktop launch verification. If any Desktop is already running, the launcher exits with code 20 without stopping it or the shared backend. With a healthy shared stack but no Desktop, the launcher hot-attaches and opens one Desktop; with neither running, it starts the stack and then the Desktop. Existing Desktop with an unhealthy/absent stack is **not** silently reconfigured or restarted.
+
+Closing Desktop leaves the independently started 45789/45790 stack alive for AOI and future mobile clients. Explicit owner-only shared-stop remains necessary to stop those processes; the launcher does not detect client idleness or automatically stop them. This mutex coordinates this project's and CodexMobileUI's launchers, not arbitrary external Desktop launches. Actual packaged Desktop connection and two-launcher race behavior still need live testing.

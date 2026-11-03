@@ -168,9 +168,15 @@ function Start-SharedStack {
 
     $currentShell = (Get-Process -Id $PID -ErrorAction Stop).Path
     Write-Host '正在检查 AOI 共享服务与完整运行时，必要时启动 45789/45790...'
-    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy
-    if ($LASTEXITCODE -ne 0) {
-        throw ('shared-stack.ps1 启动失败，退出代码：' + $LASTEXITCODE)
+    # Forward all child PowerShell streams. Without this, some Windows launch
+    # contexts show only the generic exit code and hide the actual stack error.
+    $details = @(& $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy *>&1)
+    $stackExitCode = $LASTEXITCODE
+    foreach ($entry in $details) {
+        Write-Host ([string]$entry)
+    }
+    if ($stackExitCode -ne 0) {
+        throw ('shared-stack.ps1 启动失败，退出代码：' + $stackExitCode + '；请查看上方 shared-stack 诊断信息')
     }
 
     if (-not (Wait-HttpReady -Url $ReadyUrl -Seconds 35)) {
@@ -216,6 +222,16 @@ try {
         exit $LASTEXITCODE
     }
 
+    # Shared stack remains independent; only Desktop startup is single-instance.
+    # Every launcher checkout takes this machine-wide lock before checking and
+    # starting ChatGPT.exe. Keep it held through startup verification.
+    $desktopMutex = [System.Threading.Mutex]::new($false, 'Global\CodexSharedDesktop_SingleLaunch')
+    $desktopMutexHeld = $false
+    try {
+        try { $desktopMutexHeld = $desktopMutex.WaitOne(90000) }
+        catch [System.Threading.AbandonedMutexException] { $desktopMutexHeld = $true }
+        if (-not $desktopMutexHeld) { throw 'Desktop launch lock timed out; no new Desktop was started.' }
+
     $runningChatGpt = @(Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue)
     if ($runningChatGpt.Count -gt 0) {
         Write-Section '检测到旧 Codex 实例'
@@ -252,6 +268,9 @@ try {
     Write-Host ('已提交启动，初始 PID：' + $launchProcess.Id) -ForegroundColor Green
     Write-Host ('等待 ' + $WaitSeconds + ' 秒，让 Desktop、45789/45790 和网络连接完成初始化……')
     Start-Sleep -Seconds $WaitSeconds
+    if (@(Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue).Count -eq 0) {
+        throw 'ChatGPT.exe did not remain running after launch; shared App Server is untouched.'
+    }
 
     if (-not (Test-HttpReady -Url $sharedReadyUrl)) {
         throw 'Desktop 启动后 shared app-server 健康检查失败。'
@@ -259,6 +278,10 @@ try {
 
     Write-Host ''
     Write-Host ('完成：Codex Desktop -> ' + $SharedAppUrl + '；外网 -> ' + $expectedProxy.Host + ':' + $expectedProxy.Port) -ForegroundColor Green
+    } finally {
+        if ($desktopMutexHeld) { $desktopMutex.ReleaseMutex() }
+        $desktopMutex.Dispose()
+    }
 }
 catch {
     Write-Host ''

@@ -410,6 +410,7 @@ try {
   }
   exit 0
 } catch {
-  Show-Error $_.Exception.Message
+  $failureLine = $_.InvocationInfo.ScriptLineNumber
+  Show-Error ("Action=" + $Action + " line=" + $failureLine + ": " + $_.Exception.Message)
   exit 1
 }
