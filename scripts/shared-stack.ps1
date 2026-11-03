@@ -318,16 +318,22 @@ function Start-Stack {
     } else {
       Write-Host ("Hot-attached to existing shared stack; this launcher is not its owner: " + $publicUrl)
     }
+    $activeBackend = Get-ProcessInfo $listeners.Backend[0]
+    Show-RuntimeReport (Get-RuntimeReport "inspect" $activeBackend.Process.Path)
     return
   }
-  if ($listeners.PublicPids.Count -gt 0 -or $listeners.BackendPids.Count -gt 0) {
+  $proxyPid = Read-Pid $proxyPidFile
+  $proxyInfo = if ($proxyPid) { Get-ProcessInfo $proxyPid } else { $null }
+  $reuseProxy = $listeners.PublicPids.Count -eq 1 -and $proxyPid -in $listeners.Proxy -and
+    $proxyInfo -and (Is-OwnedProxy $proxyInfo.CommandLine) -and $listeners.BackendPids.Count -eq 0
+  if (-not $reuseProxy -and ($listeners.PublicPids.Count -gt 0 -or $listeners.BackendPids.Count -gt 0)) {
     throw "Shared stack ports are occupied but the full stack is not verified healthy. No process will be replaced."
   }
   $oldProxy = Read-Pid $proxyPidFile
   $oldBackend = Read-Pid $backendPidFile
   $oldProxyInfo = if ($oldProxy) { Get-ProcessInfo $oldProxy } else { $null }
   $oldBackendInfo = if ($oldBackend) { Get-ProcessInfo $oldBackend } else { $null }
-  if (($oldProxyInfo -and (Is-OwnedProxy $oldProxyInfo.CommandLine)) -or (Is-OwnedBackend $oldBackendInfo)) {
+  if ((-not $reuseProxy -and $oldProxyInfo -and (Is-OwnedProxy $oldProxyInfo.CommandLine)) -or (Is-OwnedBackend $oldBackendInfo)) {
     throw "Owned shared stack processes are still alive but unhealthy. Use status and an explicit stop; no automatic replacement."
   }
   if (-not (Test-Path -LiteralPath $proxyScript)) { throw ("缺少代理脚本：" + $proxyScript) }
@@ -341,7 +347,7 @@ function Start-Stack {
   Write-Host ("共享内核来源：" + $runtime.prepared.source)
   Write-Host ("共享内核运行副本：" + $codex)
 
-  Assert-PortsFree
+  if (-not $reuseProxy) { Assert-PortsFree }
 
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
   if (-not $node) { throw "未找到 node.exe；AOI 要求 Node.js >= 20" }
@@ -356,12 +362,17 @@ function Start-Stack {
   }
 
   try {
+    if ($reuseProxy) {
+      if (-not (Wait-Ready $publicReady 15)) { throw "恢复后端后代理仍未就绪，请检查代理日志。" }
+      Write-Host "已恢复共享后端，继续使用本仓库原有代理。"
+      return
+    }
     $proxyArgs = @("`"$proxyScript`"", "--listen", $publicUrl, "--backend", $backendUrl)
     $proxy = Start-Process -FilePath $node -ArgumentList $proxyArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $proxyOut -RedirectStandardError $proxyErr -PassThru
     Set-Content -LiteralPath $proxyPidFile -Value ([string]$proxy.Id) -Encoding ascii
     if (-not (Wait-Ready $publicReady 15)) { throw ("兼容代理未就绪，请看 " + $proxyErr) }
   } catch {
-    Stop-Owned $proxyPidFile "proxy" | Out-Null
+    if (-not $reuseProxy) { Stop-Owned $proxyPidFile "proxy" | Out-Null }
     Stop-Owned $backendPidFile "backend" | Out-Null
     throw
   }
