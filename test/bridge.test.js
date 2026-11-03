@@ -56,6 +56,7 @@ import {
   extractUserMessageText,
   extractMathJaxSvg,
   extractReplayMedia,
+  fetchResumeThreadsPage,
   attachmentUploadChannel,
   formatTemperatureReport,
   formatPlanDocumentTitle,
@@ -1209,10 +1210,10 @@ test("queryTemperature fetches data and rejects on HTTP errors", async () => {
 
 test("resume helpers format compact pages and select history without ambiguous title guesses", () => {
   const threads = [
-    { id: "thr_1", name: "Fix tests", cwd: "C:\\work\\one", updatedAt: 1_750_000_000 },
-    { id: "thr_2", preview: "Review API tests", cwd: "C:\\work\\two", createdAt: 1_740_000_000 },
-    { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", updatedAt: 1_730_000_000 },
-    { id: "thr_4", name: "临时问题", cwd: join(standaloneRoot(), "00000000-0000-0000-0000-000000000000"), updatedAt: 1_720_000_000 },
+    { id: "thr_1", name: "Fix tests", cwd: "C:\\work\\one", recencyAt: 1_750_000_000 },
+    { id: "thr_2", preview: "Review API tests", cwd: "C:\\work\\two", recencyAt: 1_740_000_000 },
+    { id: "thr_3", name: "Fix tests follow-up", cwd: "C:\\work\\three", recencyAt: 1_730_000_000 },
+    { id: "thr_4", name: "临时问题", cwd: join(standaloneRoot(), "00000000-0000-0000-0000-000000000000"), recencyAt: 1_720_000_000 },
   ];
   const resumeThreads = threads.map((thread) => thread.id === "thr_4"
     ? { ...thread, cwd: join(standaloneRoot(), "2026-08-14", "00000000-0000-4000-8000-000000000000") } : thread);
@@ -1230,6 +1231,57 @@ test("resume helpers format compact pages and select history without ambiguous t
   assert.match(selectResumeThread(threads, "Fix").error, /多个会话/);
   assert.match(selectResumeThread(threads, "9").error, /超出范围/);
   assert.match(formatResumeThreads([], ""), /没有可恢复/);
+});
+
+test("resume timestamps use activity recency instead of metadata modification time", () => {
+  const thread = {
+    id: "ppt-thread",
+    name: "PPT review",
+    recencyAt: 1_793_695_027,
+    updatedAt: 1_793_701_949,
+  };
+  const expected = new Date(thread.recencyAt * 1000).toLocaleString("zh-CN", { hour12: false });
+  const modified = new Date(thread.updatedAt * 1000).toLocaleString("zh-CN", { hour12: false });
+  const plain = formatResumeThreads([thread]);
+  const card = buildResumeCard([thread]).elements.find((element) => element.tag === "markdown").content;
+  for (const output of [plain, card]) {
+    assert.ok(output.includes(expected));
+    assert.ok(!output.includes(modified));
+  }
+});
+
+test("resume cursor pages use recency sorting and fill unique sessions across duplicate IDs", async () => {
+  const requests = [];
+  const responses = [
+    { data: [{ id: "a" }, { id: "b" }, { id: "b" }, { id: "c" }], nextCursor: "cursor-1" },
+    { data: [{ id: "c" }, { id: "d" }], nextCursor: "cursor-2" },
+    { data: [{ id: "e" }], nextCursor: "cursor-3" },
+    { data: [{ id: "e" }, { id: "f" }], nextCursor: "" },
+  ];
+  const client = {
+    async request(method, params) {
+      requests.push({ method, params });
+      return responses.shift();
+    },
+  };
+  const first = await fetchResumeThreadsPage(client);
+  assert.deepEqual(first.threads.map((thread) => thread.id), ["a", "b", "c", "d", "e"]);
+  assert.equal(first.nextCursor, "cursor-3");
+  assert.deepEqual(requests.slice(0, 3).map(({ params }) => params.limit), [5, 2, 1]);
+  for (const { method, params } of requests) {
+    assert.equal(method, "thread/list");
+    assert.equal(params.sortKey, "recency_at");
+    assert.equal(params.sortDirection, "desc");
+    assert.deepEqual(params.sourceKinds, ["appServer", "cli", "vscode"]);
+  }
+  const next = await fetchResumeThreadsPage(client, first.nextCursor, new Set(first.threads.map((thread) => thread.id)));
+  assert.deepEqual(next.threads.map((thread) => thread.id), ["f"]);
+  assert.equal(next.nextCursor, "");
+});
+
+test("resume pagination rejects repeated backend cursors", async () => {
+  const client = { request: async () => ({ data: [{ id: "a" }], nextCursor: "same" }) };
+  await assert.rejects(fetchResumeThreadsPage(client, "same"), /cursor repeated/);
 });
 
 test("standalone cwd helpers use a local-date UUID workspace and desktop subdirectories", () => {
@@ -1707,7 +1759,7 @@ test("resume cards show five sessions plus only the available page controls", ()
     id: `thr_${index + 1}`,
     name: `Session ${index + 1}`,
     cwd: `C:\\work\\project-${index + 1}`,
-    updatedAt: 1_750_000_000 - index,
+    recencyAt: 1_750_000_000 - index,
     status: [
       { type: "active", activeFlags: [] },
       { type: "idle" },
@@ -1748,7 +1800,7 @@ test("resume cards support cursor pagination without waiting for a total count",
   const threads = Array.from({ length: 5 }, (_, index) => ({
     id: `paged_${index + 1}`,
     name: `Paged ${index + 1}`,
-    updatedAt: 1_750_000_000 - index,
+    recencyAt: 1_750_000_000 - index,
   }));
   const card = buildResumeCard(threads, "", 5, { hasNextPage: true });
   const actions = card.elements.filter((element) => element.tag === "action")

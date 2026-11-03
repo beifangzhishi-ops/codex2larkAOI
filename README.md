@@ -132,6 +132,10 @@ Get-Process codex | Select-Object Id,StartTime,Path
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\shared-stack.ps1 -Action status -NoGui
 ```
 
+## /resume 会话排序
+
+`/resume` 从 Codex App Server 按 `recency_at`（最近会话活动时间）降序读取历史会话，列表显示对应的 `recencyAt`，不使用可能因设置更新或文件写入而变化的 `updatedAt`。列表采用游标分页，每页最多展示 5 个不同会话 ID；遇到当前页或先前页面出现过的会话 ID 时继续读取后续游标补足。
+
 ## 飞书控制
 
 - `/new`：进入无工作区独立对话并创建新 thread；不绑定项目目录、不加载项目 `AGENTS.md`，只可写本会话专属的 `C:\Users\<用户>\Documents\Codex\YYYY-MM-DD\<UUID>` 目录及其 `outputs`、`work` 子目录，本机文件仍可只读访问，生成的文件可正常以本地 Markdown 链接（或兼容的 `FILE:`/`MEDIA:` 指令）交付；日期使用本地日期，UUID 永久保留，不使用标题命名目录；

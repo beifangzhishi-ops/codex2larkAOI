@@ -14,6 +14,11 @@
 - 6v 的 `Codex2Lark-AOI` 计划任务只负责登录后启动 AOI 桥接，不启动共享 Codex 或桌面端。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
 - 运行态仍有任务时不得直接重启桥接来激活配置，应先确认空闲。
 
+## /resume 会话列表
+
+- 历史会话使用 Codex App Server 的 `thread/list`，按 `recency_at` 降序查询，并显示对应的 `recencyAt` 时间，不能用受元数据写入影响的 `updatedAt` 代替。
+- 分页使用 App Server 游标，每页最多五个不同会话；同一会话 ID 在列表及跨页只能出现一次，重复记录须继续翻游标补齐本页。
+
 ## GitHub 同步
 
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。

@@ -843,7 +843,7 @@ function threadLabel(thread) {
 }
 
 function threadTimestamp(thread) {
-  const seconds = Number(thread?.updatedAt || thread?.createdAt || 0);
+  const seconds = Number(thread?.recencyAt || 0);
   if (!Number.isFinite(seconds) || seconds <= 0) return "时间未知";
   return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
 }
@@ -1111,6 +1111,35 @@ export function formatResumeThreads(threads, currentThreadId = "", hasMore = fal
   });
   const next = hasMore ? "\n发送 `/resume next` 再看 5 个。" : "";
   return `历史会话：\n\n${rows.join("\n")}\n\n发送 \`/resume 编号\` 或 \`/resume 标题\` 继续。${next}`;
+}
+
+export async function fetchResumeThreadsPage(client, cursor = "", previousIds = new Set(), pageSize = RESUME_PAGE_SIZE) {
+  const threads = [];
+  const seenIds = new Set(previousIds);
+  const visitedCursors = new Set();
+  let nextCursor = cursor;
+
+  while (threads.length < pageSize) {
+    if (visitedCursors.has(nextCursor)) throw new Error("Codex history cursor repeated");
+    visitedCursors.add(nextCursor);
+    const result = await client.request("thread/list", {
+      ...(nextCursor ? { cursor: nextCursor } : {}),
+      limit: pageSize - threads.length,
+      sortKey: "recency_at",
+      sortDirection: "desc",
+      archived: false,
+      sourceKinds: ["appServer", "cli", "vscode"],
+    });
+    for (const thread of Array.isArray(result?.data) ? result.data : []) {
+      if (!thread?.id || seenIds.has(thread.id)) continue;
+      seenIds.add(thread.id);
+      threads.push(thread);
+      if (threads.length === pageSize) break;
+    }
+    nextCursor = typeof result?.nextCursor === "string" ? result.nextCursor : "";
+    if (!nextCursor) break;
+  }
+  return { threads, nextCursor };
 }
 
 export function resumeThreadStatusLabel(thread) {
@@ -3788,21 +3817,6 @@ export class BridgeRuntime {
     return buildSharedThreadOptions(cwd, model);
   }
 
-  async #listResumeThreads(chatId, cursor = "") {
-    const result = await this.client.request("thread/list", {
-      ...(cursor ? { cursor } : {}),
-      limit: RESUME_PAGE_SIZE,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      archived: false,
-      sourceKinds: ["appServer", "cli", "vscode"],
-    });
-    return {
-      threads: Array.isArray(result?.data) ? result.data : [],
-      nextCursor: typeof result?.nextCursor === "string" ? result.nextCursor : "",
-    };
-  }
-
   async #listModels() {
     const entries = [];
     const modelIds = new Set();
@@ -3839,7 +3853,9 @@ export class BridgeRuntime {
     }
     const cursor = candidates.cursors.get(normalizedStart);
     if (cursor === undefined) throw new Error(`缺少第 ${normalizedStart / pageSize + 1} 页会话游标`);
-    const loaded = await this.#listResumeThreads(candidates.chatId, cursor);
+    const loaded = await fetchResumeThreadsPage(
+      this.client, cursor, new Set(candidates.threads.map((thread) => thread.id)), pageSize,
+    );
     candidates.pages.set(normalizedStart, loaded.threads);
     candidates.threads = [...candidates.pages.entries()]
       .sort(([left], [right]) => left - right)
