@@ -29,12 +29,15 @@ export async function waitForIdle({ readThread, getThreads, getPid, expectedPid,
   throw new Error("等待空闲超过12小时，已取消自动重启；现有服务保持运行。");
 }
 
-function launcher(name) {
+export function launchServiceControl(action, {
+  spawnProcess = spawn, projectRoot = ROOT, nodeExecutable = process.execPath,
+} = {}) {
+  if (!["stop", "launch"].includes(action)) throw new Error(`Unsupported AOI service action: ${action}`);
   return new Promise((done, fail) => {
-    const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c",
-      `""${resolve(ROOT, name)}" --no-pause-on-error"`], { cwd: ROOT, windowsHide: true, stdio: "inherit" });
+    const child = spawnProcess(nodeExecutable, [resolve(projectRoot, "src/service-control.js"), action],
+      { cwd: projectRoot, windowsHide: true, stdio: "inherit" });
     child.once("error", fail);
-    child.once("exit", (code) => code === 0 ? done() : fail(new Error(`${name} 返回 ${code}`)));
+    child.once("exit", (code) => code === 0 ? done() : fail(new Error(`AOI ${action} 返回 ${code}`)));
   });
 }
 
@@ -55,10 +58,10 @@ export async function main() {
       readThread: (threadId) => client.request("thread/read", { threadId }) });
     client.stop();
     if (getPid() !== oldPid) throw new Error("AOI PID 已变化，取消重启。");
-    console.log(`空闲已确认，通过 AOI stop.cmd 停止旧进程 ${oldPid}。`);
-    await launcher("stop.cmd");
+    console.log(`空闲已确认，停止 AOI 旧进程 ${oldPid}。`);
+    await launchServiceControl("stop");
     if (existsSync(pidFile)) throw new Error("旧 PID 文件仍在，停止后续启动并保留排查日志。");
-    await launcher("start.cmd");
+    await launchServiceControl("launch");
     const newPid = getPid();
     if (!newPid || newPid === oldPid) throw new Error("未取得新的 AOI PID。");
     process.kill(newPid, 0);

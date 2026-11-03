@@ -13,6 +13,7 @@
 - 配置共享 WebSocket 时，AOI 应在后端缺席时仍启动飞书监听，后台持续重连，不得自动启动独立 App Server。共享服务恢复时自动恢复订阅及交付；主动停止后不再重连。
 - 6v 的 `Codex2Lark-AOI` 计划任务只负责登录后启动 AOI 桥接，不启动共享 Codex 或桌面端。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
 - 运行态仍有任务时不得直接重启桥接来激活配置，应先确认空闲。
+- 安全重启入口 `scripts/restart-when-idle.js` 必须在连续确认绑定会话空闲后，通过 Node 直接调用 `src/service-control.js` 的 `stop` 和 `launch`，避免依赖 Windows `cmd.exe` 的引号拼接；不得停止共享 App Server。
 
 ## /resume 会话列表
 

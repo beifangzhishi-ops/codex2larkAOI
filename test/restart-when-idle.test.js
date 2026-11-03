@@ -1,6 +1,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { waitForIdle } from "../scripts/restart-when-idle.js";
+import { EventEmitter } from "node:events";
+import { resolve } from "node:path";
+import { waitForIdle, launchServiceControl } from "../scripts/restart-when-idle.js";
+
+test("safe restart launches the Node service controller without cmd.exe quoting", async () => {
+  const calls = [];
+  const root = resolve("test project with spaces");
+  const node = resolve("node executable");
+  const spawnProcess = (exe, args, options) => {
+    calls.push({ exe, args, options });
+    const child = new EventEmitter();
+    queueMicrotask(() => child.emit("exit", 0));
+    return child;
+  };
+  for (const action of ["stop", "launch"]) {
+    await launchServiceControl(action, { spawnProcess, projectRoot: root, nodeExecutable: node });
+  }
+  assert.deepEqual(calls.map(({ exe, args, options }) => ({
+    exe, args, cwd: options.cwd, windowsHide: options.windowsHide,
+  })), ["stop", "launch"].map((action) => ({
+    exe: node, args: [resolve(root, "src/service-control.js"), action],
+    cwd: root, windowsHide: true,
+  })));
+  assert.throws(() => launchServiceControl("start.cmd"), /Unsupported AOI service action/);
+});
+
+test("safe restart rejects a failed service-control child", async () => {
+  await assert.rejects(launchServiceControl("stop", { spawnProcess: () => {
+    const child = new EventEmitter();
+    queueMicrotask(() => child.emit("exit", 1));
+    return child;
+  } }), /AOI stop 返回 1/);
+});
 
 test("仅连续两次确认全部绑定线程空闲后允许重启", async () => {
   let time = 0, checks = 0;
