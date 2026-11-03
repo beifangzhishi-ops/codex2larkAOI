@@ -96,10 +96,10 @@ export async function main() {
       await new Promise((done) => setTimeout(done, 500));
     }
     if (!ready) {
-      throw new Error("AOI 已启动，但事件消费者/飞书连接验证尚未通过，请检查运行日志。");
+      throw new Error("AOI 已启动，但两个飞书事件消费者尚未全部就绪，请检查运行日志。");
     }
     writeFileSync(resultFile, JSON.stringify({ 状态: "已完成", 旧PID: oldPid, 新PID: newPid,
-      验证: "两个事件消费者就绪，飞书连接成功，共享事件总线未停止", 时间: new Date().toISOString() }, null, 2));
+      验证: "两个飞书事件消费者就绪，共享事件总线未停止", 时间: new Date().toISOString() }, null, 2));
     console.log(`AOI 已完成空闲重启并验证：${oldPid} -> ${newPid}；共享事件总线未停止。`);
   } catch (error) {
     writeFileSync(resultFile, JSON.stringify({ 状态: "未完成", 原因: error.message, 旧PID: oldPid, 时间: new Date().toISOString() }, null, 2));
