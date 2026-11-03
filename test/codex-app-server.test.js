@@ -366,24 +366,56 @@ test("intentional stop does not reconnect", async () => {
   assert.equal(FakeWebSocket.instances.length, 1);
 });
 
-test("reconnect exhaustion emits closed only after all retries fail", async () => {
-  FakeWebSocket.openPlan = [true, false, false];
+test("shared websocket keeps retrying after initial failure until Desktop starts", async () => {
+  FakeWebSocket.openPlan = [false, false, false, true];
   const client = new CodexAppServer({
     websocketUrl: "ws://127.0.0.1:45789",
     reconnectDelaysMs: [0, 0],
+    reconnectIntervalMs: 1,
+    requestTimeoutMs: 1000,
+  });
+  const events = [];
+  client.on("closed", () => events.push("closed"));
+  client.on("reconnected", () => events.push("reconnected"));
+  const recovered = once(client, "reconnected");
+  await assert.rejects(client.start(), /websocket/);
+  await assert.rejects(client.request("model/list"), /正在等待自动重连/);
+  await recovered;
+  assert.deepEqual(events, ["closed", "reconnected"]);
+  assert.equal(FakeWebSocket.instances.length, 4);
+  assert.deepEqual(await client.request("model/list"), { data: [] });
+  client.stop();
+});
+
+test("after shared backend disappears, retry continues without repeated close events", async () => {
+  FakeWebSocket.openPlan = [true, false, false, false, true];
+  const client = new CodexAppServer({
+    websocketUrl: "ws://127.0.0.1:45789",
+    reconnectDelaysMs: [0, 0],
+    reconnectIntervalMs: 1,
     requestTimeoutMs: 1000,
   });
   await client.start();
-  let closedError;
-  const closed = new Promise((resolve) => {
-    client.once("closed", (error) => {
-      closedError = error;
-      resolve();
-    });
-  });
+  let closed = 0;
+  client.on("closed", () => { closed += 1; });
+  const recovered = once(client, "reconnected");
   FakeWebSocket.instances[0].serverClose();
-  await closed;
+  await recovered;
+  assert.equal(closed, 1);
+  assert.equal(FakeWebSocket.instances.length, 5);
+  client.stop();
+});
 
-  assert.equal(FakeWebSocket.instances.length, 3);
-  assert.match(closedError.message, /reconnect exhausted/i);
+test("stopping during shared websocket retry cancels pending retry timer", async () => {
+  FakeWebSocket.openPlan = [false];
+  const client = new CodexAppServer({
+    websocketUrl: "ws://127.0.0.1:45789",
+    reconnectDelaysMs: [50],
+    reconnectIntervalMs: 50,
+    requestTimeoutMs: 1000,
+  });
+  await assert.rejects(client.start(), /websocket/);
+  client.stop();
+  await sleep(70);
+  assert.equal(FakeWebSocket.instances.length, 1);
 });

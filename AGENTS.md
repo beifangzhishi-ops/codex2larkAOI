@@ -10,12 +10,14 @@
 
 - `/stop` 只允许操作发出时绑定的会话与已有任务，校验原始飞书时间，禁止过期指令误中断随后启动的新轮次，也不能清除其后排队的消息。
 - AOI 运行配置以各自 `.env` 为准；单轮执行超时统一设置为 259200000 毫秒（三天），不要只修改代码默认值。
+- 配置共享 WebSocket 时，AOI 应在后端缺席时仍启动飞书监听，后台持续重连，不得自动启动独立 App Server。共享服务恢复时自动恢复订阅及交付；主动停止后不再重连。
+- 6v 的 `Codex2Lark-AOI` 计划任务只负责登录后启动 AOI 桥接，不启动共享 Codex 或桌面端。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
 - 运行态仍有任务时不得直接重启桥接来激活配置，应先确认空闲。
 
 ## GitHub 同步
 
 - 远程项目地址：GitHub 仓库页面 `https://github.com/beifangzhishi-ops/codex2larkAOI`；Git 推送地址 `https://github.com/beifangzhishi-ops/codex2larkAOI.git`（本仓库远程名为 `origin`）。
-- 仓库只维护 `main` 一个长期/工作分支，不创建或维护 `beta`、feature/fix 等其他远程分支。
+- 仓库只维护 `main` 一个长期/工作分支，不创建或维护其他远程分支。
 - 所有机器和自动化开始工作前先同步 `origin/main`；开发和验证通过后直接提交并推送到 `origin/main`。
 - 推送前必须运行 `npm run check`；如果当前环境无法运行，必须明确说明原因和未验证范围。
 - 禁止 force push 覆盖其他机器的新提交。推送被拒绝时，先重新同步 `origin/main`，解决冲突并重新验证。

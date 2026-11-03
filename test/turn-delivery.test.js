@@ -339,3 +339,27 @@ test("首次升级订阅旧桥接运行轮次，接住重启后的最终事件",
   assert.equal(f.runtime.desktopMirrors.get("thread")?.turnId, "turn");
   f.runtime.stop();
 });
+
+test("共享 Codex 未启动时 AOI 仍初始化，连接恢复后订阅和交付只启动一次", async () => {
+  const f = fixture();
+  f.runtime.loadedThreads.clear();
+  f.runtime.config.appServerWebSocketUrl = "ws://127.0.0.1:45789";
+  f.client.start = async () => { throw new Error("shared Codex offline"); };
+
+  await f.runtime.start();
+  await settle();
+  assert.equal(f.client.requests.length, 0);
+  assert.equal(f.runtime.deliveries.timer, undefined);
+
+  f.client.emit("reconnected");
+  await settle();
+  assert.equal(f.client.requests.filter((entry) => entry.method === "thread/resume").length, 1);
+  assert.notEqual(f.runtime.deliveries.timer, undefined);
+  const deliveryTimer = f.runtime.deliveries.timer;
+
+  f.client.emit("reconnected");
+  await settle();
+  assert.equal(f.runtime.deliveries.timer, deliveryTimer);
+  assert.equal(f.client.requests.filter((entry) => entry.method === "thread/resume").length, 1);
+  f.runtime.stop();
+});

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import readline from "node:readline";
 
 const DEFAULT_RECONNECT_DELAYS_MS = Object.freeze([250, 500, 1_000, 2_000, 4_000]);
+const DEFAULT_RECONNECT_INTERVAL_MS = 10_000;
 
 export class CodexAppServer extends EventEmitter {
   constructor({
@@ -12,6 +13,7 @@ export class CodexAppServer extends EventEmitter {
     websocketUrl = "",
     requestTimeoutMs = 60_000,
     reconnectDelaysMs = DEFAULT_RECONNECT_DELAYS_MS,
+    reconnectIntervalMs = DEFAULT_RECONNECT_INTERVAL_MS,
   } = {}) {
     super();
     this.cwd = cwd;
@@ -22,6 +24,7 @@ export class CodexAppServer extends EventEmitter {
     this.reconnectDelaysMs = Array.isArray(reconnectDelaysMs) && reconnectDelaysMs.length
       ? reconnectDelaysMs.map((value) => Math.max(0, Number(value) || 0))
       : [...DEFAULT_RECONNECT_DELAYS_MS];
+    this.reconnectIntervalMs = Math.max(1, Number(reconnectIntervalMs) || DEFAULT_RECONNECT_INTERVAL_MS);
     this.nextId = 1;
     this.pending = new Map();
     this.child = null;
@@ -29,6 +32,7 @@ export class CodexAppServer extends EventEmitter {
     this.startPromise = null;
     this.reconnectPromise = null;
     this.stopping = false;
+    this.cancelReconnectWait = null;
 
     // WebSocket subscriptions are connection-scoped. These records let us rejoin the
     // same threads after a transport reconnect without requiring a user /resume.
@@ -49,6 +53,11 @@ export class CodexAppServer extends EventEmitter {
     this.startPromise = this.#start();
     try {
       await this.startPromise;
+    } catch (error) {
+      // In shared WebSocket mode AOI never launches its own backend. Keep trying
+      // even when the initial connection fails, so AOI can run before Desktop.
+      if (this.websocketUrl && !this.stopping) this.#ensureReconnect(error);
+      throw error;
     } finally {
       this.startPromise = null;
     }
@@ -163,6 +172,9 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async request(method, params = {}, options = {}) {
+    if (this.websocketUrl && this.reconnectPromise && !this.#canWrite()) {
+      throw new Error("共享 Codex 尚未连接，AOI 正在等待自动重连");
+    }
     await this.start();
     const result = await this.#requestRaw(method, params, options.timeoutMs);
     this.#rememberSubscription(method, params, result);
@@ -359,6 +371,7 @@ export class CodexAppServer extends EventEmitter {
 
   stop() {
     this.stopping = true;
+    this.cancelReconnectWait?.();
     const ws = this.ws;
     const child = this.child;
     const hadTransport = Boolean(ws || child || this.reconnectPromise || this.startPromise);
@@ -474,19 +487,41 @@ export class CodexAppServer extends EventEmitter {
     return reconnect;
   }
 
+  #waitToReconnect(delayMs) {
+    if (!delayMs || this.stopping) return Promise.resolve();
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        if (this.cancelReconnectWait === finish) this.cancelReconnectWait = null;
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      this.cancelReconnectWait = finish;
+    });
+  }
+
   async #reconnect(initialError) {
     let lastError = initialError;
     this.emit("stderr", `[bridge] app-server disconnected: ${initialError.message}`);
 
-    for (let index = 0; index < this.reconnectDelaysMs.length; index += 1) {
-      if (this.stopping) return;
-      const delayMs = this.reconnectDelaysMs[index];
-      if (delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+    for (let index = 0; !this.stopping; index += 1) {
+      // Reject outstanding bridge turns once, but never stop watching for a
+      // later manually started shared backend.
+      if (index === this.reconnectDelaysMs.length) {
+        const error = new Error(`codex app-server unavailable: ${lastError.message}`);
+        this.emit("closed", error);
+        this.emit("stderr", `[bridge] shared Codex unavailable; retrying every ${this.reconnectIntervalMs} ms`);
       }
       if (this.stopping) return;
+      const delayMs = index < this.reconnectDelaysMs.length
+        ? this.reconnectDelaysMs[index]
+        : this.reconnectIntervalMs;
+      await this.#waitToReconnect(delayMs);
+      if (this.stopping) return;
 
-      this.emit("stderr", `[bridge] app-server reconnect attempt ${index + 1}`);
+      if (index < this.reconnectDelaysMs.length || (index - this.reconnectDelaysMs.length) % 60 === 0) {
+        this.emit("stderr", `[bridge] app-server reconnect attempt ${index + 1}`);
+      }
       try {
         await this.#connectAndInitialize();
         await this.#recoverSubscriptions();
@@ -503,13 +538,6 @@ export class CodexAppServer extends EventEmitter {
       }
     }
 
-    if (this.stopping) return;
-    const error = new Error(
-      `codex app-server websocket reconnect exhausted: ${lastError?.message || initialError.message}`,
-    );
-    this.emit("stderr", `[bridge] app-server reconnect exhausted: ${error.message}`);
-    this.emit("closed", error);
-    throw error;
   }
 
   #onClose(child, error) {

@@ -3178,13 +3178,46 @@ export class BridgeRuntime {
     this.client.on("notification", (message) => this.#onNotification(message));
     this.client.on("serverRequest", (message) => this.#onServerRequest(message));
     this.client.on("closed", (error) => this.#onClientClosed(error));
-    this.client.on("reconnected", () => { void this.deliveries.recover(); });
+    this.client.on("reconnected", () => {
+      void this.#onSharedCodexConnected().catch((error) =>
+        console.error(`[bridge] shared Codex recovery failed: ${error.message}`));
+    });
+    this.sharedCodexRecovery = null;
+    this.deliveriesStarted = false;
   }
 
   async start() {
+    if (this.config.appServerWebSocketUrl) {
+      // Feishu must come online even when the user has not started shared
+      // Codex Desktop yet. The client owns the persistent reconnect loop.
+      void this.client.start().then(
+        () => this.#onSharedCodexConnected(),
+        (error) => console.warn(`[bridge] shared Codex offline; waiting for reconnect: ${error.message}`),
+      ).catch((error) => console.error(`[bridge] shared Codex recovery failed: ${error.message}`));
+      return;
+    }
     await this.client.start();
     await this.#subscribeBoundThreads();
     await this.deliveries.start();
+  }
+
+  async #onSharedCodexConnected() {
+    if (this.sharedCodexRecovery) return this.sharedCodexRecovery;
+    const recovery = (async () => {
+      await this.#subscribeBoundThreads();
+      if (!this.deliveriesStarted) {
+        await this.deliveries.start();
+        this.deliveriesStarted = true;
+      } else {
+        await this.deliveries.recover();
+      }
+    })();
+    this.sharedCodexRecovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.sharedCodexRecovery === recovery) this.sharedCodexRecovery = null;
+    }
   }
 
   async #subscribeBoundThreads() {

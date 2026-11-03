@@ -66,7 +66,6 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 与 `/cd 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
-- `LOCAL_BRANCH`：本机在 GitHub 上维护的分支名，仅本地识别与推送使用，不提交仓库；本项目统一填 `beta`；
 - `CODEX_COMMAND`：仅在未设置 `CODEX_APP_SERVER_WS_URL`、使用本地 stdio 模式时指定 `codex.exe`；WebSocket 共享模式下不启动或预检此程序。留空时，本地 stdio 模式自动发现 VS Code 扩展内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_THINK_MODEL`、`CODEX_THINK_EFFORT`：`/think` 快捷命令使用的思考模型和思考强度，默认 `gpt-5.6-sol` / `high`；可通过 `/thinkmodel` 修改项目 `.env`，模型需在 App Server `model/list` 中可用；
@@ -116,7 +115,11 @@ AOI 桥接通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server
 
 2026-09-17：共享服务使用独立完整副本，防止桌面端更新清理缓存后出现 `codex-code-mode-host.exe` 缺失。每次启动都会自动检查可用版本；已有进程发现更新时保留当前任务，下次停止再启动时采用新版。必要工具文件缺失会明确报错。运行时副本不进入 Git；详细说明见 [共享启动器说明](SHARED-CODEX-PROXY.md)。
 
-使用 `Start-Codex-Shared-Proxy.cmd` 启动共享服务与桌面端，再按需启动 AOI（`start.cmd`）。桌面端只在启动时读取共享地址；切换共享与独立模式前应完全退出桌面端。需要更新共享运行时时，先等任务结束，再运行 `shared-stop.cmd` 和共享启动器。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+AOI 可先于共享 Codex Desktop 启动。通过 `CODEX_APP_SERVER_WS_URL` 连接时，即使共享后端尚未启动，AOI 也会先启动飞书监听，然后在后台持续尝试连接；短间隔重连后每 10 秒重试一次。共享后端恢复后自动重订阅绑定线程并补发未交付的结果。后端关闭或更新期间，AOI 不会自行拉起任何独立 app-server；离线期间的新任务会收到共享 Codex 未连接的提示。
+
+使用 `Start-Codex-Shared-Proxy.cmd` 手动启动共享服务与桌面端。桌面端只在启动时读取共享地址；切换共享与独立模式前应完全退出桌面端。需要更新共享运行时时，先等任务结束，再运行 `shared-stop.cmd` 和共享启动器。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
+
+6v 的登录后 AOI 自启动任务为 `Codex2Lark-AOI`（登录后延迟一分钟，启动失败每分钟重试，最多 10 次）。任务只执行 `scripts/ensure-aoi-running.js`：AOI 已存活则跳过，否则启动桥接，并要求 `.env` 配置共享 WebSocket 地址；任务**不会启动共享 app-server 或 Codex Desktop**。重新部署入口为 `scripts/install-aoi-logon-task.ps1`，此任务仅在 6v 启用，noha 仍按需手动启动 AOI。
 
 桌面端和 AOI 共同连接 `45789` 兼容代理，由代理转发至 `45790` 真实后端。代理过滤缺少有效传输定义的 `mcp_servers.codex_app` 请求覆盖配置，其余消息保持原样转发。
 
@@ -222,17 +225,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-维护记录：2026-07-28 完成 AKA 会话对 AOI 文件修改及 AOI 服务重启验证。2026-08-11 旧内核 CodexLegacy 0.146.0-alpha.9.2 方案弃用，最终采用共享 Codex App Server 方案（见上文“共享 Codex app-server”）；同日本项目更新统一推送 GitHub 分支（各机器推送各自的本地分支）并在项目规则中记录远程项目地址，同时修复历史会话回放中本地音频/图片 Markdown 残留 `!` 前缀的显示问题，计划确认卡片支持解析本地图片并以上传的 `img_key` 内嵌显示。2026-08-12 README 通用化：GitHub 同步说明不再点名机器，各机器本机分支改由本地 `.env` 的 `LOCAL_BRANCH` 配置。2026-08-14 新增 `/branch`（别名 `/fork`）与 `/compress`（别名 `/compact`），分别调用 App Server `thread/fork` 和 `thread/compact/start`；新增共享 app-server 启停脚本与幽灵端口处理；独立对话目录改为 `Documents\Codex\YYYY-MM-DD\UUID` 桌面端通用布局；统一双机分支与 main 维护规则。同日修复飞书公式渲染：本地图片上传改用 stdin 直传（`--file image=-`），绕开 lark-cli 对文件路径的限制；单个公式渲染失败不再拖垮整条消息（保留原文并继续渲染其余公式），上传失败时保留 PNG 文件并输出结构化日志，启动时清理超过 24 小时的残留公式图片。同日新增 `/think` 与 `/work` 模型快捷命令：分别按 `.env` 的 `CODEX_THINK_MODEL/CODEX_THINK_EFFORT` 与 `CODEX_WORK_MODEL/CODEX_WORK_EFFORT` 切换思考/执行模型（默认 `gpt-5.6-sol` / `high` 与 `deepseek-v4-flash` / `max`），仅接受无参形式，`/status` 增加模型预设展示。同日所有以 `/` 开头的消息一律按命令处理，写错的命令直接回复“无效命令”提示，不再作为普通任务进入 Codex。2026-08-15 将 noha 分支的公式渲染修复（本地图片上传改用 stdin 直传并隔离单公式失败）、/think 与 /work 模型快捷命令、/branch 与 /compress 会话控制命令、所有斜杠消息一律按命令处理合入 main。2026-08-21 修复并行会话过程转发：部分模型或新内核把中文过程标成无 `phase` 的 `agentMessage`，旧逻辑误判为最终答复并积压到轮次结束一次性发送；改为按线程缓存一条未定阶段消息，由下一条事件或轮次结束判定为过程或最终答复，`reasoning` 仍不转发。
-
-2026-08-16 更新默认分支改为 `beta`：所有更新默认推送到 `beta`，只有用户明确指令才合并到 `main`；清理本地 `test/resume-runtime-status-726f536` 测试分支。
-
-2026-08-17 新增 `/thinkmodel`、`/workmodel` 全局 `.env` 模型预设命令，移除 `/model default` 及模型卡片默认恢复操作。
-
-2026-08-24 优化 `/resume`：首屏改为 5 条游标分页，不再遍历全部历史会话或逐条读取轮次、Goal 状态；翻页复用当前聊天缓存，选中会话时并行恢复历史与 Goal，减少首屏和回放等待。
-
-2026-08-24 修复 `/stop` 对 `/resume` 接入的运行中会话无效：中断查找同时覆盖本地 turn 和外部 attachment，并在外部 turn 完成后清理运行态。
-
-2026-08-27 共享 app-server 改为优先使用桌面端 Codex 运行时内置内核，使共享服务随桌面端内核更新，找不到时仍回退 VS Code 扩展内核。同日确认 `invalid transport in mcp_servers.codex_app` 是 Codex Desktop 26.820 系列连接外部 WebSocket app-server 时注入不完整运行时配置的上游问题；记录官方 issue、实际影响和等待官方完整修复期间的运行方式。
+当前版本：共享 Codex Desktop 与 AOI 桥接通过 WebSocket 连接同一后端；AOI 能独立启动并持续等待共享后端，后端恢复时自动恢复线程订阅和交付。
 
 状态保存在 `.state/sessions.json`：
 
@@ -262,18 +255,11 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 本仓库公开托管在 GitHub：<https://github.com/beifangzhishi-ops/codex2larkAOI>。`.env`、`.state/`、`.runtime/`、`node_modules/`、`user/` 均不进入仓库；飞书凭据、lark-cli 配置和运行状态需要在每台电脑单独配置。
 
-所有机器统一在 `beta` 分支开发：更新默认推送到 `beta`，分支名记录在本地 `.env` 的 `LOCAL_BRANCH` 中（填 `beta`），不提交仓库。只能操作 `beta` 和 `main`，不能操作其他分支；`main` 为稳定分支，只有用户明确指令时才合并到 `main`，自动化任务不主动推送 `main`。
+所有机器统一维护 main 分支；修改后运行 npm run check，通过后提交并推送到 origin/main。切换运行代码前先确认没有活跃的 AOI 任务。
 
-首次部署：
+首次部署需要安装 Node.js、仓库依赖，并按 .env.example 创建各自的 .env，配置工作目录、允许的飞书用户、lark-cli 凭证和共享 WebSocket 地址。6v 的自启动使用 scripts/install-aoi-logon-task.ps1；noha 不安装此任务。
 
-1. `git clone https://github.com/beifangzhishi-ops/codex2larkAOI.git`
-2. `cd codex2larkAOI`
-3. `npm install`（需要 Node.js >= 20）
-4. `Copy-Item .env.example .env`，并填写 `CODEX_WORKDIR`、`FEISHU_ALLOWED_OPEN_IDS`、`LOCAL_BRANCH` 等配置（`LOCAL_BRANCH` 填 `beta`）
-5. 初始化开发槽：先设置 `LARKSUITE_CLI_CONFIG_DIR` 为 `C:\Users\<你的用户名>\.lark-cli-codex2lark-dev`，再依次执行 `lark-cli config init --new`、`lark-cli auth login --recommend`、`lark-cli auth status`
-6. 切换到 `beta` 分支（`git checkout beta` 或 `git pull origin beta`）；安装 VS Code Codex 扩展；需要共享 App Server 时先运行 `shared-start.cmd`，再运行 `start.cmd`
-
-日常更新：本机提交后推送到 `beta`（`git push origin HEAD:beta`）；`main` 为稳定分支，只有用户明确指令时才合并到 `main`，自动化任务不主动推送 `main`；各机器日常从 `origin/main` 拉取稳定内容合并进 `beta`（`git fetch origin` 后 `git merge origin/main` 并推送 `beta`），依赖变化时补 `npm install`，然后按上文“每次更新后的推荐收尾顺序”重启桥接。
+日常同步先更新 origin/main，完成验证后推送 main；部署时只重启 AOI 桥接，不自动启动共享 app-server 或桌面端。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
 
