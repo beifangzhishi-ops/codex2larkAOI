@@ -100,7 +100,9 @@ npm run check
 
 ## 共享 Codex app-server
 
-AOI 永远通过 WebSocket 连接共享 App Server（默认 `ws://127.0.0.1:45789`，可以在 `.env` 中配置 `CODEX_APP_SERVER_WS_URL`）。AOI 不会自行启动任何 Codex 内核。共享服务的内核只从 Codex Desktop 安装及其运行时缓存选取，独立运行；Codex Desktop 窗口关闭也不会终止共享服务。共享服务尚未启动时，AOI 仍可先接收飞书事件并在后台等待连接。
+**统一开关行为：** `start.cmd`（包括后台、前台与登录启动）先检查共享 App Server：健康则热接入，缺失则使用自动发现的 Codex Desktop 内核启动 45789/45790，然后启动或复用 AOI 飞书桥接；`stop.cmd` **只关闭 AOI 桥接**，共享服务继续为 Desktop 和 MobileUI 运行。只有明确执行 `shared-stop.cmd` 才会尝试停止本项目拥有的共享 App Server，执行前必须确认其他客户端没有活跃任务。
+
+AOI 永远通过 WebSocket 连接共享 App Server（默认 `ws://127.0.0.1:45789`，可以在 `.env` 中配置 `CODEX_APP_SERVER_WS_URL`）。启动 AOI 时会先确保共享服务健康（不存在就启动，存在就热接入），随后启动飞书桥接。AOI 本身不会直接运行内核；共享服务的内核只从 Codex Desktop 安装及其运行时缓存选取，独立运行。Codex Desktop 窗口关闭不会终止共享服务。
 
 共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
 
@@ -120,11 +122,11 @@ AOI 桥接通过 `CODEX_APP_SERVER_WS_URL` 以 WebSocket 连接共享 app-server
 
 2026-09-17：共享服务使用独立完整副本，防止桌面端更新清理缓存后出现 `codex-code-mode-host.exe` 缺失。每次启动都会自动检查可用版本；已有进程发现更新时保留当前任务，下次停止再启动时采用新版。必要工具文件缺失会明确报错。运行时副本不进入 Git；详细说明见 [共享启动器说明](SHARED-CODEX-PROXY.md)。
 
-AOI 可先于共享 Codex Desktop 启动。通过 `CODEX_APP_SERVER_WS_URL` 连接时，即使共享后端尚未启动，AOI 也会先启动飞书监听，然后在后台持续尝试连接；短间隔重连后每 10 秒重试一次。共享后端恢复后自动重订阅绑定线程并补发未交付的结果。后端关闭或更新期间，AOI 不会自行拉起任何独立 app-server；离线期间的新任务会收到共享 Codex 未连接的提示。
+AOI 可在不打开 Codex Desktop 窗口的情况下启动，共享启动器会先确保后端正常运行。如果后端随后意外断开，AOI 飞书桥接保留连接重试机制（短间隔尝试后每 10 秒重试），恢复后自动重新订阅绑定线程并补发未交付结果。AOI 桥接自身不会另外启动内核。
 
 使用 `Start-Codex-Shared-Proxy.cmd` 手动启动共享服务与桌面端。桌面端只在启动时读取共享地址；切换共享与独立模式前应完全退出桌面端。需要更新共享运行时时，先等任务结束，再运行 `shared-stop.cmd` 和共享启动器。共享 app-server 与 AOI 相互独立，AOI 可随时启停。
 
-6v 的登录后 AOI 自启动任务为 `Codex2Lark-AOI`（登录后延迟一分钟，启动失败每分钟重试，最多 10 次）。任务只执行 `scripts/ensure-aoi-running.js`：AOI 已存活则跳过，否则启动桥接，并要求 `.env` 配置共享 WebSocket 地址；任务**不会启动共享 app-server 或 Codex Desktop**。重新部署入口为 `scripts/install-aoi-logon-task.ps1`，此任务仅在 6v 启用，noha 仍按需手动启动 AOI。
+6v 的登录后 AOI 自启动任务为 `Codex2Lark-AOI`（登录后延迟一分钟，启动失败每分钟重试，最多 10 次）。任务调用 `scripts/ensure-aoi-running.js`：AOI 桥接未运行时启动桥接，并先启动或热接入共享 App Server；桥接已运行时也会确认共享服务可用。任务不会打开 Codex Desktop 窗口。重新部署入口为 `scripts/install-aoi-logon-task.ps1`，此任务仅在 6v 启用，noha 仍按需手动启动 AOI。
 
 桌面端和 AOI 共同连接 `45789` 兼容代理，由代理转发至 `45790` 真实后端。代理过滤缺少有效传输定义的 `mcp_servers.codex_app` 请求覆盖配置，其余消息保持原样转发。
 
@@ -234,7 +236,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 ## 状态
 
-当前版本：共享 Codex Desktop 与 AOI 桥接通过 WebSocket 连接同一后端；AOI 能独立启动并持续等待共享后端，后端恢复时自动恢复线程订阅和交付。
+当前版本：Desktop 与 AOI 桥接通过 WebSocket 连接同一共享后端；AOI 启动时确保该后端可用，运行中掉线则持续重连并恢复线程订阅和交付。
 
 状态保存在 `.state/sessions.json`：
 
@@ -268,7 +270,7 @@ LHM 未运行时，`/temperature` 会回复无法连接温度服务的提示。�
 
 首次部署需要安装 Node.js、仓库依赖，并按 .env.example 创建各自的 .env，配置工作目录、允许的飞书用户、lark-cli 凭证和共享 WebSocket 地址。6v 的自启动使用 scripts/install-aoi-logon-task.ps1；noha 不安装此任务。
 
-日常同步先更新 origin/main，完成验证后推送 main；部署时只重启 AOI 桥接，不自动启动共享 app-server 或桌面端。
+日常同步先更新 origin/main，完成验证后推送 main；部署重启 AOI 桥接时会自动检查并热接入或启动共享 App Server，但不会打开 Codex Desktop 窗口。
 
 Codex 协议依据：[App Server](https://developers.openai.com/codex/app-server)、[非交互模式与 JSONL 事件](https://developers.openai.com/codex/noninteractive)、[CLI 审批与工作目录参数](https://developers.openai.com/codex/cli/reference)。App Server 的线程恢复和工作目录覆盖以[官方 App Server 文档](https://learn.chatgpt.com/docs/app-server)为准；`Documents\Codex\YYYY-MM-DD\UUID`、`outputs` 和 `work` 是本机 Codex Desktop 状态确认的布局，不是跨版本官方路径承诺。
 

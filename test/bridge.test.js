@@ -136,14 +136,70 @@ import {
   hasCompleteTurnHistory,
 } from "../src/bridge.js";
 import {
+  ensureSharedStack,
   launchService,
   preparePowerShellEnvironment,
   removeRestrictedProxies,
   requireEnvFile,
   resolvePowerShellExecutable,
+  startService,
   stopService,
   waitForBackgroundStart,
 } from "../src/service-control.js";
+
+test("AOI shared-stack startup uses one bounded PowerShell process with inherited streams", () => {
+  let call;
+  ensureSharedStack({
+    powerShellExecutable: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    spawnSyncProcess: (executable, args, options) => {
+      call = { executable, args, options };
+      return { status: 0 };
+    },
+  });
+  assert.match(call.executable, /pwsh\.exe$/i);
+  assert.deepEqual(call.args.slice(-3), ["-Action", "start", "-NoGui"]);
+  assert.equal(call.options.stdio, "inherit");
+  assert.equal(call.options.timeout, 180_000);
+  assert.ok(call.args.some((value) => value.endsWith("shared-stack.ps1")));
+  assert.throws(() => ensureSharedStack({
+    powerShellExecutable: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    spawnSyncProcess: () => ({ status: 1 }),
+  }), /startup failed/);
+});
+
+test("foreground AOI launch checks shared stack before starting the bridge", async () => {
+  const seen = [];
+  await startService({
+    root: process.cwd(),
+    environment: {},
+    powerShellOptions: { platform: "linux" },
+    startShared: async () => { seen.push("stack"); },
+    startBridge: async () => { seen.push("bridge"); },
+  });
+  assert.deepEqual(seen, ["stack", "bridge"]);
+});
+
+test("repeated AOI launch hot-attaches the backend without duplicating the bridge", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aoi-launch-"));
+  try {
+    writeFileSync(join(root, ".env"), "CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:45789\n");
+    mkdirSync(join(root, ".state"));
+    writeFileSync(join(root, ".state", "bridge.pid"), "4200\n");
+    let attached = 0;
+    const result = await launchService({
+      root,
+      environment: {},
+      powerShellOptions: { platform: "linux" },
+      isRunning: (pid) => pid === 4200,
+      startShared: async () => { attached++; },
+      spawnProcess: () => assert.fail("should not create another bridge"),
+    });
+    assert.deepEqual(result, { pid: 4200, status: "running" });
+    assert.equal(attached, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isProcessRunning, launchService, readBridgePid } from "../src/service-control.js";
+import { ensureSharedStack, isProcessRunning, launchService, readBridgePid } from "../src/service-control.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -10,6 +10,7 @@ export async function ensureAoiRunning({
   readPid = readBridgePid,
   isRunning = isProcessRunning,
   launch = launchService,
+  startShared = ensureSharedStack,
 } = {}) {
   // Startup requires the shared App Server endpoint in the project configuration.
   const env = readFileSync(join(root, ".env"), "utf8");
@@ -20,6 +21,9 @@ export async function ensureAoiRunning({
 
   const pid = readPid(join(root, ".state", "bridge.pid"));
   if (pid && isRunning(pid)) {
+    // A new start request must also recover a missing shared backend even
+    // when the Feishu bridge itself is already running.
+    await startShared({ root });
     console.log(`[ensure-aoi] already running pid=${pid}`);
     return { status: "running", pid };
   }

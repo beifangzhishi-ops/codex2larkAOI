@@ -93,6 +93,37 @@ export function preparePowerShellEnvironment(environment = process.env, options 
   return executable;
 }
 
+export function ensureSharedStack({
+  root = ROOT,
+  environment = process.env,
+  powerShellExecutable,
+  powerShellOptions,
+  spawnSyncProcess = spawnSync,
+} = {}) {
+  const script = resolve(root, "scripts", "shared-stack.ps1");
+  if (!existsSync(script)) throw new Error(`Missing shared App Server launcher: ${script}`);
+  const childEnvironment = { ...environment };
+  removeRestrictedProxies(childEnvironment);
+  const shell = powerShellExecutable || preparePowerShellEnvironment(childEnvironment, powerShellOptions);
+  if (!shell) throw new Error("Shared App Server startup requires PowerShell 7 on Windows.");
+  console.log("[start] Checking shared App Server; starting or hot-attaching as needed...");
+  // Never capture child stdout in a pipe: a long-lived backend can inherit
+  // that handle and keep its launcher waiting after the stack is ready.
+  const result = spawnSyncProcess(shell, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", script, "-Action", "start", "-NoGui",
+  ], {
+    cwd: root,
+    env: childEnvironment,
+    stdio: "inherit",
+    windowsHide: true,
+    timeout: 180_000,
+  });
+  if (result.error) throw new Error(`Shared App Server startup failed: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`Shared App Server startup failed (exit ${result.status ?? "unknown"}).`);
+  console.log("[start] Shared App Server is ready.");
+}
+
 function statePaths(root) {
   const stateDir = resolve(root, ".state");
   return {
@@ -193,6 +224,7 @@ export async function startService({
   root = ROOT,
   environment = process.env,
   startBridge,
+  startShared = ensureSharedStack,
   powerShellOptions,
 } = {}) {
   requireEnvFile(root);
@@ -201,6 +233,7 @@ export async function startService({
   if (removed.length) console.log(`[start] 已移除受限环境代理：${removed.join(", ")}`);
   const powerShell = preparePowerShellEnvironment(environment, powerShellOptions);
   if (powerShell) console.log(`[start] PowerShell：${powerShell}`);
+  await startShared({ root, environment, powerShellExecutable: powerShell, powerShellOptions });
   const runBridge = startBridge || (async () => {
     const { main } = await import("./bridge.js");
     await main();
@@ -257,15 +290,28 @@ export function waitForBackgroundStart(child, {
 export async function launchService({
   root = ROOT,
   environment = process.env,
-  startupTimeoutMs = 60_000,
+  startupTimeoutMs = 180_000,
   spawnProcess = spawn,
   powerShellOptions,
+  startShared = ensureSharedStack,
+  isRunning = isProcessRunning,
 } = {}) {
   requireEnvFile(root);
   const childEnvironment = { ...environment };
   removeRestrictedProxies(childEnvironment);
   const powerShell = preparePowerShellEnvironment(childEnvironment, powerShellOptions);
   if (powerShell) console.log(`[start] PowerShell：${powerShell}`);
+  const existingPid = readBridgePid(statePaths(root).pidFile);
+  if (existingPid && isRunning(existingPid)) {
+    await startShared({
+      root,
+      environment: childEnvironment,
+      powerShellExecutable: powerShell,
+      powerShellOptions,
+    });
+    console.log(`[start] AOI bridge already running (PID=${existingPid}); reused.`);
+    return { pid: existingPid, status: "running" };
+  }
   const { stateDir, outputLog, errorLog } = statePaths(root);
   mkdirSync(stateDir, { recursive: true });
   const outputFd = openSync(outputLog, "w");

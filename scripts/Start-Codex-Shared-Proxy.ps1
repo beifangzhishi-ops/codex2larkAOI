@@ -182,12 +182,10 @@ function Start-SharedStack {
 
     $currentShell = (Get-Process -Id $PID -ErrorAction Stop).Path
     Write-Host '正在检查 AOI 共享服务与完整运行时，必要时启动 45789/45790...'
-    # Forward all child PowerShell streams. Without this, some Windows launch
-    # contexts show only the generic exit code and hide the actual stack error.
-    # Stream output as it arrives; collecting into an array made runtime
-    # preparation look frozen until the entire child process had exited.
-    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy 2>&1 |
-        ForEach-Object { Write-Host ([string]$_) }
+    # Use inherited console streams, never a PowerShell pipe. Backend/proxy
+    # descendants can keep a captured pipe open long after shared-stack exits.
+    # Direct output is still live and errors remain visible on stderr.
+    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy
     $stackExitCode = $LASTEXITCODE
     if ($stackExitCode -ne 0) {
         throw ('shared-stack.ps1 启动失败，退出代码：' + $stackExitCode + '；请查看上方 shared-stack 诊断信息')

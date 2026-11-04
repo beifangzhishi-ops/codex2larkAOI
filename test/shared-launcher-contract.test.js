@@ -36,9 +36,10 @@ test("shutdown checks checkout-specific proxy and backend ownership", () => {
 });
 
 test("Desktop launcher preserves child stack diagnostics on startup failure", () => {
-  assert.match(desktopLauncher, /sharedStackScript -Action start -NoGui -FallbackProxy \$FallbackProxy 2>&1\s*\|\s*ForEach-Object/);
+  assert.match(desktopLauncher, /& \$currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File \$sharedStackScript -Action start -NoGui -FallbackProxy \$FallbackProxy/);
   assert.match(desktopLauncher, /\$stackExitCode = \$LASTEXITCODE/);
   assert.doesNotMatch(desktopLauncher, /\$details = @\(/);
+  assert.doesNotMatch(desktopLauncher, /\$FallbackProxy 2>&1\s*\|/);
   assert.match(source, /Checking Codex runtime and its independent cache/);
   assert.match(source, /Waiting for backend readiness/);
   assert.match(source, /Waiting for proxy readiness/);

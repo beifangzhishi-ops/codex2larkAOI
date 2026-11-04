@@ -91,6 +91,8 @@ The Desktop launcher forwards the child shared-stack diagnostic output, includin
 
 ## Desktop single instance, independent backend
 
+AOI `start.cmd` and login startup now ensure the same shared stack before starting the bridge (or hot-attach if healthy). AOI `stop.cmd` never stops the stack. Desktop startup invokes the child PowerShell with inherited console streams, not through a captured output pipeline; descendant processes must not be able to prevent Desktop launch by retaining a pipe handle.
+
 The Desktop entry now probes the Clash TCP port with a bounded 3-second connection attempt and streams the child shared-stack output directly. Progress markers identify runtime cache preparation, backend startup/readiness, and proxy startup/readiness, so a slow runtime check or failure no longer looks like a frozen network probe. For a running launcher started before these changes, only a new invocation uses the improved output.
 
 The Desktop entry uses a machine-wide `Global\\CodexSharedDesktop_SingleLaunch` mutex around the ChatGPT.exe process check, shared-stack start/hot-attach, and Desktop launch verification. If any Desktop is already running, the launcher exits with code 20 without stopping it or the shared backend. With a healthy shared stack but no Desktop, the launcher hot-attaches and opens one Desktop; with neither running, it starts the stack and then the Desktop. Existing Desktop with an unhealthy/absent stack is **not** silently reconfigured or restarted.

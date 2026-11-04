@@ -10,8 +10,8 @@
 
 - `/stop` 只允许操作发出时绑定的会话与已有任务，校验原始飞书时间，禁止过期指令误中断随后启动的新轮次，也不能清除其后排队的消息。
 - AOI 运行配置以各自 `.env` 为准；单轮执行超时统一设置为 259200000 毫秒（三天），不要只修改代码默认值。
-- 配置共享 WebSocket 时，AOI 应在后端缺席时仍启动飞书监听，后台持续重连，不得自动启动独立 App Server。共享服务恢复时自动恢复订阅及交付；主动停止后不再重连。
-- 6v 的 `Codex2Lark-AOI` 计划任务只负责登录后启动 AOI 桥接，不启动共享 Codex 或桌面端。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
+- AOI 启动或登录自启动必须先检查共享 App Server：缺失时通过共享启动器启动，健康时热接入，然后启动或复用飞书桥接。运行中后端断开时应持续重连、恢复订阅及交付；主动停止桥接后不再重连。AOI 不直接启动私有内核。
+- 6v 的 `Codex2Lark-AOI` 计划任务负责确保共享 App Server 和 AOI 桥接就绪，不打开 Desktop 窗口。部署入口为 `scripts/install-aoi-logon-task.ps1`，启动检查脚本为 `scripts/ensure-aoi-running.js`。
 - 运行态仍有任务时不得直接重启桥接来激活配置，应先确认空闲。
 - 安全重启入口 `scripts/restart-when-idle.js` 必须在连续确认绑定会话空闲后，通过 Node 直接调用 `src/service-control.js` 的 `stop` 和 `launch`，避免依赖 Windows `cmd.exe` 的引号拼接；不得停止共享 App Server。
 - AOI 重启后的飞书事件就绪判断以实际日志的两个 `[event] ready event_key=...` 标记为准。已重启的 AOI 用 `scripts/restart-when-idle.js --verify` 单独验证，不应为了修正验收结果重复重启。
@@ -50,6 +50,8 @@
 - 如果 Hermes 当前实现与本项目的 Codex App Server、`lark-cli` 架构或用户明确需求冲突，以本项目约束和用户需求为准，并说明差异。
 
 ## Shared-stack launcher ownership
+- AOI start/foreground/login actions must ensure or hot-attach to the shared stack before launching the Feishu bridge; an already-running bridge must not be duplicated and the shared stack should still be verified. AOI stop must terminate only the bridge, never the shared stack. Shared-stop is an explicit owner-only administrative operation, not a normal client exit.
+- Desktop shared-stack startup must use directly inherited console streams, not a piped native child invocation that can remain open through descendant file descriptors.
 - AOI is strictly a WebSocket client of the shared Codex App Server. It never launches a local Codex backend, cannot choose an independent Codex executable and must preserve offline reconnect plus thread recovery. Desktop window presence is not required; the shared backend comes solely from a complete Codex Desktop runtime through the shared launcher.
 - Shared Codex backend kernel selection is Desktop-only: discover latest complete runtime from the Codex Desktop-managed cache and the installed Microsoft Store Codex package. Do not select a separate IDE/CLI runtime. Keep the fingerprinted independent running copy and never replace an active backend merely because Desktop updated. Apply the same source contract in CodexMobileUI and both AOI machines.
 - Desktop launcher diagnostics must stream shared-stack progress live, not buffer all child output before reporting errors. Clash TCP availability probes must have explicit short timeouts and no lingering console progress; preserve phase markers for runtime, backend and proxy startup.
