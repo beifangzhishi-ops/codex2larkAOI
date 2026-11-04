@@ -24,25 +24,22 @@ export function readRuntime(executable) {
   return { executable, missing, files, fingerprint, modified: fs.statSync(executable).mtimeMs };
 }
 
-export function selectRuntime({ primary = [], fallback = [] }) {
+export function selectRuntime({ desktop = [] }) {
   const rejected = [];
-  for (const group of [primary, fallback]) {
-    const complete = [];
-    for (const executable of new Set(group)) {
-      try {
-        const runtime = readRuntime(executable);
-        if (!runtime.missing.length) complete.push(runtime);
-        else rejected.push({ executable, reason: `缺少或为空：${runtime.missing.join("、")}` });
-      } catch (error) { rejected.push({ executable, reason: error.message }); }
-    }
-    complete.sort((a, b) => b.modified - a.modified);
-    if (complete.length) return { selected: complete[0], rejected };
+  const complete = [];
+  for (const executable of new Set(desktop)) {
+    try {
+      const runtime = readRuntime(executable);
+      if (!runtime.missing.length) complete.push(runtime);
+      else rejected.push({ executable, reason: `缺失或为空：${runtime.missing.join("、")}` });
+    } catch (error) { rejected.push({ executable, reason: error.message }); }
   }
-  return { selected: null, rejected };
+  complete.sort((a, b) => b.modified - a.modified || a.executable.localeCompare(b.executable));
+  return { selected: complete[0] ?? null, rejected };
 }
 
 export function prepareRuntime(selected, root) {
-  if (!selected) throw new Error("未发现完整 Codex 运行时，请更新或修复桌面端安装。");
+  if (!selected) throw new Error("未发现完整 Codex Desktop 内核，请更新或修复桌面端安装。");
   const destination = path.join(path.resolve(root), selected.fingerprint);
   const executable = path.join(destination, "codex.exe");
   if (fs.existsSync(destination)) {

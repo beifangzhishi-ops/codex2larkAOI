@@ -50,7 +50,7 @@ Start-Codex-Shared-Proxy.cmd
 
 ### 自动发现与独立运行时
 
-每次运行共享启动器都会检查桌面缓存与 Microsoft Store 安装目录，按主程序修改时间选择完整版本；两者均不可用时查找 VS Code 扩展。必须同时存在且非空的文件包括 `codex.exe`、`codex-code-mode-host.exe`、`codex-command-runner.exe` 和 `codex-windows-sandbox-setup.exe`。
+每次运行共享启动器仅检查 Codex Desktop 管理的运行时缓存及 Microsoft Store Codex 安装目录，按内核主程序修改时间选择最新的完整桌面版本。没有完整桌面内核时明确报错，不从其他来源寻找。必须同时存在且非空的文件包括 `codex.exe`、`codex-code-mode-host.exe`、`codex-command-runner.exe` 和 `codex-windows-sandbox-setup.exe`。
 
 启动前按文件内容生成指纹，将同目录 Codex 程序和动态库复制到 AOI 的 `.runtime/shared/<指纹>/`，校验通过后从副本启动。桌面端更新、清理自己的缓存不会影响该副本。独立目录不提交 Git，旧副本保留以供仍在运行的进程使用。
 

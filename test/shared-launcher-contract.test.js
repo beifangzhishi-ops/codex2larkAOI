@@ -4,6 +4,15 @@ import test from "node:test";
 
 const source = fs.readFileSync(new URL("../scripts/shared-stack.ps1", import.meta.url), "utf8");
 const desktopLauncher = fs.readFileSync(new URL("../scripts/Start-Codex-Shared-Proxy.ps1", import.meta.url), "utf8");
+const runtimeSelector = fs.readFileSync(new URL("../scripts/shared-runtime.js", import.meta.url), "utf8");
+
+test("shared runtime candidates are exclusively Codex Desktop-managed installations", () => {
+  assert.match(source, /Join-Path \$env:LOCALAPPDATA "OpenAI\\Codex\\bin"/);
+  assert.match(source, /Get-AppxPackage -Name "OpenAI\.Codex"/);
+  assert.match(source, /return @\{ desktop = @\(\$desktop\) \}/);
+  assert.match(runtimeSelector, /selectRuntime\(\{ desktop = \[\] \}\)/);
+  assert.doesNotMatch(source, /\.vscode|openai\.chatgpt-/i);
+});
 
 test("shared launchers coordinate first-start and explicit stop across checkouts", () => {
   assert.match(source, /Global\\CodexSharedStack_45789_45790/);

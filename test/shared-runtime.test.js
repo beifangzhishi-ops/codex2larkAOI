@@ -23,17 +23,18 @@ function fixture(t) {
   return { root, make, cache: path.join(root, "独立副本") };
 }
 
-test("自动发现完整新版，跳过缺文件版本，桌面版本优先于扩展", (t) => {
+test("仅选择自动发现的最新完整 Desktop 内核，缺文件时不采用其他来源", (t) => {
   const { make } = fixture(t);
   const older = make("旧桌面", "v1", 1000);
   const newer = make("新桌面", "v2", 2000);
   const broken = make("不完整版本", "v3", 3000);
-  const extension = make("扩展", "v4", 4000);
+  const olderCache = make("desktop-cache", "v4", 500);
   fs.unlinkSync(path.join(path.dirname(broken), "codex-code-mode-host.exe"));
-  const result = selectRuntime({ primary: [older, broken, newer], fallback: [extension] });
+  const result = selectRuntime({ desktop: [older, broken, newer, olderCache] });
   assert.equal(result.selected.executable, newer);
   assert.match(result.rejected[0].reason, /codex-code-mode-host/);
-  assert.equal(selectRuntime({ primary: [broken], fallback: [extension] }).selected.executable, extension);
+  assert.equal(selectRuntime({ desktop: [broken] }).selected, null);
+  assert.equal(selectRuntime({ desktop: [] }).selected, null);
 });
 
 test("桌面清理源工具后独立副本仍完整，重复准备可复用", (t) => {
@@ -88,7 +89,7 @@ test("没有完整运行时时明确失败，空工具文件也不能使用", (t
   const { make, cache } = fixture(t);
   const source = make("源", "v1", 1000);
   fs.writeFileSync(path.join(path.dirname(source), "codex-command-runner.exe"), "");
-  const result = selectRuntime({ primary: [source] });
+  const result = selectRuntime({ desktop: [source] });
   assert.equal(result.selected, null);
   assert.throws(() => prepareRuntime(result.selected, cache), /未发现完整/);
   assert.equal(fs.existsSync(cache), false);

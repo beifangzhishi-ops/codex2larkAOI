@@ -208,10 +208,9 @@ function Stop-Owned([string]$PidPath, [ValidateSet("proxy", "backend")][string]$
 }
 
 function Get-RuntimeCandidates {
-  $primary = @()
-  $fallback = @()
+  $desktop = @()
   $desktopRoot = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
-  $primary += @(
+  $desktop += @(
     Get-ChildItem -LiteralPath $desktopRoot -Directory -ErrorAction SilentlyContinue |
       ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "codex.exe") -ErrorAction SilentlyContinue } |
       Where-Object { $_ -and $_.Exists } |
@@ -224,17 +223,12 @@ function Get-RuntimeCandidates {
       Select-Object -First 1
     if ($package -and (Test-Path -LiteralPath $package.InstallLocation)) {
       $storeCodex = Join-Path $package.InstallLocation "app\resources\codex.exe"
-      if (Test-Path -LiteralPath $storeCodex) { $primary = @($storeCodex) + $primary }
+      if (Test-Path -LiteralPath $storeCodex) { $desktop = @($storeCodex) + $desktop }
     }
   } catch {}
 
-  $extRoot = Join-Path $env:USERPROFILE ".vscode\extensions"
-  $ext = @(Get-ChildItem -LiteralPath $extRoot -Directory -Filter "openai.chatgpt-*-win32-x64" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
-  foreach ($item in $ext) {
-    $candidate = Join-Path $item.FullName "bin\windows-x86_64\codex.exe"
-    if (Test-Path -LiteralPath $candidate) { $fallback += $candidate }
-  }
-  return @{ primary = @($primary); fallback = @($fallback) }
+  # Only Codex Desktop installations and their managed runtime caches qualify.
+  return @{ desktop = @($desktop) }
 }
 
 function Get-RuntimeReport([string]$Mode, [string]$ActiveExecutable = "") {
