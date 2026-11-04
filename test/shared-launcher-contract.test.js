@@ -27,9 +27,20 @@ test("shutdown checks checkout-specific proxy and backend ownership", () => {
 });
 
 test("Desktop launcher preserves child stack diagnostics on startup failure", () => {
-  assert.match(desktopLauncher, /sharedStackScript -Action start -NoGui -FallbackProxy \$FallbackProxy \*>&1/);
+  assert.match(desktopLauncher, /sharedStackScript -Action start -NoGui -FallbackProxy \$FallbackProxy 2>&1\s*\|\s*ForEach-Object/);
   assert.match(desktopLauncher, /\$stackExitCode = \$LASTEXITCODE/);
-  assert.match(desktopLauncher, /foreach \(\$entry in \$details\)/);
+  assert.doesNotMatch(desktopLauncher, /\$details = @\(/);
+  assert.match(source, /Checking Codex runtime and its independent cache/);
+  assert.match(source, /Waiting for backend readiness/);
+  assert.match(source, /Waiting for proxy readiness/);
+});
+
+test("Clash probe uses bounded TCP handshake without Test-NetConnection progress", () => {
+  assert.match(desktopLauncher, /function Test-TcpPort/);
+  assert.match(desktopLauncher, /ConnectAsync\(\$HostName, \$Port\)/);
+  assert.match(desktopLauncher, /\$connect\.Wait\(\$TimeoutMs\)/);
+  assert.match(desktopLauncher, /Test-TcpPort -HostName \$expectedProxy.Host -Port \$expectedProxy.Port -TimeoutMs 3000/);
+  assert.doesNotMatch(desktopLauncher, /Test-NetConnection/);
 });
 
 test("Desktop launchers share a single-instance lock across projects and release it", () => {

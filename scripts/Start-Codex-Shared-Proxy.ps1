@@ -149,6 +149,20 @@ function Test-HttpReady {
     catch { return $false }
 }
 
+function Test-TcpPort {
+    param([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000)
+    # Bound the TCP probe to avoid lingering console progress and long waits.
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.ConnectAsync($HostName, $Port)
+        return ($connect.Wait($TimeoutMs) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
 function Wait-HttpReady {
     param([string]$Url, [int]$Seconds = 30)
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -170,11 +184,11 @@ function Start-SharedStack {
     Write-Host '正在检查 AOI 共享服务与完整运行时，必要时启动 45789/45790...'
     # Forward all child PowerShell streams. Without this, some Windows launch
     # contexts show only the generic exit code and hide the actual stack error.
-    $details = @(& $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy *>&1)
+    # Stream output as it arrives; collecting into an array made runtime
+    # preparation look frozen until the entire child process had exited.
+    & $currentShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $sharedStackScript -Action start -NoGui -FallbackProxy $FallbackProxy 2>&1 |
+        ForEach-Object { Write-Host ([string]$_) }
     $stackExitCode = $LASTEXITCODE
-    foreach ($entry in $details) {
-        Write-Host ([string]$entry)
-    }
     if ($stackExitCode -ne 0) {
         throw ('shared-stack.ps1 启动失败，退出代码：' + $stackExitCode + '；请查看上方 shared-stack 诊断信息')
     }
@@ -241,7 +255,7 @@ try {
     }
 
     Write-Section '检查 Clash 代理端口'
-    $proxyReachable = Test-NetConnection -ComputerName $expectedProxy.Host -Port $expectedProxy.Port -InformationLevel Quiet -WarningAction SilentlyContinue
+    $proxyReachable = Test-TcpPort -HostName $expectedProxy.Host -Port $expectedProxy.Port -TimeoutMs 3000
     if (-not $proxyReachable) {
         throw ('无法连接代理端口 ' + $expectedProxy.Host + ':' + $expectedProxy.Port + '。请确认 Clash 已启动且对应端口正在监听。')
     }

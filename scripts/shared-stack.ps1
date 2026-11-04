@@ -342,6 +342,7 @@ function Start-Stack {
   $backendPid = Read-Pid $backendPidFile
   $proxyInfo = if ($proxyPid) { Get-ProcessInfo $proxyPid } else { $null }
   $backendInfo = if ($backendPid) { Get-ProcessInfo $backendPid } else { $null }
+  Write-Host "[shared-stack] Checking Codex runtime and its independent cache..."
   $runtime = Get-RuntimeReport "prepare"
   $codex = $runtime.prepared.executable
   Write-Host ("共享内核来源：" + $runtime.prepared.source)
@@ -354,8 +355,10 @@ function Start-Stack {
 
   Set-SharedProxyEnvironment
 
+  Write-Host ("[shared-stack] Launching backend on " + $backendUrl)
   $backend = Start-Process -FilePath $codex -ArgumentList @("app-server", "--listen", $backendUrl) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr -PassThru
   Set-Content -LiteralPath $backendPidFile -Value ([string]$backend.Id) -Encoding ascii
+  Write-Host "[shared-stack] Waiting for backend readiness (up to 30 seconds)..."
   if (-not (Wait-Ready $backendReady 30)) {
     Stop-Owned $backendPidFile "backend" | Out-Null
     throw ("真实 app-server 未就绪，请看 " + $backendErr)
@@ -367,9 +370,11 @@ function Start-Stack {
       Write-Host "已恢复共享后端，继续使用本仓库原有代理。"
       return
     }
+    Write-Host ("[shared-stack] Launching compatibility proxy on " + $publicUrl)
     $proxyArgs = @("`"$proxyScript`"", "--listen", $publicUrl, "--backend", $backendUrl)
     $proxy = Start-Process -FilePath $node -ArgumentList $proxyArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $proxyOut -RedirectStandardError $proxyErr -PassThru
     Set-Content -LiteralPath $proxyPidFile -Value ([string]$proxy.Id) -Encoding ascii
+    Write-Host "[shared-stack] Waiting for proxy readiness (up to 15 seconds)..."
     if (-not (Wait-Ready $publicReady 15)) { throw ("兼容代理未就绪，请看 " + $proxyErr) }
   } catch {
     if (-not $reuseProxy) { Stop-Owned $proxyPidFile "proxy" | Out-Null }

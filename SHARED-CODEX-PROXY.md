@@ -91,6 +91,8 @@ The Desktop launcher forwards the child shared-stack diagnostic output, includin
 
 ## Desktop single instance, independent backend
 
+The Desktop entry now probes the Clash TCP port with a bounded 3-second connection attempt and streams the child shared-stack output directly. Progress markers identify runtime cache preparation, backend startup/readiness, and proxy startup/readiness, so a slow runtime check or failure no longer looks like a frozen network probe. For a running launcher started before these changes, only a new invocation uses the improved output.
+
 The Desktop entry uses a machine-wide `Global\\CodexSharedDesktop_SingleLaunch` mutex around the ChatGPT.exe process check, shared-stack start/hot-attach, and Desktop launch verification. If any Desktop is already running, the launcher exits with code 20 without stopping it or the shared backend. With a healthy shared stack but no Desktop, the launcher hot-attaches and opens one Desktop; with neither running, it starts the stack and then the Desktop. Existing Desktop with an unhealthy/absent stack is **not** silently reconfigured or restarted.
 
 Closing Desktop leaves the independently started 45789/45790 stack alive for AOI and future mobile clients. Explicit owner-only shared-stop remains necessary to stop those processes; the launcher does not detect client idleness or automatically stop them. This mutex coordinates this project's and CodexMobileUI's launchers, not arbitrary external Desktop launches. Actual packaged Desktop connection and two-launcher race behavior still need live testing.
