@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Bridge Feishu CLI message events to Codex CLI sessions.",
+  "description": "Bridge Feishu CLI events to the shared Codex App Server.",
   "scripts": {
     "start": "node src/service-control.js launch",
     "start:foreground": "node src/service-control.js start",

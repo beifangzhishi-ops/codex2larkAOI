@@ -11,7 +11,7 @@ export async function ensureAoiRunning({
   isRunning = isProcessRunning,
   launch = launchService,
 } = {}) {
-  // A startup task must never accidentally spawn a separate stdio App Server.
+  // Startup requires the shared App Server endpoint in the project configuration.
   const env = readFileSync(join(root, ".env"), "utf8");
   const endpoint = env.match(/^\s*CODEX_APP_SERVER_WS_URL\s*=\s*(.*?)\s*$/m)?.[1]?.replace(/^["']|["']$/g, "");
   if (!endpoint || !/^wss?:\/\//i.test(endpoint)) {

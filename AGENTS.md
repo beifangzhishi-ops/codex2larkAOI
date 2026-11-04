@@ -50,6 +50,7 @@
 - 如果 Hermes 当前实现与本项目的 Codex App Server、`lark-cli` 架构或用户明确需求冲突，以本项目约束和用户需求为准，并说明差异。
 
 ## Shared-stack launcher ownership
+- AOI is strictly a WebSocket client of the shared Codex App Server. It never launches a local Codex backend, cannot choose an independent Codex executable and must preserve offline reconnect plus thread recovery. Desktop window presence is not required; the shared backend comes solely from a complete Codex Desktop runtime through the shared launcher.
 - Shared Codex backend kernel selection is Desktop-only: discover latest complete runtime from the Codex Desktop-managed cache and the installed Microsoft Store Codex package. Do not select a separate IDE/CLI runtime. Keep the fingerprinted independent running copy and never replace an active backend merely because Desktop updated. Apply the same source contract in CodexMobileUI and both AOI machines.
 - Desktop launcher diagnostics must stream shared-stack progress live, not buffer all child output before reporting errors. Clash TCP availability probes must have explicit short timeouts and no lingering console progress; preserve phase markers for runtime, backend and proxy startup.
 - Desktop is a single frontend per host. All AOI/CodexMobileUI Desktop launchers must use the same cross-checkout Desktop launch mutex spanning process detection, shared-stack attach/start, launch, and verification. An existing Desktop prevents a second launch; never stop an existing Desktop merely to attach another client.

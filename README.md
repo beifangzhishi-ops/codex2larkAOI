@@ -66,7 +66,6 @@ notepad .env
 - `CODEX_WORKDIR`：默认目录和目录名称搜索根目录；`/new 项目名或路径` 与 `/cd 项目名或路径` 可从当前目录或该根目录逐层匹配，也接受现有文件夹路径；
 - `FEISHU_ALLOWED_OPEN_IDS`：允许操作机器人的明确 `ou_xxx`，禁止 `*`；这些用户同时获得机器人根目录 `codex` 文件夹的编辑权限；
 - `LARKSUITE_CLI_CONFIG_DIR`：开发机器人独立的 lark-cli 配置目录；
-- `CODEX_COMMAND`：仅在未设置 `CODEX_APP_SERVER_WS_URL`、使用本地 stdio 模式时指定 `codex.exe`；WebSocket 共享模式下不启动或预检此程序。留空时，本地 stdio 模式自动发现 VS Code 扩展内核；
 - `CODEX_MODEL`：可选的部署级默认模型；留空时使用 Codex 默认模型，飞书聊天可通过 `/model` 独立覆盖；
 - `CODEX_THINK_MODEL`、`CODEX_THINK_EFFORT`：`/think` 快捷命令使用的思考模型和思考强度，默认 `gpt-5.6-sol` / `high`；可通过 `/thinkmodel` 修改项目 `.env`，模型需在 App Server `model/list` 中可用；
 - `CODEX_WORK_MODEL`、`CODEX_WORK_EFFORT`：`/work` 快捷命令使用的执行模型和思考强度，默认 `deepseek-v4-flash` / `max`；可通过 `/workmodel` 修改项目 `.env`，模型需在 App Server `model/list` 中可用；
@@ -100,6 +99,8 @@ npm run check
 也可从资源管理器双击 `start.cmd` 或 `stop.cmd`。停止脚本写入本项目 `.state\\stop-requested`，由桥接优雅关闭本项目事件消费者；它不调用共享的 `lark-cli event stop --all`，也不会停止其他项目实例。自动化停止使用 `.\stop.cmd --no-pause-on-error`。
 
 ## 共享 Codex app-server
+
+AOI 永远通过 WebSocket 连接共享 App Server（默认 `ws://127.0.0.1:45789`，可以在 `.env` 中配置 `CODEX_APP_SERVER_WS_URL`）。AOI 不会自行启动任何 Codex 内核。共享服务的内核只从 Codex Desktop 安装及其运行时缓存选取，独立运行；Codex Desktop 窗口关闭也不会终止共享服务。共享服务尚未启动时，AOI 仍可先接收飞书事件并在后台等待连接。
 
 共享 Codex app-server 让桌面端和飞书桥接连接同一个 App Server 实例，避免新版内核的线程写入锁冲突（`already has an active writer`），并让桌面端实时看到飞书会话的消息流。
 

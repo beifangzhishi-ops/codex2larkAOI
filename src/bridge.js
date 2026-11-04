@@ -1812,31 +1812,6 @@ export function createConsumerReadiness(eventKeys) {
   };
 }
 
-export function resolveCodexCommand(env = process.env, { platform = process.platform } = {}) {
-  const configured = String(env.CODEX_COMMAND || "").trim();
-  if (configured) return configured;
-  if (platform !== "win32") return "codex";
-
-  const home = String(env.USERPROFILE || env.HOME || "").trim();
-  if (home) {
-    for (const root of [".vscode", ".vscode-insiders"]) {
-      const extensions = resolve(home, root, "extensions");
-      try {
-        const candidates = readdirSync(extensions, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && /^openai\.chatgpt-.*-win32-x64$/i.test(entry.name))
-          .map((entry) => resolve(extensions, entry.name, "bin", "windows-x86_64", "codex.exe"))
-          .filter((entry) => existsSync(entry))
-          .sort()
-          .reverse();
-        if (candidates[0]) return candidates[0];
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-    }
-  }
-  return "codex";
-}
-
 function commandSpec(name, args) {
   if (process.platform === "win32" && name === "lark-cli") {
     const entry = resolve(process.env.APPDATA || "", "npm", "node_modules", "@larksuite", "cli", "scripts", "run.js");
@@ -1971,8 +1946,7 @@ export function buildConfig(env) {
     rootDir,
     allowGroups: String(env.FEISHU_ALLOW_GROUPS).toLowerCase() === "true",
     reactions: !["false", "0", "no"].includes(String(env.FEISHU_REACTIONS ?? "true").trim().toLowerCase()),
-    codexCommand: resolveCodexCommand(env),
-    appServerWebSocketUrl: String(env.CODEX_APP_SERVER_WS_URL ?? "").trim(),
+    appServerWebSocketUrl: String(env.CODEX_APP_SERVER_WS_URL || "ws://127.0.0.1:45789").trim(),
     model: env.CODEX_MODEL?.trim() || "",
     thinkModel: String(env.CODEX_THINK_MODEL ?? "").trim() || DEFAULT_THINK_MODEL,
     thinkEffort: String(env.CODEX_THINK_EFFORT ?? "").trim() || DEFAULT_THINK_EFFORT,
@@ -1990,7 +1964,6 @@ export function buildConfig(env) {
 }
 
 async function preflight(config) {
-  if (!config.appServerWebSocketUrl) await runCommand(config.codexCommand, ["app-server", "--help"]);
   await runCommand("lark-cli", ["event", "schema", "card.action.trigger"]);
   const { stdout } = await runCommand("lark-cli", ["auth", "status"]);
   const status = JSON.parse(stdout);
@@ -3162,8 +3135,6 @@ export class BridgeRuntime {
     this.state = state;
     this.config = config;
     this.client = client || new CodexAppServer({
-      cwd: ROOT,
-      command: config.codexCommand,
       websocketUrl: config.appServerWebSocketUrl,
     });
     Object.assign(this, { persist: () => save(this.state), reply, card, updateCard, fileDelivery: deliverFiles,
@@ -3216,18 +3187,12 @@ export class BridgeRuntime {
   }
 
   async start() {
-    if (this.config.appServerWebSocketUrl) {
-      // Feishu must come online even when the user has not started shared
-      // Codex Desktop yet. The client owns the persistent reconnect loop.
-      void this.client.start().then(
-        () => this.#onSharedCodexConnected(),
-        (error) => console.warn(`[bridge] shared Codex offline; waiting for reconnect: ${error.message}`),
-      ).catch((error) => console.error(`[bridge] shared Codex recovery failed: ${error.message}`));
-      return;
-    }
-    await this.client.start();
-    await this.#subscribeBoundThreads();
-    await this.deliveries.start();
+    // Feishu stays online while the independently owned shared backend is
+    // offline. The WebSocket client retries and restores subscriptions.
+    void this.client.start().then(
+      () => this.#onSharedCodexConnected(),
+      (error) => console.warn(`[bridge] shared Codex offline; waiting for reconnect: ${error.message}`),
+    ).catch((error) => console.error(`[bridge] shared Codex recovery failed: ${error.message}`));
   }
 
   async #onSharedCodexConnected() {
@@ -5884,8 +5849,7 @@ export async function main() {
   const runtime = new BridgeRuntime(state, config);
   await runtime.start();
   console.log(`[bridge] root=${config.rootDir}`);
-  if (!config.appServerWebSocketUrl) console.log(`[bridge] codex=${config.codexCommand}`);
-  console.log(`[bridge] app-server=${config.appServerWebSocketUrl ? `websocket:${config.appServerWebSocketUrl}` : "stdio"}`);
+  console.log(`[bridge] app-server=websocket:${config.appServerWebSocketUrl}`);
   console.log(`[bridge] allowed_users=${config.allowedIds.size} full_read=true approval=${config.defaultApprovalMode} sandbox=workspace-write`);
   await startConsumer(state, config, runtime);
 }

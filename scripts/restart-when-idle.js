@@ -70,9 +70,8 @@ export async function main() {
   const oldPid = getPid();
   if (!oldPid) throw new Error("AOI 未运行，不执行延后重启。");
   const config = buildConfig(parseDotEnv(readFileSync(resolve(ROOT, ".env"), "utf8")));
-  const client = new CodexAppServer({ cwd: ROOT, command: config.codexCommand, websocketUrl: config.appServerWebSocketUrl });
+  const client = new CodexAppServer({ websocketUrl: config.appServerWebSocketUrl });
   try {
-    if (!config.appServerWebSocketUrl) throw new Error("空闲检查仅适用于共享 WebSocket App Server。");
     await client.start();
     await waitForIdle({ expectedPid: oldPid, getPid,
       getThreads: () => [...new Set(Object.values(JSON.parse(readFileSync(resolve(stateDir, "sessions.json"), "utf8")).sessions || {}))],

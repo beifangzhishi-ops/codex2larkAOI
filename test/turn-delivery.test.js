@@ -336,6 +336,7 @@ test("首次升级订阅旧桥接运行轮次，接住重启后的最终事件",
     ? { thread: { id: "thread", turns: [{ id: "turn", status: "inProgress" }] } }
     : original(method, params);
   await f.runtime.start();
+  await settle();
   assert.equal(f.runtime.desktopMirrors.get("thread")?.turnId, "turn");
   f.runtime.stop();
 });

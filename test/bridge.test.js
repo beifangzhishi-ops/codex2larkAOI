@@ -107,7 +107,6 @@ import {
   registerPendingCompaction,
   removeLocalImageMarkdown,
   resumeThreadStatusLabel,
-  resolveCodexCommand,
   resolveModelSelection,
   resolveQuickModelSelection,
   resolveTitleFallbackAfterFailures,
@@ -145,10 +144,20 @@ import {
   stopService,
   waitForBackgroundStart,
 } from "../src/service-control.js";
-import { CodexAppServer } from "../src/codex-app-server.js";
 
 test("parseDotEnv reads simple and quoted values", () => {
   assert.deepEqual(parseDotEnv("A=1\nB=\"two words\"\n# ignored\n"), { A: "1", B: "two words" });
+});
+
+test("AOI config always connects to the shared App Server instead of launching a kernel", () => {
+  const config = buildConfig({ FEISHU_ALLOWED_OPEN_IDS: "ou_test", CODEX_WORKDIR: process.cwd() });
+  assert.equal(config.appServerWebSocketUrl, "ws://127.0.0.1:45789");
+  const remote = buildConfig({
+    FEISHU_ALLOWED_OPEN_IDS: "ou_test",
+    CODEX_WORKDIR: process.cwd(),
+    CODEX_APP_SERVER_WS_URL: "wss://example.invalid/codex",
+  });
+  assert.equal(remote.appServerWebSocketUrl, "wss://example.invalid/codex");
 });
 
 test("updateDotEnvText changes only requested model preset values and preserves comments", () => {
@@ -528,30 +537,6 @@ test("consumer startup waits for both event consumers", async () => {
   assert.equal(readiness.isReady(), true);
 });
 
-test("stopping App Server rejects active requests and emits one close event", async () => {
-  const client = new CodexAppServer({ requestTimeoutMs: 60_000 });
-  let stdinEnded = false;
-  let closeCount = 0;
-  client.child = {
-    stdin: {
-      writable: true,
-      write: () => true,
-      end: () => { stdinEnded = true; },
-    },
-    kill: () => {},
-  };
-  client.on("closed", () => { closeCount += 1; });
-  const request = client.request("thread/read", { threadId: "thr_active" });
-  await new Promise((resolvePromise) => setImmediate(resolvePromise));
-  assert.equal(client.pending.size, 1);
-  client.stop();
-  await assert.rejects(request, /app-server stopped/);
-  assert.equal(stdinEnded, true);
-  assert.equal(client.pending.size, 0);
-  assert.equal(client.child, null);
-  assert.equal(closeCount, 1);
-});
-
 test("thread task queues serialize one thread, run different threads concurrently, and clear only old pending tasks", async () => {
   const deferred = () => {
     let resolvePromise;
@@ -788,21 +773,6 @@ test("service control requires a project env file", () => {
     assert.doesNotThrow(() => requireEnvFile(directory));
   } finally {
     rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("Codex command uses an explicit path or discovers the VS Code extension binary", () => {
-  const home = mkdtempSync(join(tmpdir(), "codex2lark-codex-"));
-  const discovered = join(home, ".vscode", "extensions", "openai.chatgpt-99-win32-x64",
-    "bin", "windows-x86_64", "codex.exe");
-  try {
-    mkdirSync(dirname(discovered), { recursive: true });
-    writeFileSync(discovered, "binary");
-    assert.equal(resolveCodexCommand({ USERPROFILE: home }, { platform: "win32" }), discovered);
-    assert.equal(resolveCodexCommand({ CODEX_COMMAND: "C:\\tools\\codex.exe" }, { platform: "win32" }),
-      "C:\\tools\\codex.exe");
-  } finally {
-    rmSync(home, { recursive: true, force: true });
   }
 });
 

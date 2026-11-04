@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { CodexAppServer } from "../src/codex-app-server.js";
+
+test("AOI App Server transport cannot launch its own Codex process", () => {
+  const code = readFileSync(new URL("../src/codex-app-server.js", import.meta.url), "utf8");
+  assert.match(code, /await this\.#connectAndInitialize\(\)/);
+  assert.doesNotMatch(code, /node:child_process|\bspawn\s*\(/);
+});
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -82,6 +89,12 @@ function sleep(ms = 0) {
 
 const originalWebSocket = globalThis.WebSocket;
 
+test("Codex client only accepts a shared WebSocket transport", () => {
+  assert.throws(() => new CodexAppServer({ websocketUrl: "" }), /WebSocket/);
+  assert.throws(() => new CodexAppServer({ websocketUrl: "http://127.0.0.1:45789" }), /WebSocket/);
+  assert.equal(new CodexAppServer().websocketUrl, "ws://127.0.0.1:45789");
+});
+
 test.beforeEach(() => {
   FakeWebSocket.reset();
   globalThis.WebSocket = FakeWebSocket;
@@ -89,6 +102,23 @@ test.beforeEach(() => {
 
 test.after(() => {
   globalThis.WebSocket = originalWebSocket;
+});
+
+test("closing AOI rejects pending requests without shutting down shared App Server", async () => {
+  const client = new CodexAppServer({ requestTimeoutMs: 60_000 });
+  let closed = 0;
+  client.on("closed", () => { closed += 1; });
+  await client.start();
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.send = (raw) => { socket.sent.push(JSON.parse(raw)); };
+  const pendingRequest = client.request("thread/read", { threadId: "thr_active" });
+  await sleep(0);
+  assert.equal(client.pending.size, 1);
+  client.stop();
+  await assert.rejects(pendingRequest, /app-server stopped/);
+  assert.equal(client.pending.size, 0);
+  assert.equal(closed, 1);
+  assert.equal(socket.readyState, FakeWebSocket.CLOSED);
 });
 
 test("unexpected websocket close reconnects and replays thread/resume subscriptions", async () => {

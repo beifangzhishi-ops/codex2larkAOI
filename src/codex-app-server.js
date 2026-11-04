@@ -1,25 +1,20 @@
-import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import readline from "node:readline";
 
 const DEFAULT_RECONNECT_DELAYS_MS = Object.freeze([250, 500, 1_000, 2_000, 4_000]);
 const DEFAULT_RECONNECT_INTERVAL_MS = 10_000;
 
 export class CodexAppServer extends EventEmitter {
   constructor({
-    cwd,
-    command = "codex",
-    args = [],
-    websocketUrl = "",
+    websocketUrl = "ws://127.0.0.1:45789",
     requestTimeoutMs = 60_000,
     reconnectDelaysMs = DEFAULT_RECONNECT_DELAYS_MS,
     reconnectIntervalMs = DEFAULT_RECONNECT_INTERVAL_MS,
   } = {}) {
     super();
-    this.cwd = cwd;
-    this.command = command;
-    this.args = args;
     this.websocketUrl = String(websocketUrl || "").trim();
+    if (!/^wss?:\/\//i.test(this.websocketUrl)) {
+      throw new Error("Codex App Server 必须配置有效的 WebSocket 地址");
+    }
     this.requestTimeoutMs = requestTimeoutMs;
     this.reconnectDelaysMs = Array.isArray(reconnectDelaysMs) && reconnectDelaysMs.length
       ? reconnectDelaysMs.map((value) => Math.max(0, Number(value) || 0))
@@ -27,7 +22,6 @@ export class CodexAppServer extends EventEmitter {
     this.reconnectIntervalMs = Math.max(1, Number(reconnectIntervalMs) || DEFAULT_RECONNECT_INTERVAL_MS);
     this.nextId = 1;
     this.pending = new Map();
-    this.child = null;
     this.ws = null;
     this.startPromise = null;
     this.reconnectPromise = null;
@@ -54,9 +48,8 @@ export class CodexAppServer extends EventEmitter {
     try {
       await this.startPromise;
     } catch (error) {
-      // In shared WebSocket mode AOI never launches its own backend. Keep trying
-      // even when the initial connection fails, so AOI can run before Desktop.
-      if (this.websocketUrl && !this.stopping) this.#ensureReconnect(error);
+      // Keep retrying while the independently owned shared backend is offline.
+      if (!this.stopping) this.#ensureReconnect(error);
       throw error;
     } finally {
       this.startPromise = null;
@@ -64,12 +57,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async #start() {
-    if (this.websocketUrl) {
-      await this.#connectAndInitialize();
-      return;
-    }
-    await this.#startChild();
-    await this.#initialize();
+    await this.#connectAndInitialize();
   }
 
   async #initialize() {
@@ -82,23 +70,6 @@ export class CodexAppServer extends EventEmitter {
       capabilities: { experimentalApi: true },
     });
     this.notify("initialized", {});
-  }
-
-  async #startChild() {
-    const child = spawn(this.command, ["app-server", ...this.args], {
-      cwd: this.cwd,
-      env: process.env,
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    this.child = child;
-    readline.createInterface({ input: child.stdout }).on("line", (line) => this.#onLine(line));
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString("utf8").trim();
-      if (text && !text.includes("failed to clean up stale arg0")) this.emit("stderr", text);
-    });
-    child.once("error", (error) => this.#onClose(child, error));
-    child.once("close", (code) => this.#onClose(child, new Error(`codex app-server exited ${code}`)));
   }
 
   async #connectAndInitialize() {
@@ -172,7 +143,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async request(method, params = {}, options = {}) {
-    if (this.websocketUrl && this.reconnectPromise && !this.#canWrite()) {
+    if (this.reconnectPromise && !this.#canWrite()) {
       throw new Error("共享 Codex 尚未连接，AOI 正在等待自动重连");
     }
     await this.start();
@@ -350,11 +321,8 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #canWrite() {
-    if (this.ws) {
-      const OPEN = globalThis.WebSocket?.OPEN ?? 1;
-      return this.ws.readyState === OPEN;
-    }
-    return Boolean(this.child?.stdin?.writable);
+    const OPEN = globalThis.WebSocket?.OPEN ?? 1;
+    return Boolean(this.ws && this.ws.readyState === OPEN);
   }
 
   notify(method, params = {}) {
@@ -373,10 +341,8 @@ export class CodexAppServer extends EventEmitter {
     this.stopping = true;
     this.cancelReconnectWait?.();
     const ws = this.ws;
-    const child = this.child;
-    const hadTransport = Boolean(ws || child || this.reconnectPromise || this.startPromise);
+    const hadTransport = Boolean(ws || this.reconnectPromise || this.startPromise);
     this.ws = null;
-    this.child = null;
 
     const error = new Error("codex app-server stopped");
     this.#rejectPending(error);
@@ -396,24 +362,11 @@ export class CodexAppServer extends EventEmitter {
       } catch { /* ignore */ }
       return;
     }
-
-    if (!child) return;
-    try { child.stdin.end(); } catch { /* process already closed */ }
-    setTimeout(() => child.kill(), 2000).unref();
   }
 
   #write(message) {
-    if (this.ws) {
-      const OPEN = globalThis.WebSocket?.OPEN ?? 1;
-      if (this.ws.readyState !== OPEN) {
-        throw new Error("codex app-server is not running");
-      }
-      this.ws.send(JSON.stringify(message));
-      return;
-    }
-
-    if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    if (!this.#canWrite()) throw new Error("codex app-server is not running");
+    this.ws.send(JSON.stringify(message));
   }
 
   #onLine(line) {
@@ -469,7 +422,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   #ensureReconnect(initialError) {
-    if (!this.websocketUrl || this.stopping || this.reconnectPromise) {
+    if (this.stopping || this.reconnectPromise) {
       return this.reconnectPromise;
     }
 
@@ -537,14 +490,5 @@ export class CodexAppServer extends EventEmitter {
         }
       }
     }
-
-  }
-
-  #onClose(child, error) {
-    if (this.child !== child && this.ws !== child) return;
-    this.ws = null;
-    this.child = null;
-    this.#rejectPending(error);
-    this.emit("closed", error);
   }
 }
